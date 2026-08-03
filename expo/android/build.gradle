@@ -1,0 +1,159 @@
+import groovy.json.JsonSlurper
+import javax.inject.Inject
+import org.gradle.process.ExecOperations
+
+abstract class BundleDropCommandExecutor {
+  @Inject
+  abstract ExecOperations getExecOperations()
+
+  void execute(File workingDirectory, String executable, List<?> arguments) {
+    execOperations.exec { spec ->
+      spec.workingDir workingDirectory
+      spec.executable executable
+      spec.args arguments
+    }.assertNormalExitValue()
+  }
+}
+
+buildscript {
+  repositories {
+    google()
+    mavenCentral()
+  }
+}
+
+apply plugin: "com.android.library"
+apply plugin: "expo-module-gradle-plugin"
+
+def packageJson = new JsonSlurper().parseText(file("../../package.json").text)
+def bundleDropCoreDirectory = file("../../android").canonicalFile
+def bundleDropCoreProjects = rootProject.allprojects.findAll { candidate ->
+  candidate.projectDir.canonicalFile == bundleDropCoreDirectory
+}
+
+if (bundleDropCoreProjects.size() != 1) {
+  throw new GradleException(
+    "Bundle Drop's Expo adapter requires exactly one core Android project autolinked from ${bundleDropCoreDirectory}; " +
+      "found ${bundleDropCoreProjects.size()}. " +
+      "Verify react-native.config.js is present in the installed package and rerun Expo prebuild."
+  )
+}
+def bundleDropCoreProject = bundleDropCoreProjects.first()
+
+group = "com.bundledrop"
+version = packageJson.nativeVersion ?: packageJson.version
+
+android {
+  namespace "com.bundledrop.expo"
+
+  defaultConfig {
+    minSdkVersion 24
+    versionName version.toString()
+  }
+}
+
+dependencies {
+  implementation project(path: bundleDropCoreProject.path)
+  implementation "com.facebook.react:react-android"
+}
+
+def bundleDropReceiptWriter = file("../../lib/CLI/scripts/expo/write-build-receipt.js").canonicalFile
+def bundleDropExpoProjectRoot = rootProject.projectDir.parentFile.canonicalFile
+
+def bundleDropPackagedArtifacts = { Task task ->
+  def artifacts = []
+  task.outputs.files.files.each { File output ->
+    if (output.isFile() && (output.name.endsWith(".apk") || output.name.endsWith(".aab"))) {
+      artifacts.add(output.canonicalFile)
+    } else if (output.isDirectory()) {
+      output.eachFileRecurse { File candidate ->
+        if (candidate.isFile() && (candidate.name.endsWith(".apk") || candidate.name.endsWith(".aab"))) {
+          artifacts.add(candidate.canonicalFile)
+        }
+      }
+    }
+  }
+  return artifacts.unique { it.path }.sort { left, right -> left.path <=> right.path }
+}
+
+def bundleDropVariantForTask = { applicationProject, Task task ->
+  def taskName = task.name.toLowerCase()
+  def matchingVariants = applicationProject.android.applicationVariants.findAll { variant ->
+    taskName.contains(variant.name.toLowerCase())
+  }.sort { left, right -> right.name.length() <=> left.name.length() }
+  if (matchingVariants.isEmpty()) {
+    throw new GradleException(
+      "Bundle Drop could not map ${task.name} to an Android application variant."
+    )
+  }
+  return matchingVariants.first()
+}
+
+def bundleDropVariantIdentity = { variant, File artifact = null ->
+  def matchingOutputs = artifact == null ? [] : variant.outputs.findAll { output ->
+    output.outputFileName == artifact.name
+  }
+  def output
+  if (matchingOutputs.size() == 1) {
+    output = matchingOutputs.first()
+  } else if (variant.outputs.size() == 1) {
+    output = variant.outputs.first()
+  } else {
+    def outputLabel = artifact == null ? variant.name : artifact.name
+    throw new GradleException(
+      "Bundle Drop could not map ${outputLabel} to an exact Android variant output."
+    )
+  }
+  def appVersion = output.versionNameOverride ?: variant.versionName
+  def nativeBuildVersion = output.versionCodeOverride ?: output.versionCode ?: variant.versionCode
+  if (appVersion == null || nativeBuildVersion == null) {
+    throw new GradleException(
+      "Bundle Drop could not resolve the packaged Android versionName/versionCode."
+    )
+  }
+  return [appVersion: appVersion.toString(), nativeBuildVersion: nativeBuildVersion.toString()]
+}
+
+// This module is Expo-only. Attach proof after Android's application package/bundle task
+// succeeds, when an exact APK/AAB exists; never infer native success from Metro or Gradle env.
+rootProject.gradle.projectsEvaluated {
+  rootProject.allprojects { applicationProject ->
+    applicationProject.plugins.withId("com.android.application") {
+      def bundleDropCommandExecutor = applicationProject.objects.newInstance(
+        BundleDropCommandExecutor
+      )
+      // AGP does not expose a safe post-package callback. Keep this narrow legacy
+      // hook only for signed APK/AAB proof; candidate generation is owned by the
+      // app-scoped Android Components plugin declared in expo-module.config.json.
+      applicationProject.tasks.configureEach { Task task ->
+        if (task.name ==~ /(?i)(package|bundle).*release/) {
+          def variant = bundleDropVariantForTask(applicationProject, task)
+          task.doLast {
+            def artifacts = bundleDropPackagedArtifacts(task)
+            if (!artifacts.isEmpty()) {
+              if (!bundleDropReceiptWriter.isFile()) {
+                throw new GradleException(
+                  "Bundle Drop receipt writer is missing from the installed package: ${bundleDropReceiptWriter}"
+                )
+              }
+              // Split APKs are separately signed outputs. Use the lexically first exact
+              // artifact so the proof is deterministic and can be re-hashed at upload.
+              def artifact = artifacts.first()
+              def nodeBinary = System.getenv("NODE_BINARY") ?: "node"
+              def packagedIdentity = bundleDropVariantIdentity(variant, artifact)
+              bundleDropCommandExecutor.execute(applicationProject.projectDir, nodeBinary, [
+                  bundleDropReceiptWriter.path,
+                  "--project-root", bundleDropExpoProjectRoot.path,
+                  "--platform", "android",
+                  "--artifact", artifact.path,
+                  "--android-sdk", applicationProject.android.sdkDirectory.canonicalPath,
+                  "--app-version", packagedIdentity.appVersion,
+                  "--native-build-version", packagedIdentity.nativeBuildVersion
+              ])
+            }
+          }
+        }
+      }
+    }
+  }
+}

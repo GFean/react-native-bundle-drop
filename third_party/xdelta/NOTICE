@@ -1,0 +1,7 @@
+Bundle Drop includes xdelta source code from:
+
+  https://github.com/jmacd/xdelta
+
+The vendored source was imported from branch `release3_1_apl` at commit
+7508fd2a823443b1f0173ca361620f21d62a7d37 and is licensed under the
+Apache License, Version 2.0.

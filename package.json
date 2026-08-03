@@ -1,0 +1,184 @@
+{
+  "name": "@gfean/react-native-bundle-drop",
+  "version": "0.4.5",
+  "nativeVersion": "0.4.5",
+  "description": "Over-the-air updates for Expo and bare React Native apps, with channels, staged rollouts, patch delivery, and rollback.",
+  "main": "lib/index.js",
+  "types": "lib/index.d.ts",
+  "author": {
+    "name": "George Fean",
+    "url": "https://github.com/GFean"
+  },
+  "license": "ISC",
+  "homepage": "https://bundledrop.app",
+  "bugs": {
+    "url": "https://github.com/GFean/react-native-bundle-drop/issues"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/GFean/react-native-bundle-drop.git"
+  },
+  "exports": {
+    ".": {
+      "types": "./lib/index.d.ts",
+      "default": "./lib/index.js"
+    },
+    "./metro": {
+      "types": "./lib/metro.d.ts",
+      "default": "./lib/metro.js"
+    },
+    "./app.plugin.js": "./app.plugin.js",
+    "./package.json": "./package.json"
+  },
+  "sideEffects": [
+    "./lib/bootstrap.js",
+    "./lib/index.js"
+  ],
+  "scripts": {
+    "clean": "rimraf lib dist",
+    "build": "npm run clean && tsc -p tsconfig.build.json && node scripts/make-cli-executable.js",
+    "test": "jest --runInBand",
+    "test:coverage": "jest --runInBand --coverage",
+    "coverage:check": "node scripts/check-coverage-thresholds.cjs",
+    "coverage:gate": "yarn test:coverage && yarn coverage:check",
+    "test:android": "node scripts/run-android-tests.cjs",
+    "test:android:device": "node scripts/run-android-instrumented-tests.cjs",
+    "test:ios": "node scripts/run-ios-tests.cjs",
+    "test:expo:plugin": "node --test plugin/__tests__/*.test.js",
+    "package:check": "node scripts/check-package-contents.cjs",
+    "audit:production": "yarn npm audit --environment production --recursive --severity high",
+    "verify:quick": "yarn build && yarn coverage:gate && yarn test:expo:plugin && yarn package:check",
+    "verify:native": "yarn test:android && yarn test:ios",
+    "verify:release": "yarn verify:quick && yarn verify:native && yarn audit:production",
+    "prepack": "npm run build",
+    "prepublishOnly": "npm run verify:release"
+  },
+  "devDependencies": {
+    "@types/adm-zip": "^0.5.8",
+    "@types/jest": "^29.5.14",
+    "@types/node": "^24.10.1",
+    "@types/react": "^18.2.66",
+    "@types/react-native": "^0.73.0",
+    "expo-autolinking-sdk55": "npm:expo-modules-autolinking@55.0.8",
+    "expo-autolinking-sdk56": "npm:expo-modules-autolinking@56.0.9",
+    "expo-autolinking-sdk57": "npm:expo-modules-autolinking@57.0.2",
+    "jest": "^29.7.0",
+    "react": "^18.3.1",
+    "react-native": ">=0.71.0",
+    "react-test-renderer": "^18.3.1",
+    "rimraf": "^6.0.1",
+    "rn-cli-platform-android-078": "npm:@react-native-community/cli-platform-android@15.0.1",
+    "ts-jest": "^29.4.4",
+    "ts-node": "^10.9.2",
+    "typescript": "^5.8.3"
+  },
+  "bin": {
+    "bundle-drop": "lib/CLI/cli.js"
+  },
+  "files": [
+    "lib",
+    "android/src/main/**",
+    "android/build.gradle",
+    "android/gradle.properties",
+    "ios/*.{m,h,mm,swift}",
+    "third_party/xdelta/NOTICE",
+    "third_party/xdelta/PROVENANCE.md",
+    "third_party/xdelta/bundle_drop_xdelta.c",
+    "third_party/xdelta/bundle_drop_xdelta.h",
+    "third_party/xdelta/xdelta3/LICENSE",
+    "third_party/xdelta/xdelta3/config.h",
+    "third_party/xdelta/xdelta3/xdelta3-cfgs.h",
+    "third_party/xdelta/xdelta3/xdelta3-decode.h",
+    "third_party/xdelta/xdelta3/xdelta3-hash.h",
+    "third_party/xdelta/xdelta3/xdelta3-internal.h",
+    "third_party/xdelta/xdelta3/xdelta3-list.h",
+    "third_party/xdelta/xdelta3/xdelta3.c",
+    "third_party/xdelta/xdelta3/xdelta3.h",
+    "!third_party/xdelta/README.md",
+    "!third_party/xdelta/xdelta3/README.md",
+    "BundleDrop.podspec",
+    "BundleDropExpo.podspec",
+    "react-native.config.js",
+    "app.plugin.js",
+    "plugin/*.js",
+    "expo-module.config.json",
+    "expo/android/build.gradle",
+    "expo/android/src/main/**",
+    "expo/bundle-drop-expo-gradle-plugin/build.gradle",
+    "expo/bundle-drop-expo-gradle-plugin/src/main/**",
+    "expo/ios/Sources/**",
+    "README.md"
+  ],
+  "keywords": [
+    "react-native",
+    "expo",
+    "expo-sdk",
+    "expo-router",
+    "react-native-ota",
+    "ota",
+    "ota-updates",
+    "over-the-air",
+    "over-the-air-updates",
+    "codepush",
+    "codepush-alternative",
+    "react-native-code-push",
+    "app-center-codepush",
+    "eas-update-alternative",
+    "expo-updates-alternative",
+    "expo-eas-update-alternative",
+    "react-native-update",
+    "react-native-updates",
+    "hot-update",
+    "live-updates",
+    "instant-updates",
+    "hotfix",
+    "bundle-updates",
+    "js-bundle",
+    "delta-updates",
+    "patch-updates",
+    "staged-rollout",
+    "feature-rollout",
+    "rollback",
+    "react-native-deployment",
+    "react-native-release",
+    "react-native-ci",
+    "react-native-production",
+    "mobile-updates",
+    "app-updates",
+    "react-native-ios",
+    "react-native-android"
+  ],
+  "peerDependencies": {
+    "expo": ">=54.0.0 <58.0.0",
+    "react": ">=17.0.0",
+    "react-native": ">=0.71.0"
+  },
+  "peerDependenciesMeta": {
+    "expo": {
+      "optional": true
+    }
+  },
+  "engines": {
+    "node": ">=20.19.4"
+  },
+  "resolutions": {
+    "diff@^4.0.1": "4.0.4",
+    "@xmldom/xmldom@^0.8.8": "0.8.13"
+  },
+  "dependencies": {
+    "adm-zip": "^0.6.0",
+    "axios": "^1.19.0",
+    "chalk": "4",
+    "commander": "^7.2.0",
+    "diff": "^9.0.0",
+    "figures": "3",
+    "form-data": "^4.0.6",
+    "fs-extra": "^11.2.0",
+    "plist": "^3.1.0",
+    "prompts": "^2.4.2"
+  },
+  "publishConfig": {
+    "access": "public"
+  },
+  "packageManager": "yarn@3.8.3+sha512.154080e749d50325f4df31bc341cd5ea2dc2c3ca9b2cfb8591c831ddefc8025084d9500223f61f4f73086f6d9faa746cbbf39bb988b41dfc042907687e8e7d7a"
+}

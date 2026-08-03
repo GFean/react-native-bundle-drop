@@ -1,0 +1,76 @@
+node_modules/
+.yarn
+
+# Local configuration and credentials
+.env*
+!.env.example
+.npmrc
+.bundle-drop/
+.bundledrop-backup/
+**/.bundle-drop/
+**/.bundledrop-backup/
+
+# Editors and local workspaces
+.idea/
+.vscode/
+*.code-workspace
+*.sublime-project
+*.sublime-workspace
+
+# Build artifacts
+dist/
+lib/
+coverage/
+.build/
+.swiftpm/
+*.tgz
+*.tar
+*.tar.gz
+npm-debug.log*
+yarn-error.log*
+.DS_Store
+**/.DS_Store
+
+# Signing material and local release receipts
+*.keystore
+*.jks
+*.p12
+*.p8
+*.pem
+*.key
+*.cer
+*.der
+*.mobileprovision
+*.provisionprofile
+android/key.properties
+build-identity.json
+eas-build-receipt*.json
+release-receipt*.json
+receipts/
+.release-artifacts/
+
+# Yarn (keep required bits)
+.yarn/*
+!.yarn/releases
+!.yarn/plugins
+!.yarn/sdks
+!.yarn/versions
+
+# Native build outputs
+**/.gradle/
+**/.kotlin/
+android/.gradle
+android/.cxx/
+android/.settings/
+android/build/
+android/local.properties
+android/app/build/
+expo/android/build/
+expo/bundle-drop-expo-gradle-plugin/build/
+ios/Pods/
+ios/build/
+.expo/
+.expo-shared/
+DerivedData/
+*.xcuserstate
+xcuserdata/

@@ -1,0 +1,19 @@
+{
+  "platforms": ["apple", "android"],
+  "apple": {
+    "podspecPath": "BundleDropExpo.podspec",
+    "swiftModuleName": "BundleDropExpo",
+    "reactDelegateHandlers": ["BundleDropExpoReactDelegateHandler"]
+  },
+  "android": {
+    "name": "bundledrop-expo",
+    "path": "expo/android",
+    "gradlePlugins": [
+      {
+        "id": "bundle-drop-expo-gradle-plugin",
+        "group": "com.bundledrop",
+        "sourceDir": "expo/bundle-drop-expo-gradle-plugin"
+      }
+    ]
+  }
+}

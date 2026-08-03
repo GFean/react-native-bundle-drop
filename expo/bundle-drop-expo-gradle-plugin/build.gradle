@@ -1,0 +1,31 @@
+plugins {
+  id 'groovy-gradle-plugin'
+}
+
+group = 'com.bundledrop'
+
+repositories {
+  google()
+  mavenCentral()
+  gradlePluginPortal()
+}
+
+dependencies {
+  // Match Expo's own app-scoped Gradle plugins. These public APIs remain
+  // binary-compatible when the consuming Expo SDK supplies a newer AGP.
+  compileOnly 'com.android.tools.build:gradle:8.5.0'
+}
+
+java {
+  sourceCompatibility = JavaVersion.VERSION_11
+  targetCompatibility = JavaVersion.VERSION_11
+}
+
+gradlePlugin {
+  plugins {
+    bundleDropExpoPlugin {
+      id = 'bundle-drop-expo-gradle-plugin'
+      implementationClass = 'com.bundledrop.gradle.BundleDropExpoPlugin'
+    }
+  }
+}
