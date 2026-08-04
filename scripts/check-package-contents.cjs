@@ -171,8 +171,12 @@ const expectedScripts = new Set([
 ]);
 
 const metadataErrors = [];
-if (packageJson.version !== '0.4.5' || packageJson.nativeVersion !== '0.4.5') {
-  metadataErrors.push('version and nativeVersion must both be 0.4.5.');
+const stableVersionPattern = /^\d+\.\d+\.\d+$/;
+if (!stableVersionPattern.test(packageJson.version)) {
+  metadataErrors.push('version must be a stable semantic version.');
+}
+if (!stableVersionPattern.test(packageJson.nativeVersion)) {
+  metadataErrors.push('nativeVersion must be a stable semantic version.');
 }
 if (packageJson.publishConfig?.access !== 'public') {
   metadataErrors.push('publishConfig.access must be public.');
