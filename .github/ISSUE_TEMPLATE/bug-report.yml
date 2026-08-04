@@ -1,0 +1,129 @@
+name: Bug report
+description: Report a reproducible problem with the Bundle Drop package, CLI, or native runtime.
+title: "fix: "
+labels:
+  - "type: bug"
+  - "status: needs-triage"
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for helping improve Bundle Drop. Do not include credentials, signing material,
+        customer data, or private endpoints. Report security vulnerabilities through the
+        private security link instead of this form.
+
+  - type: input
+    id: package-version
+    attributes:
+      label: Bundle Drop version
+      description: The exact installed version of `@gfean/react-native-bundle-drop`.
+      placeholder: 0.4.5
+    validations:
+      required: true
+
+  - type: dropdown
+    id: project-type
+    attributes:
+      label: Project type
+      options:
+        - Expo
+        - Bare React Native
+    validations:
+      required: true
+
+  - type: dropdown
+    id: platform
+    attributes:
+      label: Platform
+      options:
+        - iOS
+        - Android
+        - Both
+    validations:
+      required: true
+
+  - type: textarea
+    id: environment
+    attributes:
+      label: Environment versions
+      description: Include React Native, Expo when applicable, Node.js, OS, and device or simulator versions.
+      placeholder: |
+        React Native: 0.78.3
+        Expo: 55.0.0
+        Node.js: 22.13.0
+        Device/OS: iPhone 16 / iOS 19.0
+    validations:
+      required: true
+
+  - type: input
+    id: runtime-version
+    attributes:
+      label: Runtime version
+      description: The configured runtime version for the affected platform.
+      placeholder: 1.0.0
+    validations:
+      required: true
+
+  - type: dropdown
+    id: update-policy
+    attributes:
+      label: Update policy
+      options:
+        - manual
+        - immediate
+        - on-next-launch
+    validations:
+      required: true
+
+  - type: textarea
+    id: reproduction
+    attributes:
+      label: Minimal reproduction
+      description: Link to a minimal repository or provide complete steps that reproduce the problem.
+      placeholder: Provide a repository URL or numbered reproduction steps.
+    validations:
+      required: true
+
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected behavior
+    validations:
+      required: true
+
+  - type: textarea
+    id: actual
+    attributes:
+      label: Actual behavior
+    validations:
+      required: true
+
+  - type: textarea
+    id: doctor
+    attributes:
+      label: Doctor output
+      description: Paste sanitized output from `npx bundle-drop doctor`.
+      render: shell
+    validations:
+      required: true
+
+  - type: textarea
+    id: logs
+    attributes:
+      label: Sanitized logs
+      description: Include relevant logs or state that no logs were emitted. Remove tokens, user data, and private URLs.
+      render: shell
+    validations:
+      required: true
+
+  - type: checkboxes
+    id: checks
+    attributes:
+      label: Submission checklist
+      options:
+        - label: I searched existing issues and Discussions for this problem.
+          required: true
+        - label: I reproduced this in a non-Debug Release build where OTA startup is enabled.
+          required: true
+        - label: I removed credentials, signing material, customer data, and private endpoints.
+          required: true
