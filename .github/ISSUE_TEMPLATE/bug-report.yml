@@ -28,6 +28,7 @@ body:
       options:
         - Expo
         - Bare React Native
+        - CLI / package tooling
     validations:
       required: true
 
@@ -39,6 +40,7 @@ body:
         - iOS
         - Android
         - Both
+        - Not applicable (CLI/package-only)
     validations:
       required: true
 
@@ -59,8 +61,8 @@ body:
     id: runtime-version
     attributes:
       label: Runtime version
-      description: The configured runtime version for the affected platform.
-      placeholder: 1.0.0
+      description: The configured runtime version for the affected platform, or `N/A` for CLI/package-only bugs.
+      placeholder: 1.0.0 or N/A
     validations:
       required: true
 
@@ -72,6 +74,7 @@ body:
         - manual
         - immediate
         - on-next-launch
+        - Not applicable (CLI/package-only)
     validations:
       required: true
 
@@ -123,7 +126,7 @@ body:
       options:
         - label: I searched existing issues and Discussions for this problem.
           required: true
-        - label: I reproduced this in a non-Debug Release build where OTA startup is enabled.
+        - label: For runtime/native bugs, I reproduced this in a non-Debug Release build where OTA startup is enabled; for CLI/package-only bugs, this does not apply.
           required: true
         - label: I removed credentials, signing material, customer data, and private endpoints.
           required: true
