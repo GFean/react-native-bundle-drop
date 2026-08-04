@@ -2,7 +2,6 @@ version: 2
 updates:
   - package-ecosystem: npm
     directory: /
-    target-branch: main
     schedule:
       interval: weekly
       day: monday
@@ -20,7 +19,12 @@ updates:
           - version-update:semver-major
       - dependency-name: react-native
     groups:
+      npm-security-updates:
+        applies-to: security-updates
+        patterns:
+          - "*"
       npm-minor-and-patch:
+        applies-to: version-updates
         patterns:
           - "*"
         update-types:
@@ -29,7 +33,6 @@ updates:
 
   - package-ecosystem: github-actions
     directory: /
-    target-branch: main
     schedule:
       interval: weekly
       day: monday
@@ -43,6 +46,11 @@ updates:
     commit-message:
       prefix: chore(deps)
     groups:
+      github-actions-security-updates:
+        applies-to: security-updates
+        patterns:
+          - "*"
       github-actions:
+        applies-to: version-updates
         patterns:
           - "*"
