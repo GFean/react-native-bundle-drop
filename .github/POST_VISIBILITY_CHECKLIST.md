@@ -9,7 +9,7 @@ Do not announce the repository until every applicable item passes.
 - [ ] Require the successful `CI / PR title`, `CI / JavaScript`, `CI / Android`, and `CI / iOS` contexts.
 - [ ] Require pull requests, resolved conversations, an up-to-date branch, and linear history.
 - [ ] Block force pushes and deletion of `main`.
-- [ ] Activate the `v*` tag rule after the initial `v0.4.5` tag exists.
+- [ ] Activate the `v*` tag rule after the initial `v0.4.6` tag exists.
 
 ## Security features
 
@@ -29,4 +29,4 @@ Do not require Dependency Review or CodeQL before the feature has produced a suc
 - [ ] Verify the README, website, topics, license, community files, badges, Discussions, and issue forms as an anonymous visitor.
 - [ ] Verify private security reporting without opening a public issue.
 - [ ] Verify fork pull requests receive bounded CI without access to repository secrets.
-- [ ] Verify the curated public history and immutable `v0.4.5` release remain intact.
+- [ ] Verify the curated public history and immutable `v0.4.6` release remain intact.
