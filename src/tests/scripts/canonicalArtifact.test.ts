@@ -434,6 +434,7 @@ describe('buildCanonicalArtifact', () => {
   });
 
   it('rejects case-insensitive collisions independently of host filesystem casing', () => {
+    fs.writeFileSync(path.join(assetsDir, 'Logo.png'), 'Logo');
     fs.writeFileSync(path.join(assetsDir, 'logo.png'), 'logo');
     const readdirSpy = jest.spyOn(fs, 'readdirSync').mockReturnValue(
       ['Logo.png', 'logo.png'] as unknown as ReturnType<typeof fs.readdirSync>,
