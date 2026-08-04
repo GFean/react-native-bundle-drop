@@ -443,54 +443,62 @@ describe('CLI/scripts/login-cli', () => {
       await invalidServer.close();
     }
 
+    let signalExchangeStarted!: () => void;
+    const exchangeStarted = new Promise<void>(resolve => {
+      signalExchangeStarted = resolve;
+    });
+    let releaseExchange!: () => void;
+    const exchangeRelease = new Promise<void>(resolve => {
+      releaseExchange = resolve;
+    });
+    mockAxiosNodePost.mockImplementation(async (url: string) => {
+      if (!url.endsWith('/auth/cli/exchange')) {
+        throw new Error(`Unexpected POST ${url}`);
+      }
+
+      signalExchangeStarted();
+      await exchangeRelease;
+      return {
+        data: {
+          token: 'auth-token',
+          email: 'jane@example.com',
+          firstName: 'Jane',
+          lastName: 'Doe',
+        },
+      };
+    });
+
     const concurrentServer = await startCallbackServer({ baseUrl: 'https://api.example.com' });
 
     try {
       const concurrentExchange = concurrentServer.waitForExchange().catch(error => {
         throw error;
       });
-      const url = new URL(concurrentServer.callbackUrl);
-      const slowResponse = new Promise<{ statusCode: number; body: string }>((resolve, reject) => {
-        const req = http.request(
-          {
-            agent: false,
-            hostname: url.hostname,
-            port: url.port,
-            path: url.pathname,
-            method: 'POST',
-            headers: {
-              'Content-Type': 'application/json',
-            },
-          },
-          res => {
-            let raw = '';
-            res.setEncoding('utf8');
-            res.on('data', chunk => {
-              raw += chunk;
-            });
-            res.on('end', () => resolve({ statusCode: res.statusCode || 0, body: raw }));
-          },
-        );
-        req.on('error', reject);
-        req.write('{"sessionId":"session-2",');
-
-        setTimeout(() => {
-          req.end('"state":"state-2","exchangeCode":"exchange-2"}');
-        }, 10);
+      const firstResponse = sendRequest(concurrentServer.callbackUrl, {
+        method: 'POST',
+        body: JSON.stringify({
+          sessionId: 'session-2',
+          state: 'state-2',
+          exchangeCode: 'exchange-2',
+        }),
       });
 
-      await new Promise(resolve => setTimeout(resolve, 1));
-      await expect(
-        sendRequest(concurrentServer.callbackUrl, {
-          method: 'POST',
-          body: JSON.stringify({
-            sessionId: 'session-3',
-            state: 'state-3',
-            exchangeCode: 'exchange-3',
+      await exchangeStarted;
+      try {
+        await expect(
+          sendRequest(concurrentServer.callbackUrl, {
+            method: 'POST',
+            body: JSON.stringify({
+              sessionId: 'session-3',
+              state: 'state-3',
+              exchangeCode: 'exchange-3',
+            }),
           }),
-        }),
-      ).resolves.toEqual(expect.objectContaining({ statusCode: 409 }));
-      await expect(slowResponse).resolves.toEqual(expect.objectContaining({ statusCode: 200 }));
+        ).resolves.toEqual(expect.objectContaining({ statusCode: 409 }));
+      } finally {
+        releaseExchange();
+      }
+      await expect(firstResponse).resolves.toEqual(expect.objectContaining({ statusCode: 200 }));
       await expect(concurrentExchange).resolves.toEqual(
         expect.objectContaining({ token: 'auth-token' }),
       );
