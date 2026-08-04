@@ -1,6 +1,7 @@
 # Bundle Drop
 
 [![npm version](https://img.shields.io/npm/v/%40gfean%2Freact-native-bundle-drop?color=2b7fff&label=npm)](https://www.npmjs.com/package/@gfean/react-native-bundle-drop)
+[![CI](https://github.com/GFean/react-native-bundle-drop/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/GFean/react-native-bundle-drop/actions/workflows/ci.yml)
 [![license](https://img.shields.io/badge/license-ISC-84cc16)](#license)
 [![website](https://img.shields.io/badge/website-bundledrop.app-2563eb)](https://bundledrop.app)
 [![docs](https://img.shields.io/badge/docs-bundledrop.app%2Fdocs-0f766e)](https://bundledrop.app/docs)

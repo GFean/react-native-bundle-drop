@@ -1,0 +1,38 @@
+name: Documentation request
+description: Report missing, unclear, or inaccurate Bundle Drop documentation.
+title: "docs: "
+labels:
+  - "type: docs"
+  - "status: needs-triage"
+body:
+  - type: input
+    id: location
+    attributes:
+      label: Documentation location
+      description: Link to the page or name the README section, command, or API reference.
+      placeholder: https://bundledrop.app/docs/...
+    validations:
+      required: true
+
+  - type: textarea
+    id: problem
+    attributes:
+      label: What is missing or unclear?
+    validations:
+      required: true
+
+  - type: textarea
+    id: proposed-improvement
+    attributes:
+      label: Proposed improvement
+      description: Describe the correction, example, or explanation that would resolve the problem.
+    validations:
+      required: true
+
+  - type: checkboxes
+    id: checks
+    attributes:
+      label: Submission checklist
+      options:
+        - label: I checked the current README and bundledrop.app documentation.
+          required: true

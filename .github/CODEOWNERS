@@ -1,0 +1,21 @@
+# Default ownership
+* @GFean
+
+# OTA lifecycle and bundle integrity
+/src/runtime/ @GFean
+/src/manager/ @GFean
+/src/install/ @GFean
+/src/manifest/ @GFean
+/src/patch-engine/ @GFean
+
+# Native integrations
+/android/ @GFean
+/ios/ @GFean
+/expo/ @GFean
+/plugin/ @GFean
+
+# CLI, upload, and release infrastructure
+/src/CLI/ @GFean
+/src/scripts/ @GFean
+/.github/workflows/ @GFean
+/package.json @GFean

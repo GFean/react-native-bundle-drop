@@ -1,0 +1,70 @@
+name: Feature request
+description: Propose an improvement to the public package, CLI, or native runtime.
+title: "feat: "
+labels:
+  - "type: feature"
+  - "status: needs-triage"
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Focused feature requests are welcome. Discuss architecture changes, new backend
+        contracts, and other large proposals in Discussions before implementation.
+
+  - type: textarea
+    id: use-case
+    attributes:
+      label: Use case
+      description: Describe the problem and who it affects without prescribing the solution first.
+    validations:
+      required: true
+
+  - type: textarea
+    id: proposed-behavior
+    attributes:
+      label: Proposed behavior
+      description: Explain the user-visible behavior or public interface you would like.
+    validations:
+      required: true
+
+  - type: dropdown
+    id: area
+    attributes:
+      label: Primary area
+      options:
+        - Runtime and update lifecycle
+        - Android
+        - iOS
+        - Expo integration
+        - CLI and project setup
+        - Bundle creation and upload
+        - Documentation
+        - Release and maintenance
+    validations:
+      required: true
+
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives considered
+      description: Describe current workarounds or other approaches you considered.
+    validations:
+      required: true
+
+  - type: textarea
+    id: compatibility
+    attributes:
+      label: Compatibility impact
+      description: Note any expected runtime, native, backend-contract, or breaking-change implications.
+    validations:
+      required: true
+
+  - type: checkboxes
+    id: checks
+    attributes:
+      label: Submission checklist
+      options:
+        - label: I searched existing issues and Discussions for this request.
+          required: true
+        - label: I understand that native changes require a new binary and runtime compatibility boundary.
+          required: true

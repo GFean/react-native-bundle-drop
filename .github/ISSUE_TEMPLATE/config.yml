@@ -1,0 +1,11 @@
+blank_issues_enabled: false
+contact_links:
+  - name: Bundle Drop documentation
+    url: https://bundledrop.app/docs
+    about: Read the installation, integration, runtime, and troubleshooting guides.
+  - name: Questions and troubleshooting
+    url: https://github.com/GFean/react-native-bundle-drop/discussions/categories/q-a
+    about: Ask usage and integration questions in GitHub Discussions.
+  - name: Report a security vulnerability
+    url: https://github.com/GFean/react-native-bundle-drop/security/advisories/new
+    about: Report suspected vulnerabilities privately. Never open a public security issue.
