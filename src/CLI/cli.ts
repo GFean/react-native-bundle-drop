@@ -7,6 +7,7 @@ import fs from 'fs';
 import os from 'os';
 import path from 'path';
 import upload from './scripts/upload-cli';
+import { runSightCommand } from './scripts/sight-cli';
 import { runPostInitPrompts } from './scripts/post-init';
 import type { ProjectType } from '../expo';
 import { buildBundleDropLogo } from './logo';
@@ -42,11 +43,39 @@ const DEFAULT_SERVER_URL = 'https://api.bundledrop.app';
 const DOCS_CLI_URL = 'https://bundledrop.app/docs/cli';
 const DOCS_UPLOADING_URL = 'https://bundledrop.app/docs/uploading';
 const DOCS_CI_CD_URL = 'https://bundledrop.app/docs/ci-cd';
-const DOCS_INSTALLATION_URL = 'https://bundledrop.app/docs/installation';
+const DOCS_MANUAL_SETUP_URL = 'https://bundledrop.app/docs/manual-setup';
 
-const setupErrorWithManualInstallation = (error: unknown) => {
+const setupErrorWithManualSetup = (error: unknown) => {
   const message = error instanceof Error ? error.message : String(error);
-  return new Error(`${message}\nManual installation: ${DOCS_INSTALLATION_URL}`);
+  return new Error(`${message}\nManual setup: ${DOCS_MANUAL_SETUP_URL}`);
+};
+
+type PendingProjectConfig = {
+  configPath: string;
+  content: string;
+};
+
+const runSetupWithManualFallback = async (params: {
+  options: Parameters<typeof runPostInitPrompts>[0];
+  pendingConfig?: PendingProjectConfig;
+  preservePendingConfig: boolean;
+}) => {
+  try {
+    await runPostInitPrompts(params.options);
+  } catch (error) {
+    if (
+      params.preservePendingConfig &&
+      params.pendingConfig &&
+      !fs.existsSync(params.pendingConfig.configPath)
+    ) {
+      await fs.promises.writeFile(
+        params.pendingConfig.configPath,
+        params.pendingConfig.content,
+        'utf8',
+      );
+    }
+    throw setupErrorWithManualSetup(error);
+  }
 };
 
 const getTokenPath = () => path.join(os.homedir(), '.bundle-drop', 'auth.json');
@@ -147,6 +176,7 @@ ${chalk.bold.cyan('Common Usage:')}
   ${chalk.gray('bundle-drop login')}
   ${chalk.gray('bundle-drop init')}
   ${chalk.gray('bundle-drop doctor')}
+  ${chalk.gray('bundle-drop sight')}
   ${chalk.gray('bundle-drop doctor --project-type bare --platform android')}
   ${chalk.gray('bundle-drop upload android --version 1.2.3 --channel develop')}
   ${chalk.gray('bundle-drop upload ios --plist-file ios/Info.plist --channel develop')}
@@ -156,6 +186,27 @@ ${chalk.gray('Docs →')} ${chalk.underline.gray(DOCS_CLI_URL)}
 ${chalk.gray('Uploading →')} ${chalk.underline.gray(DOCS_UPLOADING_URL)}
 ${chalk.gray('CI/CD →')} ${chalk.underline.gray(DOCS_CI_CD_URL)}\n`,
   );
+
+  program
+    .command('sight')
+    .option('--platform <platform>', 'Platform to analyze: ios or android')
+    .option('--project-type <type>', 'Force project type: expo or bare')
+    .option('--entry-file <path>', 'Override the React Native entry file')
+    .option('--no-open', 'Keep the generated files and do not open the browser')
+    .option('--keep', 'Keep generated files after the browser loads them')
+    .option('--output <path>', 'Generate persistent files in an empty directory')
+    .description('Generate a production bundle and inspect it locally in Bundle Drop Sight')
+    .addHelpText(
+      'after',
+      `
+${chalk.bold('Examples:')}
+  ${chalk.gray('bundle-drop sight')}
+  ${chalk.gray('bundle-drop sight --platform android')}
+  ${chalk.gray('bundle-drop sight --platform ios --keep')}
+  ${chalk.gray('bundle-drop sight --no-open --output ./sight-analysis')}
+`,
+    )
+    .action(runSightCommand);
 
   program
     .command('upload <platform>')
@@ -225,34 +276,34 @@ ${chalk.gray('CI/CD docs →')} ${chalk.underline.gray(DOCS_CI_CD_URL)}
       prebuild?: boolean;
       yes?: boolean;
     }) => {
-      try {
-        if (options.projectType && !['expo', 'bare'].includes(options.projectType)) {
-          throw new Error('--project-type must be expo or bare.');
-        }
-        if (options.token) {
-          const { detectProjectType } = require('../expo');
-          const projectType = detectProjectType({
-            projectRoot: process.cwd(),
-            explicitType: options.projectType,
-          });
-          const serverUrl = normalizeServerUrl(process.env.BUNDLE_DROP_SERVER_URL);
-          const tokenContext = await fetchFreshAuthContext({
-            serverUrl,
-            token: options.token,
-          });
-          const initConfigModule = require('../CLI/scripts/init-config');
-          const hadConfig = initConfigModule.hasExistingBundleDropConfig();
-          const configResult = await initConfigModule.initConfig({
-            serverUrl,
-            projects: tokenContext?.projects || [],
-            organizations: tokenContext?.organizations || [],
-            downloadApiKey: '',
-            authToken: options.token,
-            dryRun: true,
-            projectType,
-          });
+      if (options.projectType && !['expo', 'bare'].includes(options.projectType)) {
+        throw new Error('--project-type must be expo or bare.');
+      }
+      if (options.token) {
+        const { detectProjectType } = require('../expo');
+        const projectType = detectProjectType({
+          projectRoot: process.cwd(),
+          explicitType: options.projectType,
+        });
+        const serverUrl = normalizeServerUrl(process.env.BUNDLE_DROP_SERVER_URL);
+        const tokenContext = await fetchFreshAuthContext({
+          serverUrl,
+          token: options.token,
+        });
+        const initConfigModule = require('../CLI/scripts/init-config');
+        const hadConfig = initConfigModule.hasExistingBundleDropConfig();
+        const configResult = await initConfigModule.initConfig({
+          serverUrl,
+          projects: tokenContext?.projects || [],
+          organizations: tokenContext?.organizations || [],
+          downloadApiKey: '',
+          authToken: options.token,
+          dryRun: true,
+          projectType,
+        });
 
-          await runPostInitPrompts({
+        await runSetupWithManualFallback({
+          options: {
             ...options,
             projectType,
             ...(
@@ -268,62 +319,66 @@ ${chalk.gray('CI/CD docs →')} ${chalk.underline.gray(DOCS_CI_CD_URL)}
                   }
                 : {}
             ),
-          });
-          return;
-        }
-
-        const authState = readStoredAuthData();
-        if (!authState.exists) {
-          console.log(
-            'ℹ️ Not logged in. Please run `bundle-drop login` or use --token.\n' +
-              `CLI docs: ${DOCS_CLI_URL}\n` +
-              `CI/CD docs: ${DOCS_CI_CD_URL}`,
-          );
-          return;
-        }
-
-        if (authState.isInvalid || !authState.data) {
-          logInvalidAuthFile();
-          return;
-        }
-
-        const data = authState.data;
-        if (!data.token) {
-          logInvalidAuthFile();
-          return;
-        }
-
-        const { detectProjectType } = require('../expo');
-        const projectType = detectProjectType({
-          projectRoot: process.cwd(),
-          explicitType: options.projectType,
+          },
+          pendingConfig: configResult || undefined,
+          preservePendingConfig: !hadConfig && !options.dryRun,
         });
+        return;
+      }
 
-        const serverUrl = normalizeServerUrl(
-          data.serverUrl || data.baseUrl || process.env.BUNDLE_DROP_SERVER_URL
+      const authState = readStoredAuthData();
+      if (!authState.exists) {
+        console.log(
+          'ℹ️ Not logged in. Please run `bundle-drop login` or use --token.\n' +
+            `CLI docs: ${DOCS_CLI_URL}\n` +
+            `CI/CD docs: ${DOCS_CI_CD_URL}`,
         );
-        const freshContext = await fetchFreshAuthContext({
-          serverUrl,
-          token: data.token,
-        });
-        const initData = freshContext ? { ...data, ...freshContext } : data;
-        if (freshContext) {
-          writeStoredAuthData(authState.tokenPath, initData);
-        }
+        return;
+      }
 
-        const initConfigModule = require('../CLI/scripts/init-config');
-        const hadConfig = initConfigModule.hasExistingBundleDropConfig();
-        const configResult = await initConfigModule.initConfig({
-          serverUrl,
-          projects: initData.projects || [],
-          organizations: initData.organizations || [],
-          downloadApiKey: data.downloadApiKey || '',
-          authToken: data.token,
-          dryRun: true,
-          projectType,
-        });
+      if (authState.isInvalid || !authState.data) {
+        logInvalidAuthFile();
+        return;
+      }
 
-        await runPostInitPrompts({
+      const data = authState.data;
+      if (!data.token) {
+        logInvalidAuthFile();
+        return;
+      }
+
+      const { detectProjectType } = require('../expo');
+      const projectType = detectProjectType({
+        projectRoot: process.cwd(),
+        explicitType: options.projectType,
+      });
+
+      const serverUrl = normalizeServerUrl(
+        data.serverUrl || data.baseUrl || process.env.BUNDLE_DROP_SERVER_URL
+      );
+      const freshContext = await fetchFreshAuthContext({
+        serverUrl,
+        token: data.token,
+      });
+      const initData = freshContext ? { ...data, ...freshContext } : data;
+      if (freshContext) {
+        writeStoredAuthData(authState.tokenPath, initData);
+      }
+
+      const initConfigModule = require('../CLI/scripts/init-config');
+      const hadConfig = initConfigModule.hasExistingBundleDropConfig();
+      const configResult = await initConfigModule.initConfig({
+        serverUrl,
+        projects: initData.projects || [],
+        organizations: initData.organizations || [],
+        downloadApiKey: data.downloadApiKey || '',
+        authToken: data.token,
+        dryRun: true,
+        projectType,
+      });
+
+      await runSetupWithManualFallback({
+        options: {
           ...options,
           projectType,
           ...(
@@ -339,10 +394,10 @@ ${chalk.gray('CI/CD docs →')} ${chalk.underline.gray(DOCS_CI_CD_URL)}
                 }
               : {}
           ),
-        });
-      } catch (error) {
-        throw setupErrorWithManualInstallation(error);
-      }
+        },
+        pendingConfig: configResult || undefined,
+        preservePendingConfig: !hadConfig && !options.dryRun,
+      });
     });
 
   program

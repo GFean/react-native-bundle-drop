@@ -794,10 +794,13 @@ describe('CLI/scripts/login-cli', () => {
     );
     expect(consoleErrorSpy).toHaveBeenCalledWith(
       expect.stringContaining(
-        'Manual installation: https://bundledrop.app/docs/installation',
+        'Manual setup: https://bundledrop.app/docs/manual-setup',
       ),
     );
-    expect(fs.existsSync(configPath)).toBe(false);
+    expect(consoleErrorSpy).toHaveBeenCalledWith(
+      expect.stringContaining(`Project config retained at ${configPath}`),
+    );
+    expect(fs.readFileSync(configPath, 'utf8')).toBe('module.exports = {};\n');
     expect(process.exitCode).toBe(1);
   });
 

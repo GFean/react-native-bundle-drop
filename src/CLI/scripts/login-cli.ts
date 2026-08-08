@@ -55,7 +55,7 @@ type AuthFilePayload = {
 };
 
 const LOGIN_TIMEOUT_MS = 10 * 60 * 1000;
-const DOCS_INSTALLATION_URL = 'https://bundledrop.app/docs/installation';
+const DOCS_MANUAL_SETUP_URL = 'https://bundledrop.app/docs/manual-setup';
 
 export const getBaseUrl = () =>
   process.env.BUNDLE_DROP_SERVER_URL
@@ -414,9 +414,6 @@ const login = async () => {
     }
     await runPostInitPrompts({ projectType });
   } catch (error) {
-    if (createdConfigPath) {
-      await fs.remove(createdConfigPath);
-    }
     const message =
       axios.isAxiosError(error)
         ? (error.response?.data as { error?: string } | undefined)?.error || error.message
@@ -424,7 +421,10 @@ const login = async () => {
     const failureLabel = loginCompleted ? '❌ Setup failed after login:' : '❌ Login failed:';
     console.error(chalk.red(failureLabel), message);
     if (loginCompleted) {
-      console.error(chalk.gray(`Manual installation: ${DOCS_INSTALLATION_URL}`));
+      if (createdConfigPath) {
+        console.error(chalk.gray(`Project config retained at ${createdConfigPath}`));
+      }
+      console.error(chalk.gray(`Manual setup: ${DOCS_MANUAL_SETUP_URL}`));
     }
     process.exitCode = 1;
   } finally {
