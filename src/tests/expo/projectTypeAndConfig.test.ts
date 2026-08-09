@@ -211,7 +211,7 @@ describe('Expo project detection and project-local module loading', () => {
     }
 
     const config = fs.readFileSync(path.join(root, 'bundle.drop.config.js'), 'utf8');
-    expect(config).toContain("projectType: 'expo'");
+    expect(config).toContain('projectType: "expo"');
     expect(config).toContain("ios: '1.0.0'");
     expect(config).toContain("android: '1.0.0'");
     expect(config).not.toContain("runtimeVersion: { source: 'expo' }");

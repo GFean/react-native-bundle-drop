@@ -38,6 +38,7 @@ import {
 import { startLoadingStatus } from '../../utils/ui';
 
 const PACKAGE_NAME = '@gfean/react-native-bundle-drop';
+const DOCS_MANUAL_SETUP_URL = 'https://bundledrop.app/docs/manual-setup';
 const EXPO_RUNTIME_AUTHORITY_PATTERN =
   /runtimeVersion\s*:\s*\{\s*source\s*:\s*['"]expo['"]\s*\}/;
 
@@ -276,7 +277,15 @@ export async function initProjectConfigAi(options: InitProjectOptions = {}): Pro
   });
 
   if (plan.confidence === 'low') {
-    console.log(chalk.yellow('AI confidence is low. No files changed.'));
+    if (options.virtualConfig && !options.dryRun) {
+      const configPath = path.join(projectRoot, 'bundle.drop.config.js');
+      if (!fs.existsSync(configPath)) {
+        fs.writeFileSync(configPath, options.virtualConfig.content, 'utf8');
+        console.log(chalk.green(`Project config retained at ${configPath}`));
+      }
+    }
+    console.log(chalk.yellow('AI confidence is low. Native and Expo setup files were not changed.'));
+    console.log(chalk.gray(`Manual setup: ${DOCS_MANUAL_SETUP_URL}`));
     return;
   }
   if (projectType === 'expo' && scan.request.detected.expoUpdatesStatus === 'active') {

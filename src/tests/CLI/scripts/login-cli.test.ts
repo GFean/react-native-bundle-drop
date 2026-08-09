@@ -48,6 +48,7 @@ import login, {
 describe('CLI/scripts/login-cli', () => {
   const originalEnv = { ...process.env };
   const originalExitCode = process.exitCode;
+  const originalPlatform = Object.getOwnPropertyDescriptor(process, 'platform');
   let tempHome = '';
   let homedirSpy: jest.SpyInstance;
   let hostnameSpy: jest.SpyInstance;
@@ -184,6 +185,9 @@ describe('CLI/scripts/login-cli', () => {
     removeTempDir(tempHome);
     process.env = { ...originalEnv };
     process.exitCode = originalExitCode;
+    if (originalPlatform) {
+      Object.defineProperty(process, 'platform', originalPlatform);
+    }
     jest.useRealTimers();
   });
 
@@ -626,6 +630,20 @@ describe('CLI/scripts/login-cli', () => {
     }
   });
 
+  it('passes a Windows login URL as one argument without invoking a command shell', async () => {
+    Object.defineProperty(process, 'platform', { configurable: true, value: 'win32' });
+    mockSpawn.mockImplementation(() => createSpawnChild('spawn'));
+    const url = 'https://api.example.com/authorize?mode=cli&client=terminal#session=opaque';
+
+    await expect(openBrowser(url)).resolves.toBeUndefined();
+
+    expect(mockSpawn).toHaveBeenCalledWith('explorer.exe', [url], {
+      detached: true,
+      stdio: 'ignore',
+    });
+    expect(mockSpawn).not.toHaveBeenCalledWith('cmd', expect.anything(), expect.anything());
+  });
+
   it('opens browsers directly and reports login failures in manual mode', async () => {
     mockSpawn.mockImplementation(() => createSpawnChild('spawn'));
     await expect(openBrowser('https://api.example.com/login')).resolves.toBeUndefined();
@@ -727,10 +745,12 @@ describe('CLI/scripts/login-cli', () => {
     });
     expect(mockRunPostInitPrompts).toHaveBeenCalledWith({ projectType: 'expo' });
     expect(mockSpawn).toHaveBeenCalledWith(
-      process.platform === 'darwin' ? 'open' : process.platform === 'win32' ? 'cmd' : 'xdg-open',
-      process.platform === 'win32'
-        ? ['/c', 'start', '', 'https://api.example.com/authorize']
-        : ['https://api.example.com/authorize'],
+      process.platform === 'darwin'
+        ? 'open'
+        : process.platform === 'win32'
+          ? 'explorer.exe'
+          : 'xdg-open',
+      ['https://api.example.com/authorize'],
       expect.objectContaining({
         detached: true,
         stdio: 'ignore',
@@ -794,10 +814,13 @@ describe('CLI/scripts/login-cli', () => {
     );
     expect(consoleErrorSpy).toHaveBeenCalledWith(
       expect.stringContaining(
-        'Manual installation: https://bundledrop.app/docs/installation',
+        'Manual setup: https://bundledrop.app/docs/manual-setup',
       ),
     );
-    expect(fs.existsSync(configPath)).toBe(false);
+    expect(consoleErrorSpy).toHaveBeenCalledWith(
+      expect.stringContaining(`Project config retained at ${configPath}`),
+    );
+    expect(fs.readFileSync(configPath, 'utf8')).toBe('module.exports = {};\n');
     expect(process.exitCode).toBe(1);
   });
 

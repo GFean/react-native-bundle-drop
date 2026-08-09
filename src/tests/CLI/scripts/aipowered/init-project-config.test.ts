@@ -367,6 +367,33 @@ describe('initProjectConfigAi', () => {
 
     expect(mockValidateSetupChangesBeforeApply).not.toHaveBeenCalled();
     expect(mockApplySetupPatchPlans).not.toHaveBeenCalled();
+    expect(consoleLogSpy).toHaveBeenCalledWith(
+      expect.stringContaining('Manual setup: https://bundledrop.app/docs/manual-setup'),
+    );
+  });
+
+  it('retains a virtual project config before handing low-confidence setup to the manual guide', async () => {
+    const root = createTempProjectDir();
+    temporaryRoots.push(root);
+    cwdSpy.mockReturnValue(root);
+    const configContent = 'module.exports = { projectType: "bare" };\n';
+    mockRequestAiSetupPlan.mockResolvedValue(plan({ confidence: 'low', changes: [bareChange] }));
+
+    await initProjectConfigAi({
+      yes: true,
+      virtualConfig: {
+        content: configContent,
+        serverUrl: 'https://api.example.com',
+        orgSlug: 'alpha-org',
+        projectSlug: 'demo-app',
+        authToken: 'pat-token',
+      },
+    });
+
+    expect(fs.readFileSync(path.join(root, 'bundle.drop.config.js'), 'utf8')).toBe(configContent);
+    expect(consoleLogSpy).toHaveBeenCalledWith(
+      expect.stringContaining(`Project config retained at ${root}`),
+    );
   });
 
   it('shows summarized context and stops when a required AI action is declined', async () => {

@@ -100,11 +100,11 @@ describe('CLI/scripts/init-config', () => {
         timeout: 15000,
       }
     );
-    expect(content).toContain("serverUrl: 'https://api.example.com'");
-    expect(content).toContain("slug: 'beta-org'");
-    expect(content).toContain("name: 'Owner\\'s App'");
-    expect(content).toContain("slug: 'owners-app'");
-    expect(content).toContain("apiKey: 'download-key\\'value'");
+    expect(content).toContain('serverUrl: "https://api.example.com"');
+    expect(content).toContain('slug: "beta-org"');
+    expect(content).toContain('name: "Owner\'s App"');
+    expect(content).toContain('slug: "owners-app"');
+    expect(content).toContain('apiKey: "download-key\'value"');
   });
 
   it('creates an unambiguous Expo config when the project type is known', async () => {
@@ -117,7 +117,7 @@ describe('CLI/scripts/init-config', () => {
 
     const content = fs.readFileSync(path.join(tempDir, 'bundle.drop.config.js'), 'utf8');
 
-    expect(content).toContain("projectType: 'expo'");
+    expect(content).toContain('projectType: "expo"');
     expect(content).toContain("ios: '1.0.0'");
     expect(content).toContain("android: '1.0.0'");
     expect(content).not.toContain("runtimeVersion: { source: 'expo' }");
@@ -146,8 +146,8 @@ describe('CLI/scripts/init-config', () => {
 
     const content = fs.readFileSync(path.join(tempDir, 'bundle.drop.config.js'), 'utf8');
 
-    expect(content).toContain("slug: 'beta-org'");
-    expect(content).toContain("slug: 'beta-app'");
+    expect(content).toContain('slug: "beta-org"');
+    expect(content).toContain('slug: "beta-app"');
     expect(mockAxiosNodeGet).toHaveBeenCalledWith(
       'https://api.example.com/projects/beta-app/credentials',
       expect.any(Object)
@@ -163,9 +163,9 @@ describe('CLI/scripts/init-config', () => {
 
     const content = fs.readFileSync(path.join(tempDir, 'bundle.drop.config.js'), 'utf8');
 
-    expect(content).toContain("slug: 'alpha-org'");
-    expect(content).toContain("name: ''");
-    expect(content).not.toContain("slug: 'beta-app'");
+    expect(content).toContain('slug: "alpha-org"');
+    expect(content).toContain('name: ""');
+    expect(content).not.toContain('slug: "beta-app"');
     expect(consoleSpy).toHaveBeenCalledWith(
       expect.stringContaining('No projects returned; project values will be left blank.')
     );
@@ -182,9 +182,9 @@ describe('CLI/scripts/init-config', () => {
     const content = fs.readFileSync(path.join(tempDir, 'bundle.drop.config.js'), 'utf8');
 
     expect(mockAxiosNodeGet).not.toHaveBeenCalled();
-    expect(content).toContain("slug: 'derived-org'");
-    expect(content).toContain("slug: 'single-app'");
-    expect(content).toContain("apiKey: 'fallback-key'");
+    expect(content).toContain('slug: "derived-org"');
+    expect(content).toContain('slug: "single-app"');
+    expect(content).toContain('apiKey: "fallback-key"');
   });
 
   it('creates a blank config and warns when no orgs or projects are returned', async () => {
@@ -196,9 +196,9 @@ describe('CLI/scripts/init-config', () => {
 
     const content = fs.readFileSync(path.join(tempDir, 'bundle.drop.config.js'), 'utf8');
 
-    expect(content).toContain("serverUrl: 'https://api.example.com'");
-    expect(content).toContain("slug: ''");
-    expect(content).toContain("name: ''");
+    expect(content).toContain('serverUrl: "https://api.example.com"');
+    expect(content).toContain('slug: ""');
+    expect(content).toContain('name: ""');
     expect(consoleSpy).toHaveBeenCalledWith(
       expect.stringContaining('No organizations returned; org slug will be left blank.')
     );
@@ -215,8 +215,8 @@ describe('CLI/scripts/init-config', () => {
 
     const content = fs.readFileSync(path.join(tempDir, 'bundle.drop.config.js'), 'utf8');
 
-    expect(content).toContain("slug: 'alpha-org'");
-    expect(content).toContain("name: ''");
+    expect(content).toContain('slug: "alpha-org"');
+    expect(content).toContain('name: ""');
     expect(consoleSpy).toHaveBeenCalledWith(
       expect.stringContaining('No projects returned; project values will be left blank.')
     );
@@ -240,8 +240,8 @@ describe('CLI/scripts/init-config', () => {
 
     const content = fs.readFileSync(path.join(tempDir, 'bundle.drop.config.js'), 'utf8');
 
-    expect(content).toContain("slug: ''");
-    expect(content).toContain("name: ''");
+    expect(content).toContain('slug: ""');
+    expect(content).toContain('name: ""');
     expect(consoleSpy).toHaveBeenCalledWith(
       expect.stringContaining('No organization selected; org slug will be left blank.')
     );
@@ -264,8 +264,8 @@ describe('CLI/scripts/init-config', () => {
 
     const content = fs.readFileSync(path.join(tempDir, 'bundle.drop.config.js'), 'utf8');
 
-    expect(content).toContain("slug: 'beta-org'");
-    expect(content).toContain("slug: 'beta-app'");
+    expect(content).toContain('slug: "beta-org"');
+    expect(content).toContain('slug: "beta-app"');
     expect(consoleSpy).toHaveBeenCalledWith(
       expect.stringContaining('No organization selected; org slug will be left blank.')
     );
@@ -337,6 +337,53 @@ describe('CLI/scripts/init-config', () => {
       orgSlug: 'alpha-org',
       projectSlug: 'demo-app',
     }));
-    expect(result?.content).toContain("slug: 'demo-app'");
+    expect(result?.content).toContain('slug: "demo-app"');
+  });
+
+  it('serializes config values as inert JSON string literals', async () => {
+    const serverUrl = 'https://api.example.com/"; globalThis.injected = true; // payload';
+    const orgSlug = 'org\\name\nnext-line';
+    const projectName = 'Project "quoted" \\ named\nnext-line';
+    const projectSlug = 'project\\slug\nnext-line';
+    const apiKey = 'key"; globalThis.injected = true; //\\secret\nnext-line';
+
+    await initConfig({
+      serverUrl,
+      organizations: [{ orgId: 'org-1', slug: orgSlug, name: 'Organization' }],
+      projects: [{ orgId: 'org-1', slug: projectSlug, name: projectName }],
+      downloadApiKey: apiKey,
+    });
+
+    const content = fs.readFileSync(path.join(tempDir, 'bundle.drop.config.js'), 'utf8');
+    const serializedAssignments = [
+      ...content.matchAll(/^\s+(serverUrl|slug|name|apiKey): (".*"),$/gm),
+    ].map(([, property, literal]) => [property, JSON.parse(literal)]);
+
+    expect(serializedAssignments).toEqual([
+      ['serverUrl', serverUrl],
+      ['slug', orgSlug],
+      ['name', projectName],
+      ['slug', projectSlug],
+      ['apiKey', apiKey],
+    ]);
+  });
+
+  it('redacts the API key from dry-run console output', async () => {
+    const apiKey = 'download-key-that-must-not-be-logged';
+    const result = await initConfig({
+      serverUrl: 'https://api.example.com/',
+      organizations: [{ orgId: 'org-1', slug: 'alpha-org', name: 'Alpha Org' }],
+      projects: [{ orgId: 'org-1', slug: 'demo-app', name: 'Demo App' }],
+      downloadApiKey: apiKey,
+      dryRun: true,
+      projectType: 'expo',
+    });
+
+    const consoleOutput = consoleSpy.mock.calls.flat().join('\n');
+
+    expect(result?.content).toContain(apiKey);
+    expect(consoleOutput).toContain('projectType: "expo"');
+    expect(consoleOutput).toContain('apiKey: "<redacted>"');
+    expect(consoleOutput).not.toContain(apiKey);
   });
 });

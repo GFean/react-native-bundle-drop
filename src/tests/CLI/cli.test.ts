@@ -12,6 +12,7 @@ const mockInitConfig = jest.fn();
 const mockHasExistingBundleDropConfig = jest.fn(() => true);
 const mockRunDoctor = jest.fn();
 const mockWriteEasBuildReceipt = jest.fn();
+const mockRunSightCommand = jest.fn();
 const mockDetectProjectType = jest.fn(
   (_options?: { explicitType?: 'expo' | 'bare' }): 'expo' | 'bare' => 'bare',
 );
@@ -37,6 +38,9 @@ jest.mock('../../CLI/scripts/init-config', () => ({
 
 jest.mock('../../CLI/scripts/doctor', () => ({
   runDoctor: (...args: unknown[]) => mockRunDoctor(...args),
+}));
+jest.mock('../../CLI/scripts/sight-cli', () => ({
+  runSightCommand: (...args: unknown[]) => mockRunSightCommand(...args),
 }));
 jest.mock('../../CLI/scripts/expo/write-eas-build-receipt', () => ({
   writeEasBuildReceipt: (...args: unknown[]) => mockWriteEasBuildReceipt(...args),
@@ -70,6 +74,7 @@ describe('CLI/cli', () => {
     mockHasExistingBundleDropConfig.mockReset().mockReturnValue(true);
     mockRunDoctor.mockReset().mockResolvedValue(undefined);
     mockWriteEasBuildReceipt.mockReset().mockResolvedValue('/project/eas-receipt.json');
+    mockRunSightCommand.mockReset().mockResolvedValue(undefined);
     mockDetectProjectType.mockReset().mockImplementation(
       (options?: { explicitType?: 'expo' | 'bare' }) => options?.explicitType || 'bare',
     );
@@ -148,10 +153,15 @@ describe('CLI/cli', () => {
   });
 
   it('rejects an invalid init project type before setup starts', async () => {
-    await expect(parseCommand('init', '--project-type', 'unknown')).rejects.toThrow(
-      '--project-type must be expo or bare',
-    );
+    let error: Error | undefined;
+    try {
+      await parseCommand('init', '--project-type', 'unknown');
+    } catch (caught) {
+      error = caught as Error;
+    }
 
+    expect(error?.message).toBe('--project-type must be expo or bare.');
+    expect(error?.message).not.toContain('Manual setup');
     expect(mockInitConfig).not.toHaveBeenCalled();
     expect(mockRunPostInitPrompts).not.toHaveBeenCalled();
   });
@@ -171,6 +181,34 @@ describe('CLI/cli', () => {
     );
   });
 
+  it('routes Sight options to the local analysis command', async () => {
+    await parseCommand(
+      'sight',
+      '--platform',
+      'android',
+      '--project-type',
+      'bare',
+      '--entry-file',
+      'src/index.ts',
+      '--no-open',
+      '--keep',
+      '--output',
+      './analysis',
+    );
+
+    expect(mockRunSightCommand).toHaveBeenCalledWith(
+      expect.objectContaining({
+        platform: 'android',
+        projectType: 'bare',
+        entryFile: 'src/index.ts',
+        open: false,
+        keep: true,
+        output: './analysis',
+      }),
+      expect.anything(),
+    );
+  });
+
   it('includes doctor in top-level and command-specific help', () => {
     const program = buildProgram();
     let topLevelHelp = '';
@@ -178,6 +216,7 @@ describe('CLI/cli', () => {
     program.outputHelp();
     expect(topLevelHelp).toContain('Ship OTA Updates with Confidence');
     expect(topLevelHelp).toContain('bundle-drop doctor');
+    expect(topLevelHelp).toContain('bundle-drop sight');
     expect(topLevelHelp).not.toContain('init-native');
     expect(topLevelHelp).not.toContain('init-metro');
 
@@ -188,6 +227,14 @@ describe('CLI/cli', () => {
     doctorCommand?.outputHelp();
     expect(doctorHelp).toContain('bundle-drop doctor --platform ios');
     expect(doctorHelp).toContain('--project-type <type>');
+
+    const sightCommand = program.commands.find(command => command.name() === 'sight');
+    expect(sightCommand).toBeDefined();
+    let sightHelp = '';
+    sightCommand?.configureOutput({ writeOut: output => { sightHelp += output; } });
+    sightCommand?.outputHelp();
+    expect(sightHelp).toContain('bundle-drop sight --platform android');
+    expect(sightHelp).toContain('--no-open');
   });
 
   it('creates an authenticated receipt for an exact EAS application build', async () => {
@@ -260,13 +307,61 @@ describe('CLI/cli', () => {
     );
   });
 
-  it('points failed init runs to the manual installation guide', async () => {
+  it('retains a new project config and points setup failures to the usable manual guide', async () => {
+    const projectRoot = path.join(tempHome, 'project');
+    const configPath = path.join(projectRoot, 'bundle.drop.config.js');
+    const configContent = 'module.exports = { projectType: "bare" };\n';
+    fs.mkdirSync(projectRoot, { recursive: true });
+    mockHasExistingBundleDropConfig.mockReturnValue(false);
+    mockInitConfig.mockResolvedValue({
+      configPath,
+      content: configContent,
+      serverUrl: 'https://api.example.com',
+      orgSlug: 'alpha-org',
+      projectSlug: 'demo-app',
+    });
     mockRunPostInitPrompts.mockRejectedValueOnce(new Error('setup planner unavailable'));
 
     await expect(parseCommand('init', '--token', 'token-123')).rejects.toThrow(
       'setup planner unavailable\n' +
-        'Manual installation: https://bundledrop.app/docs/installation',
+        'Manual setup: https://bundledrop.app/docs/manual-setup',
     );
+    expect(fs.readFileSync(configPath, 'utf8')).toBe(configContent);
+  });
+
+  it('does not persist a pending config when a dry-run setup fails', async () => {
+    const projectRoot = path.join(tempHome, 'dry-run-project');
+    const configPath = path.join(projectRoot, 'bundle.drop.config.js');
+    fs.mkdirSync(projectRoot, { recursive: true });
+    mockHasExistingBundleDropConfig.mockReturnValue(false);
+    mockInitConfig.mockResolvedValue({
+      configPath,
+      content: 'module.exports = {};\n',
+      serverUrl: 'https://api.example.com',
+      orgSlug: 'alpha-org',
+      projectSlug: 'demo-app',
+    });
+    mockRunPostInitPrompts.mockRejectedValueOnce(new Error('setup planner unavailable'));
+
+    await expect(
+      parseCommand('init', '--token', 'token-123', '--dry-run'),
+    ).rejects.toThrow('Manual setup: https://bundledrop.app/docs/manual-setup');
+    expect(fs.existsSync(configPath)).toBe(false);
+  });
+
+  it('does not point project-config selection failures to native manual setup', async () => {
+    mockInitConfig.mockRejectedValueOnce(new Error('project selection unavailable'));
+
+    let error: Error | undefined;
+    try {
+      await parseCommand('init', '--token', 'token-123');
+    } catch (caught) {
+      error = caught as Error;
+    }
+
+    expect(error?.message).toBe('project selection unavailable');
+    expect(error?.message).not.toContain('Manual setup');
+    expect(mockRunPostInitPrompts).not.toHaveBeenCalled();
   });
 
   it('passes a newly selected token-based config to setup without writing it early', async () => {
