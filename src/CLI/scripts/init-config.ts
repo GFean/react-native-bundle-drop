@@ -229,8 +229,12 @@ export async function initConfig(params: {
 
   if (params.dryRun) {
     const previewContent = createBundleDropConfig({
-      ...configValues,
-      apiKey: apiKey ? '<redacted>' : '',
+      projectType: params.projectType,
+      serverUrl: resolvedServerUrl,
+      orgSlug,
+      projectName,
+      projectSlug,
+      apiKey: '<redacted>',
     });
     console.log(chalk.cyan(`Dry-run bundle.drop.config.js preview:\n${previewContent}`));
   } else {

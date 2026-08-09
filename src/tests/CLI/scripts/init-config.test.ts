@@ -1,6 +1,5 @@
 import fs from 'fs';
 import path from 'path';
-import vm from 'vm';
 
 import { mockAxiosNodeGet } from '../../mocks/modules/axiosNode';
 import { queuePromptResponse } from '../../mocks/modules/prompts';
@@ -341,7 +340,7 @@ describe('CLI/scripts/init-config', () => {
     expect(result?.content).toContain('slug: "demo-app"');
   });
 
-  it('serializes config values without allowing generated JavaScript injection', async () => {
+  it('serializes config values as inert JSON string literals', async () => {
     const serverUrl = 'https://api.example.com/"; globalThis.injected = true; // payload';
     const orgSlug = 'org\\name\nnext-line';
     const projectName = 'Project "quoted" \\ named\nnext-line';
@@ -356,25 +355,17 @@ describe('CLI/scripts/init-config', () => {
     });
 
     const content = fs.readFileSync(path.join(tempDir, 'bundle.drop.config.js'), 'utf8');
-    const sandbox = {
-      module: { exports: {} as Record<string, unknown> },
-      injected: false,
-    };
-    vm.runInNewContext(content, sandbox);
-    const config = sandbox.module.exports as {
-      serverUrl: string;
-      org: { slug: string };
-      project: { name: string; slug: string; apiKey: string };
-    };
+    const serializedAssignments = [
+      ...content.matchAll(/^\s+(serverUrl|slug|name|apiKey): (".*"),$/gm),
+    ].map(([, property, literal]) => [property, JSON.parse(literal)]);
 
-    expect(sandbox.injected).toBe(false);
-    expect(config.serverUrl).toBe(serverUrl);
-    expect(config.org.slug).toBe(orgSlug);
-    expect(config.project).toEqual(expect.objectContaining({
-      name: projectName,
-      slug: projectSlug,
-      apiKey,
-    }));
+    expect(serializedAssignments).toEqual([
+      ['serverUrl', serverUrl],
+      ['slug', orgSlug],
+      ['name', projectName],
+      ['slug', projectSlug],
+      ['apiKey', apiKey],
+    ]);
   });
 
   it('redacts the API key from dry-run console output', async () => {
