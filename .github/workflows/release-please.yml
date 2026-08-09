@@ -25,6 +25,21 @@ jobs:
             exit 1
           fi
 
+      - name: Ensure release lifecycle labels
+        env:
+          GH_TOKEN: ${{ secrets.RELEASE_PLEASE_TOKEN }}
+        run: |
+          gh label create "autorelease: pending" \
+            --repo "$GITHUB_REPOSITORY" \
+            --color fbca04 \
+            --description "Release PR awaiting tagging" \
+            --force
+          gh label create "autorelease: tagged" \
+            --repo "$GITHUB_REPOSITORY" \
+            --color 0e8a16 \
+            --description "Release PR has been tagged" \
+            --force
+
       - name: Prepare or publish the release
         uses: googleapis/release-please-action@45996ed1f6d02564a971a2fa1b5860e934307cf7 # v5.0.0
         with:
@@ -32,4 +47,3 @@ jobs:
           config-file: release-please-config.json
           manifest-file: .release-please-manifest.json
           target-branch: main
-          skip-labeling: true
