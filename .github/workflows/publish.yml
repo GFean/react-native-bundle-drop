@@ -159,4 +159,4 @@ jobs:
           RELEASE_TAG: ${{ github.event.release.tag_name }}
         run: |
           package_version="${RELEASE_TAG#v}"
-          npm publish "release-artifact/gfean-react-native-bundle-drop-${package_version}.tgz" --access public --provenance
+          npm publish "./release-artifact/gfean-react-native-bundle-drop-${package_version}.tgz" --access public --provenance
