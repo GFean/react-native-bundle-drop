@@ -89,7 +89,7 @@ export const openBrowser = async (url: string) => {
     platform === 'darwin'
       ? { file: 'open', args: [url] }
       : platform === 'win32'
-        ? { file: 'cmd', args: ['/c', 'start', '', url] }
+        ? { file: 'explorer.exe', args: [url] }
         : { file: 'xdg-open', args: [url] };
 
   await new Promise<void>((resolve, reject) => {
