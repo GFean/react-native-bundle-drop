@@ -13,8 +13,41 @@ type Project = { name: string; slug: string; orgId: string };
 type Org = { slug: string; orgId: string; name: string };
 type ProjectCredentials = { projectSlug?: string; downloadApiKey?: string; downloadKeyHint?: string };
 
+type BundleDropConfigValues = {
+  projectType?: ProjectType;
+  serverUrl: string;
+  orgSlug: string;
+  projectName: string;
+  projectSlug: string;
+  apiKey: string;
+};
+
 function normalizeServerUrl(url: string): string {
   return url.replace(/\/$/, '');
+}
+
+function createBundleDropConfig(values: BundleDropConfigValues): string {
+  const projectTypeConfig = values.projectType
+    ? `  projectType: ${JSON.stringify(values.projectType)},\n`
+    : '';
+
+  return `module.exports = {
+${projectTypeConfig}  serverUrl: ${JSON.stringify(values.serverUrl)},
+  defaultChannel: 'develop',
+  runtimeVersion: {
+    ios: '1.0.0',
+    android: '1.0.0',
+  },
+  org: {
+    slug: ${JSON.stringify(values.orgSlug)},
+  },
+  project: {
+    name: ${JSON.stringify(values.projectName)},
+    slug: ${JSON.stringify(values.projectSlug)},
+    apiKey: ${JSON.stringify(values.apiKey)},
+  },
+};
+`;
 }
 
 async function fetchProjectCredentials(params: {
@@ -184,31 +217,22 @@ export async function initConfig(params: {
     console.log(chalk.yellow('⚠️ Missing auth token; cannot fetch project API key.'));
   }
 
-  const projectTypeConfig = params.projectType
-    ? `  projectType: '${params.projectType}',\n`
-    : '';
-  const runtimeVersionConfig = `  runtimeVersion: {
-    ios: '1.0.0',
-    android: '1.0.0',
-  },`;
-
-  const content = `module.exports = {
-${projectTypeConfig}  serverUrl: '${resolvedServerUrl}',
-  defaultChannel: 'develop',
-${runtimeVersionConfig}
-  org: {
-    slug: '${orgSlug}',
-  },
-  project: {
-    name: '${projectName.replace(/'/g, "\\'")}',
-    slug: '${projectSlug}',
-    apiKey: '${apiKey.replace(/'/g, "\\'")}',
-  },
-};
-`;
+  const configValues: BundleDropConfigValues = {
+    projectType: params.projectType,
+    serverUrl: resolvedServerUrl,
+    orgSlug,
+    projectName,
+    projectSlug,
+    apiKey,
+  };
+  const content = createBundleDropConfig(configValues);
 
   if (params.dryRun) {
-    console.log(chalk.cyan(`Dry-run bundle.drop.config.js preview:\n${content}`));
+    const previewContent = createBundleDropConfig({
+      ...configValues,
+      apiKey: apiKey ? '<redacted>' : '',
+    });
+    console.log(chalk.cyan(`Dry-run bundle.drop.config.js preview:\n${previewContent}`));
   } else {
     await fs.writeFile(configPath, content, 'utf8');
     console.log(chalk.green(`✅ Created bundle.drop.config.js at ${configPath}`));
