@@ -50,6 +50,32 @@ ${projectTypeConfig}  serverUrl: ${JSON.stringify(values.serverUrl)},
 `;
 }
 
+function createRedactedBundleDropConfigPreview(
+  values: Omit<BundleDropConfigValues, 'apiKey'>,
+): string {
+  const projectTypeConfig = values.projectType
+    ? `  projectType: ${JSON.stringify(values.projectType)},\n`
+    : '';
+
+  return `module.exports = {
+${projectTypeConfig}  serverUrl: ${JSON.stringify(values.serverUrl)},
+  defaultChannel: 'develop',
+  runtimeVersion: {
+    ios: '1.0.0',
+    android: '1.0.0',
+  },
+  org: {
+    slug: ${JSON.stringify(values.orgSlug)},
+  },
+  project: {
+    name: ${JSON.stringify(values.projectName)},
+    slug: ${JSON.stringify(values.projectSlug)},
+    apiKey: "<redacted>",
+  },
+};
+`;
+}
+
 async function fetchProjectCredentials(params: {
   serverUrl: string;
   projectSlug: string;
@@ -228,13 +254,12 @@ export async function initConfig(params: {
   const content = createBundleDropConfig(configValues);
 
   if (params.dryRun) {
-    const previewContent = createBundleDropConfig({
+    const previewContent = createRedactedBundleDropConfigPreview({
       projectType: params.projectType,
       serverUrl: resolvedServerUrl,
       orgSlug,
       projectName,
       projectSlug,
-      apiKey: '<redacted>',
     });
     console.log(chalk.cyan(`Dry-run bundle.drop.config.js preview:\n${previewContent}`));
   } else {

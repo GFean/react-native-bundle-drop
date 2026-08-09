@@ -376,11 +376,13 @@ describe('CLI/scripts/init-config', () => {
       projects: [{ orgId: 'org-1', slug: 'demo-app', name: 'Demo App' }],
       downloadApiKey: apiKey,
       dryRun: true,
+      projectType: 'expo',
     });
 
     const consoleOutput = consoleSpy.mock.calls.flat().join('\n');
 
     expect(result?.content).toContain(apiKey);
+    expect(consoleOutput).toContain('projectType: "expo"');
     expect(consoleOutput).toContain('apiKey: "<redacted>"');
     expect(consoleOutput).not.toContain(apiKey);
   });
