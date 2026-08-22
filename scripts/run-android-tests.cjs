@@ -9,7 +9,14 @@ const {
 
 const result = run(
   gradleCommand,
-  ['jacocoCoverageGate', '-Pstandalone', '--quiet'],
+  [
+    'jacocoCoverageGate',
+    '-Pstandalone',
+    // The standalone gate resolves react-android 0.87, whose metadata requires Kotlin 2.2.
+    // Consumer builds retain the package's 2.0.21 default and can keep overriding it normally.
+    '-PBundleDrop_kotlinVersion=2.2.0',
+    '--quiet',
+  ],
   {
     cwd: androidDir,
     env: createAndroidGradleEnv('corepack yarn test:android'),

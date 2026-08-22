@@ -22,6 +22,7 @@ describe('CLI/scripts/post-init', () => {
     const options = {
       projectType: 'expo' as const,
       dryRun: true,
+      migrateCodePush: true,
       migrateExpoUpdates: true,
       prebuild: false,
       yes: true,

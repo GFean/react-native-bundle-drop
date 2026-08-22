@@ -56,9 +56,50 @@ async function downloadFile(url: string, destPath: string): Promise<void> {
   return BundleDrop.fsDownloadFile(url, destPath);
 }
 
+async function downloadFileBounded(
+  url: string,
+  destPath: string,
+  maxBytes: number,
+  timeoutMs: number,
+): Promise<void> {
+  assertModule();
+  if (typeof BundleDrop.fsDownloadFileBounded !== 'function') {
+    throw new Error(
+      'BundleDrop native module is outdated. Rebuild the app for bounded manifest downloads.',
+    );
+  }
+  return BundleDrop.fsDownloadFileBounded(url, destPath, maxBytes, timeoutMs);
+}
+
 async function sha256File(path: string): Promise<string> {
   assertModule();
   return BundleDrop.fsSha256File(path);
+}
+
+async function sha256String(value: string): Promise<string> {
+  assertModule();
+  if (typeof BundleDrop.fsSha256String !== 'function') {
+    throw new Error('BundleDrop native module is outdated. Rebuild the app for runtime delivery.');
+  }
+  return BundleDrop.fsSha256String(value);
+}
+
+async function verifyEs256Signature(
+  signingInput: string,
+  signatureBase64Url: string,
+  xBase64Url: string,
+  yBase64Url: string,
+): Promise<boolean> {
+  assertModule();
+  if (typeof BundleDrop.fsVerifyEs256Signature !== 'function') {
+    throw new Error('BundleDrop native module is outdated. Rebuild the app for runtime delivery.');
+  }
+  return BundleDrop.fsVerifyEs256Signature(
+    signingInput,
+    signatureBase64Url,
+    xBase64Url,
+    yBase64Url,
+  );
 }
 
 async function fileSize(path: string): Promise<number> {
@@ -104,7 +145,10 @@ const BundleDropFS = {
   moveFile,
   unzip,
   downloadFile,
+  downloadFileBounded,
   sha256File,
+  sha256String,
+  verifyEs256Signature,
   fileSize,
   copyFile,
   applyXdelta,

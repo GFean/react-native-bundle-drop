@@ -12,10 +12,11 @@ import {
 import { installFromZip } from '../install/installFromZip';
 import { tryInstallPatchTransport } from '../patch-engine/patchTransport';
 import { getDownloadedBundlePathNative } from '../native/bundleDropNative';
-import { checkForUpdate } from './updateCheck';
+import { authorizeRuntimeDeliveryUpdate, checkForUpdate } from './updateCheck';
 import { BundleDropError, isInstallPhaseError } from '../errors';
 import { isBundleHashFailed, markCandidateActivated } from './rollbackState';
-import type { OtaPatchSet } from '../api/types';
+import type { OtaPatchSet, UpdateCheckResponse } from '../api/types';
+import { isArtifactCapabilityRejected } from '../runtime-delivery/artifactCapability';
 
 async function restoreCurrentPointer(pointer: BundlePointer | null): Promise<void> {
   if (pointer) {
@@ -37,7 +38,7 @@ type DownloadOptions = {
   channelName?: string;
   resolvedTarget?: {
     hash: string;
-    downloadUrl: string;
+    downloadUrl?: string;
     bundleVersion?: number;
     version?: string;
     runtimeVersion?: string;
@@ -49,8 +50,39 @@ type DownloadOptions = {
       mode: 'full';
       downloadUrl: string;
     };
+    runtimeDelivery?: UpdateCheckResponse['runtimeDelivery'];
   };
 };
+
+function isSameRuntimeDeliverySelection(
+  selected: UpdateCheckResponse,
+  refreshed: UpdateCheckResponse | null,
+): refreshed is UpdateCheckResponse {
+  if (
+    !refreshed ||
+    refreshed.action !== 'INSTALL' ||
+    refreshed.hash !== selected.hash ||
+    refreshed.runtimeVersion !== selected.runtimeVersion ||
+    !selected.runtimeDelivery ||
+    !refreshed.runtimeDelivery
+  ) {
+    return false;
+  }
+
+  const before = selected.runtimeDelivery;
+  const after = refreshed.runtimeDelivery;
+  return before.generation === after.generation &&
+    before.targetReleaseRef === after.targetReleaseRef &&
+    before.selectedMode === after.selectedMode &&
+    (before.baseHash ?? null) === (after.baseHash ?? null) &&
+    (before.patchAlgorithm ?? null) === (after.patchAlgorithm ?? null) &&
+    (before.patchSetHash ?? null) === (after.patchSetHash ?? null) &&
+    (before.patchArtifactRef ?? null) === (after.patchArtifactRef ?? null) &&
+    (before.missingAssetsHash ?? null) === (after.missingAssetsHash ?? null) &&
+    (before.manifestHash ?? null) === (after.manifestHash ?? null) &&
+    (before.jsBundleHash ?? null) === (after.jsBundleHash ?? null) &&
+    (before.fullBundleHash ?? null) === (after.fullBundleHash ?? null);
+}
 
 async function downloadAndStageUpdate(
   options?: DownloadOptions,
@@ -63,9 +95,10 @@ async function downloadAndStageUpdate(
   const resolvedTarget = options?.resolvedTarget;
 
   // Resolve target via /ota/resolve unless the caller already provided it.
-  const checkResult = resolvedTarget
+  const unresolvedCheckResult = resolvedTarget
     ? {
       action: 'INSTALL' as const,
+      channelName,
       hash: resolvedTarget.hash,
       bundleHash: resolvedTarget.hash,
       downloadUrl: resolvedTarget.downloadUrl,
@@ -77,8 +110,12 @@ async function downloadAndStageUpdate(
       baseHash: resolvedTarget.baseHash,
       patchSet: resolvedTarget.patchSet,
       fallback: resolvedTarget.fallback,
+      runtimeDelivery: resolvedTarget.runtimeDelivery,
     }
     : await checkForUpdate(channelName, statusCb);
+  let checkResult = unresolvedCheckResult
+    ? await authorizeRuntimeDeliveryUpdate(unresolvedCheckResult)
+    : null;
 
   if (!checkResult) {
     throw new BundleDropError({
@@ -119,10 +156,6 @@ async function downloadAndStageUpdate(
   const serverBundleVersion = checkResult.bundleVersion;
   const serverVersion = checkResult.version;
   const serverRuntimeVersion = checkResult.runtimeVersion;
-  const fullBundleZipUrl = checkResult.mode === 'patch'
-    ? checkResult.fallback?.downloadUrl || null
-    : checkResult.downloadUrl || null;
-
   try {
     if (!serverHash) {
       throw new BundleDropError({
@@ -130,19 +163,6 @@ async function downloadAndStageUpdate(
         code: 'HASH_MISSING',
         step: 'resolve',
         context: { channelName, platform, projectSlug: project.slug },
-      });
-    }
-
-    if (!fullBundleZipUrl) {
-      throw new BundleDropError({
-        message: 'Missing downloadUrl from ota resolve response',
-        code: 'DOWNLOAD_URL_MISSING',
-        step: 'resolve',
-        context: {
-          channelName,
-          platform,
-          projectSlug: project.slug,
-        },
       });
     }
 
@@ -157,40 +177,95 @@ async function downloadAndStageUpdate(
       };
     }
 
-    let installResult = await tryInstallPatchTransport({
-      target: {
-        mode: checkResult.mode,
-        hash,
-        manifestUrl: checkResult.manifestUrl,
-        baseHash: checkResult.baseHash,
-        patchSet: checkResult.patchSet,
-      },
-      projectSlug: project.slug,
-      platform,
-      runtimeVersionValue: serverRuntimeVersion,
-      statusCb,
-    });
-
-    try {
-      if (!installResult) {
-        statusCb?.('⬇️ Downloading full bundle ZIP!...');
-        installResult = await installFromZip({
-          downloadUrl: fullBundleZipUrl,
-          hash,
-          platform,
-          statusCb,
+    let installResult;
+    let capabilityRefreshAttempted = false;
+    let patchFallbackSelected = false;
+    while (true) {
+      const fullBundleZipUrl = checkResult.mode === 'patch'
+        ? checkResult.fallback?.downloadUrl || null
+        : checkResult.downloadUrl || null;
+      if (!fullBundleZipUrl) {
+        throw new BundleDropError({
+          message: 'Missing downloadUrl from ota resolve response',
+          code: 'DOWNLOAD_URL_MISSING',
+          step: 'resolve',
+          context: { channelName, platform, projectSlug: project.slug },
         });
       }
-    } catch (e) {
-      const phaseErr = isInstallPhaseError(e);
-      const isDownload = phaseErr && e.phase === 'download';
-      throw new BundleDropError({
-        message: isDownload ? 'Failed to download update ZIP' : 'Failed to install update ZIP',
-        code: isDownload ? 'DOWNLOAD_FAILED' : 'INSTALL_FAILED',
-        step: isDownload ? 'download' : 'install',
-        context: { channelName, platform, hash },
-        cause: phaseErr ? e.originalCause : e,
-      });
+
+      try {
+        installResult = patchFallbackSelected ? null : await tryInstallPatchTransport({
+          target: {
+            mode: checkResult.mode,
+            hash,
+            manifestUrl: checkResult.manifestUrl,
+            baseHash: checkResult.baseHash,
+            patchSet: checkResult.patchSet,
+            ...(checkResult.runtimeDelivery?.manifestHash
+              ? { expectedManifestHash: checkResult.runtimeDelivery.manifestHash }
+              : {}),
+            ...(checkResult.runtimeDelivery?.jsBundleHash
+              ? { expectedJsBundleHash: checkResult.runtimeDelivery.jsBundleHash }
+              : {}),
+          },
+          projectSlug: project.slug,
+          platform,
+          runtimeVersionValue: serverRuntimeVersion,
+          statusCb,
+        });
+
+        if (!installResult) {
+          patchFallbackSelected = checkResult.mode === 'patch';
+          statusCb?.('⬇️ Downloading full bundle ZIP!...');
+          installResult = await installFromZip({
+            downloadUrl: fullBundleZipUrl,
+            hash,
+            platform,
+            statusCb,
+            ...(checkResult.runtimeDelivery?.fullBundleHash
+              ? { expectedArchiveHash: checkResult.runtimeDelivery.fullBundleHash }
+              : {}),
+            ...(checkResult.runtimeDelivery?.manifestHash
+              ? { expectedManifestHash: checkResult.runtimeDelivery.manifestHash }
+              : {}),
+            ...(checkResult.runtimeDelivery?.jsBundleHash
+              ? { expectedJsBundleHash: checkResult.runtimeDelivery.jsBundleHash }
+              : {}),
+          });
+        }
+        break;
+      } catch (e) {
+        if (
+          !capabilityRefreshAttempted &&
+          unresolvedCheckResult.runtimeDelivery &&
+          isArtifactCapabilityRejected(e)
+        ) {
+          capabilityRefreshAttempted = true;
+          statusCb?.('🔐 Download authorization expired; refreshing once...');
+          const refreshed = await authorizeRuntimeDeliveryUpdate(unresolvedCheckResult);
+          if (!isSameRuntimeDeliverySelection(unresolvedCheckResult, refreshed)) {
+            throw new BundleDropError({
+              message: 'Refreshed download authorization changed update identity',
+              code: 'DOWNLOAD_FAILED',
+              step: 'download',
+              context: { channelName, platform, hash },
+              cause: e,
+            });
+          }
+          checkResult = refreshed;
+          continue;
+        }
+
+        const phaseErr = isInstallPhaseError(e);
+        const isDownload = phaseErr && e.phase === 'download';
+        throw new BundleDropError({
+          message: isDownload ? 'Failed to download update ZIP' : 'Failed to install update ZIP',
+          code: isDownload ? 'DOWNLOAD_FAILED' : 'INSTALL_FAILED',
+          step: isDownload ? 'download' : 'install',
+          context: { channelName, platform, hash },
+          cause: phaseErr ? e.originalCause : e,
+        });
+      }
     }
 
     const { bundlePath, metadataFromZip } = installResult;

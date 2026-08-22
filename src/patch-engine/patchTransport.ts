@@ -5,6 +5,7 @@ import type { OtaPatchSet } from '../api/types';
 import type { InstallResult } from '../install/bundleInstallShared';
 import { installFromPatchSet } from './installFromPatchSet';
 import { isSupportedPatchAlgorithm, type SupportedPatchAlgorithm } from './patchOperations';
+import { isArtifactCapabilityRejected } from '../runtime-delivery/artifactCapability';
 
 export type PatchTransportTarget = {
   mode?: 'full' | 'patch';
@@ -12,6 +13,8 @@ export type PatchTransportTarget = {
   manifestUrl?: string;
   baseHash?: string;
   patchSet?: OtaPatchSet;
+  expectedManifestHash?: string;
+  expectedJsBundleHash?: string;
 };
 
 type TryInstallPatchTransportParams = {
@@ -103,10 +106,17 @@ export const tryInstallPatchTransport = async ({
       baseHash: target.baseHash,
       targetHash: target.hash,
       algorithm: target.patchSet.algorithm,
+      ...(target.expectedManifestHash
+        ? { expectedManifestHash: target.expectedManifestHash }
+        : {}),
+      ...(target.expectedJsBundleHash
+        ? { expectedJsBundleHash: target.expectedJsBundleHash }
+        : {}),
       platform,
       statusCb,
     });
   } catch (e) {
+    if (isArtifactCapabilityRejected(e)) throw e;
     await reportPatchInstallFailureBeforeFallback({
       projectSlug,
       platform,

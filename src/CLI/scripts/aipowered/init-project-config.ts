@@ -17,15 +17,20 @@ import {
   setBundleDropProjectType,
 } from '../expo/configure-expo';
 import {
+  codePushRemovalCommand,
   detectPackageManager,
   expoUpdatesRemovalCommand,
+  removeCodePushWithPackageManager,
   removeExpoUpdatesWithPackageManager,
   restoreDependencyMigration,
 } from '../expo/package-manager';
 import { applySetupPatchPlans, restoreSetupBackups } from './apply-setup-plan';
 import { requestAiSetupPlan } from './backend-client';
+import { findCodePushResiduePaths } from './code-push-residue';
 import { buildUnifiedDiff, colorizeUnifiedDiff } from './diff-preview';
+import { assertSafeProviderPlan, escapeTerminalControls } from './terminal-safety';
 import {
+  authoritativeDynamicExpoConfigFile,
   findProjectRoot,
   isBundleDropHostedAiPlanningServer,
   scanProjectForAiSetup,
@@ -36,15 +41,35 @@ import {
   validateSetupChangesBeforeApply,
 } from './validate-plan';
 import { startLoadingStatus } from '../../utils/ui';
+import {
+  createSafeBackupDirectory,
+  inspectProjectDirectory,
+  inspectProjectFile,
+  writeProjectFileAtomically,
+} from '../safe-file-transaction';
+import {
+  addRuntimeDeliveryBootstrapGitignoreRules,
+  RUNTIME_DELIVERY_BOOTSTRAP_PATH,
+} from '../../../runtime-delivery/bootstrapConfig';
 
 const PACKAGE_NAME = '@gfean/react-native-bundle-drop';
 const DOCS_MANUAL_SETUP_URL = 'https://bundledrop.app/docs/manual-setup';
+const DOCS_RUNTIME_INITIALIZATION_URL =
+  'https://bundledrop.app/docs/installation#initialize-bundle-drop-in-javascript';
 const EXPO_RUNTIME_AUTHORITY_PATTERN =
   /runtimeVersion\s*:\s*\{\s*source\s*:\s*['"]expo['"]\s*\}/;
+
+const logRuntimeInitializationNextStep = () => {
+  console.log(chalk.cyan(
+    'JavaScript entry point: call BundleDrop.init once before rendering your app. ' +
+      DOCS_RUNTIME_INITIALIZATION_URL,
+  ));
+};
 
 export type InitProjectOptions = {
   projectType?: ProjectType;
   dryRun?: boolean;
+  migrateCodePush?: boolean;
   migrateExpoUpdates?: boolean;
   prebuild?: boolean;
   yes?: boolean;
@@ -55,13 +80,105 @@ export type InitProjectOptions = {
     projectSlug: string;
     authToken: string;
   };
+  runtimeDeliveryBootstrap?: {
+    content: string;
+  };
 };
 
 const sha256 = (content: string) => crypto.createHash('sha256').update(content).digest('hex');
 
+const inspectPlanningFile = (projectRoot: string, relativePath: string) => {
+  if (!fs.existsSync(projectRoot)) return { exists: false, content: '', mode: 0o666 };
+  return inspectProjectFile(projectRoot, relativePath);
+};
+
+const planRuntimeDeliveryBootstrap = (
+  projectRoot: string,
+  bootstrap?: InitProjectOptions['runtimeDeliveryBootstrap'],
+) => {
+  if (!bootstrap) return null;
+  const bootstrapFile = inspectPlanningFile(projectRoot, RUNTIME_DELIVERY_BOOTSTRAP_PATH);
+  const original = bootstrapFile.exists ? bootstrapFile.content : null;
+  if (original === bootstrap.content) return null;
+  return {
+    file: RUNTIME_DELIVERY_BOOTSTRAP_PATH,
+    original,
+    updated: bootstrap.content,
+    reason: 'Pin the authenticated runtime delivery bootstrap for this project.',
+  };
+};
+
+const planRuntimeDeliveryGitignore = (
+  projectRoot: string,
+  bootstrap?: InitProjectOptions['runtimeDeliveryBootstrap'],
+) => {
+  if (!bootstrap) return null;
+  const file = '.gitignore';
+  const gitignoreFile = inspectPlanningFile(projectRoot, file);
+  const original = gitignoreFile.exists ? gitignoreFile.content : null;
+  const updated = addRuntimeDeliveryBootstrapGitignoreRules(original || '');
+  if (updated === original) return null;
+  return {
+    file,
+    original,
+    updated,
+    reason: 'Keep the pinned runtime delivery bootstrap reproducible in clean builds.',
+  };
+};
+
 const shouldApplyAiChange = (change: AiPatchPlan) =>
   change.confidence !== 'low' &&
   (change.decisionType === 'safe_auto_patch' || change.decisionType === 'review_only_patch');
+
+const isDynamicExpoConfigChange = (change: AiPatchPlan) =>
+  /^app\.config\.(?:js|ts|cjs|mjs)$/.test(change.file);
+
+const reviewOnlyChanges = (changes: AiPatchPlan[]) =>
+  changes.filter(change =>
+    change.confidence !== 'low' &&
+    (change.decisionType === 'review_only_patch' || isDynamicExpoConfigChange(change))
+  );
+
+async function confirmReviewOnlyChanges(params: {
+  projectRoot: string;
+  originals: Map<string, string>;
+  changes: AiPatchPlan[];
+  yes?: boolean;
+  dryRun?: boolean;
+}): Promise<boolean> {
+  const changesRequiringReview = reviewOnlyChanges(params.changes);
+  if (params.dryRun || !changesRequiringReview.length) return true;
+
+  if (params.yes) {
+    console.log(chalk.yellow(
+      'Review-only AI changes require explicit interactive approval. ' +
+        '--yes cannot approve them. No files changed.',
+    ));
+    return false;
+  }
+
+  for (const change of changesRequiringReview) {
+    console.log(chalk.yellow(`\nReview-only proposed change: ${change.file}`));
+    console.log(colorizeUnifiedDiff(buildUnifiedDiff({
+      projectRoot: params.projectRoot,
+      originals: params.originals,
+      changes: [change],
+    })));
+    const answer = await prompts({
+      type: 'confirm',
+      name: 'approve',
+      message: `Apply this review-only AI change to ${escapeTerminalControls(change.file)}? ` +
+        escapeTerminalControls(change.reason),
+      initial: false,
+    });
+    if (!(answer as { approve?: boolean }).approve) {
+      console.log(chalk.gray('Review-only AI change declined. No files changed.'));
+      return false;
+    }
+  }
+
+  return true;
+}
 
 const hasCleanGitStatus = (projectRoot: string, command: string): boolean => {
   try {
@@ -80,9 +197,9 @@ const usesStrictExpoRuntimeAuthority = (
   projectRoot: string,
   virtualConfig?: InitProjectOptions['virtualConfig'],
 ): boolean => {
-  const configPath = path.join(projectRoot, 'bundle.drop.config.js');
-  const configContent = fs.existsSync(configPath)
-    ? fs.readFileSync(configPath, 'utf8')
+  const configFile = inspectPlanningFile(projectRoot, 'bundle.drop.config.js');
+  const configContent = configFile.exists
+    ? configFile.content
     : virtualConfig?.content;
   return Boolean(configContent && EXPO_RUNTIME_AUTHORITY_PATTERN.test(configContent));
 };
@@ -97,14 +214,19 @@ type NativePrebuildBackup = {
 };
 
 const restoreNativePrebuild = (backup: NativePrebuildBackup, reason: string) => {
+  const failedRoot = path.join(backup.backupDir, reason);
+  fs.mkdirSync(failedRoot);
   for (const directory of ['ios', 'android']) {
     const current = path.join(backup.projectRoot, directory);
-    const failed = path.join(backup.backupDir, reason, directory);
-    if (fs.existsSync(current)) {
-      fs.ensureDirSync(path.dirname(failed));
-      fs.moveSync(current, failed, { overwrite: true });
+    const failed = path.join(failedRoot, directory);
+    try {
+      fs.lstatSync(current);
+      fs.renameSync(current, failed);
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
     }
     if (backup.existingDirectories.includes(directory)) {
+      inspectProjectDirectory(backup.backupDir, directory);
       fs.copySync(path.join(backup.backupDir, directory), current, { preserveTimestamps: true });
     }
   }
@@ -112,13 +234,9 @@ const restoreNativePrebuild = (backup: NativePrebuildBackup, reason: string) => 
 
 const runLayeredPrebuild = (projectRoot: string): NativePrebuildBackup => {
   const expoCli = require.resolve('expo/bin/cli', { paths: [projectRoot] });
-  const backupDir = path.join(
-    projectRoot,
-    '.bundledrop-backup',
-    `prebuild-${new Date().toISOString().replace(/[:.]/g, '-')}`,
-  );
+  const backupDir = createSafeBackupDirectory(projectRoot, 'prebuild');
   const existingDirectories = ['ios', 'android'].filter(directory =>
-    fs.existsSync(path.join(projectRoot, directory)),
+    inspectProjectDirectory(projectRoot, directory),
   );
   const backup = { projectRoot, backupDir, existingDirectories };
   for (const directory of existingDirectories) {
@@ -159,27 +277,11 @@ const assertBundleDropPluginPresent = (projectRoot: string) => {
   }
 };
 
-const isSummarizedSetupContext = (kind: string) =>
-  kind === 'package_manifest' || kind === 'bundle_drop_config';
-
-const authoritativeDynamicExpoConfigFile = (
-  projectRoot: string,
-  candidate = evaluateExpoConfig(projectRoot).dynamicConfigPath,
-): string => {
-  if (typeof candidate !== 'string' || !candidate.trim()) {
-    throw new Error('Expo did not identify the authoritative dynamic app config path. No files changed.');
-  }
-  const absolutePath = path.isAbsolute(candidate) ? candidate : path.resolve(projectRoot, candidate);
-  const relativePath = path.relative(projectRoot, absolutePath).split(path.sep).join('/');
-  if (
-    relativePath.startsWith('../') ||
-    path.isAbsolute(relativePath) ||
-    !/^app\.config\.(js|ts|cjs|mjs)$/.test(relativePath)
-  ) {
-    throw new Error(`Expo reported an unsafe dynamic app config path: ${candidate}. No files changed.`);
-  }
-  return relativePath;
-};
+const isSummarizedSetupContext = (file: { kind: string; path: string }) =>
+  file.kind === 'package_manifest' ||
+  file.kind === 'bundle_drop_config' ||
+  file.kind === 'metro_config' ||
+  file.path === 'app.json';
 
 const describeAiDestination = (serverUrl: string) => {
   const parsed = new URL(serverUrl);
@@ -193,14 +295,19 @@ const describeAiDestination = (serverUrl: string) => {
 };
 
 async function requestContextConsent(
-  files: Array<{ path: string; kind: string }>,
+  files: Array<{ path: string; kind: string; content: string }>,
   serverUrl: string,
   yes?: boolean,
 ) {
   console.log(chalk.gray(`AI setup destination: ${describeAiDestination(serverUrl)}`));
+  const contextSize = files.reduce(
+    (total, file) => total + Buffer.byteLength(file.content, 'utf8'),
+    0,
+  );
+  console.log(chalk.gray(`Provider context size: ${contextSize} bytes.`));
   console.log(chalk.gray('Files proposed for AI setup planning:'));
   files.forEach(file => {
-    const disclosure = isSummarizedSetupContext(file.kind) ? 'summary only' : 'full content';
+    const disclosure = isSummarizedSetupContext(file) ? 'summary only' : 'full content';
     console.log(chalk.gray(`  - ${file.path} (${file.kind}, ${disclosure})`));
   });
   if (yes) return true;
@@ -241,14 +348,43 @@ const existingSetupPassesDoctor = async (
   }
 };
 
+const assertNoCodePushMigrationResidue = (projectRoot: string) => {
+  const residuePaths = findCodePushResiduePaths(projectRoot);
+  if (!residuePaths.length) return;
+
+  const displayedPaths = residuePaths.slice(0, 20).map(filePath => `  - ${filePath}`);
+  if (residuePaths.length > displayedPaths.length) {
+    displayedPaths.push(`  - and ${residuePaths.length - displayedPaths.length} more path(s)`);
+  }
+  throw new Error(
+    'CodePush migration cannot continue while local CodePush references remain outside the ' +
+      `provider-patched native entrypoints:\n${displayedPaths.join('\n')}\n` +
+      'Remove the listed JS wrappers/imports, custom native references, build hooks, and ' +
+      'deployment-key configuration manually, then rerun Bundle Drop setup. No files changed.',
+  );
+};
+
 export async function initProjectConfigAi(options: InitProjectOptions = {}): Promise<void> {
   const projectRoot = findProjectRoot(process.cwd());
   const projectType = detectProjectType({ projectRoot, explicitType: options.projectType });
   const scan = scanProjectForAiSetup(projectType, projectRoot, options.virtualConfig);
+  const bootstrapChange = planRuntimeDeliveryBootstrap(
+    projectRoot,
+    options.runtimeDeliveryBootstrap,
+  );
+  const bootstrapGitignoreChange = planRuntimeDeliveryGitignore(
+    projectRoot,
+    options.runtimeDeliveryBootstrap,
+  );
   assertSetupOwnershipCompatible(projectType, scan.request.detected.expoUpdatesStatus);
-  if (await existingSetupPassesDoctor(projectRoot, projectType, scan.request.detected)) {
+  if (
+    !bootstrapChange &&
+    !bootstrapGitignoreChange &&
+    await existingSetupPassesDoctor(projectRoot, projectType, scan.request.detected)
+  ) {
     console.log(chalk.green('✅ Bundle Drop setup is already complete. No AI planning is required.'));
     await runDoctor({ projectType, cwd: projectRoot });
+    logRuntimeInitializationNextStep();
     return;
   }
   console.log(chalk.cyan(`🧠 Bundle Drop AI setup (${projectType})`));
@@ -268,19 +404,30 @@ export async function initProjectConfigAi(options: InitProjectOptions = {}): Pro
   } finally {
     loading.stop();
   }
+  assertSafeProviderPlan(plan);
   console.log(chalk.cyan('\nSetup summary:'));
-  console.log(plan.summary);
-  plan.warnings.forEach(warning => console.log(chalk.yellow(`⚠️ ${warning}`)));
+  console.log(escapeTerminalControls(plan.summary));
+  plan.warnings.forEach(warning =>
+    console.log(chalk.yellow(`⚠️ ${escapeTerminalControls(warning)}`))
+  );
   plan.actions.forEach(action => {
     const confirmation = action.requiresConfirmation ? ' (confirmation required)' : '';
-    console.log(chalk.gray(`  - ${action.type}${confirmation}: ${action.reason}`));
+    console.log(chalk.gray(
+      `  - ${escapeTerminalControls(action.type)}${confirmation}: ` +
+        escapeTerminalControls(action.reason),
+    ));
   });
 
   if (plan.confidence === 'low') {
     if (options.virtualConfig && !options.dryRun) {
-      const configPath = path.join(projectRoot, 'bundle.drop.config.js');
-      if (!fs.existsSync(configPath)) {
-        fs.writeFileSync(configPath, options.virtualConfig.content, 'utf8');
+      const configFile = inspectProjectFile(projectRoot, 'bundle.drop.config.js');
+      if (!configFile.exists) {
+        writeProjectFileAtomically(
+          projectRoot,
+          'bundle.drop.config.js',
+          options.virtualConfig.content,
+        );
+        const configPath = path.join(projectRoot, 'bundle.drop.config.js');
         console.log(chalk.green(`Project config retained at ${configPath}`));
       }
     }
@@ -305,15 +452,40 @@ export async function initProjectConfigAi(options: InitProjectOptions = {}): Pro
       );
     }
   }
+  if (projectType === 'bare' && scan.request.detected.codePushDetected) {
+    if (!options.migrateCodePush && !options.yes) {
+      const migrationAnswer = await prompts({
+        type: 'confirm',
+        name: 'migrate',
+        message: 'Remove react-native-code-push and migrate native startup ownership to Bundle Drop?',
+        initial: false,
+      });
+      options.migrateCodePush = Boolean((migrationAnswer as { migrate?: boolean }).migrate);
+    }
+    if (!options.migrateCodePush) {
+      throw new Error(
+        'CodePush blocks Bundle Drop setup. Re-run with --migrate-code-push after reviewing ' +
+          'the plan; a new native binary will be required.',
+      );
+    }
+  }
+  const shouldMigrateCodePush =
+    projectType === 'bare' &&
+    scan.request.detected.codePushDetected &&
+    Boolean(options.migrateCodePush);
+  if (shouldMigrateCodePush) assertNoCodePushMigrationResidue(projectRoot);
 
   for (const action of plan.actions.filter(action =>
-    action.requiresConfirmation && action.type !== 'migrate_expo_updates'
+    action.requiresConfirmation &&
+      action.type !== 'migrate_expo_updates' &&
+      action.type !== 'migrate_codepush'
   )) {
     if (options.yes) continue;
     const actionAnswer = await prompts({
       type: 'confirm',
       name: 'proceed',
-      message: `Proceed with ${action.type}? ${action.reason}`,
+      message: `Proceed with ${escapeTerminalControls(action.type)}? ` +
+        escapeTerminalControls(action.reason),
       initial: false,
     });
     if (!(actionAnswer as { proceed?: boolean }).proceed) {
@@ -322,16 +494,30 @@ export async function initProjectConfigAi(options: InitProjectOptions = {}): Pro
     }
   }
 
-  const aiChanges = plan.changes.filter(shouldApplyAiChange);
   const originals = new Map(scan.request.files.map(file => [file.path, file.content]));
-  validateSetupChangesBeforeApply({ projectType, originals, changes: aiChanges });
+  if (!await confirmReviewOnlyChanges({
+    projectRoot,
+    originals,
+    changes: plan.changes,
+    yes: options.yes,
+    dryRun: options.dryRun,
+  })) {
+    return;
+  }
+  const aiChanges = plan.changes.filter(shouldApplyAiChange);
+  validateSetupChangesBeforeApply({
+    projectType,
+    originals,
+    changes: aiChanges,
+    migrateExpoUpdates: Boolean(options.migrateExpoUpdates),
+  });
 
   if (projectType === 'bare') {
     const metroChange = planBareMetroConfig(projectRoot);
-    const bundleConfigPath = path.join(projectRoot, 'bundle.drop.config.js');
-    const bundleConfigExists = fs.existsSync(bundleConfigPath);
+    const bundleConfigFile = inspectPlanningFile(projectRoot, 'bundle.drop.config.js');
+    const bundleConfigExists = bundleConfigFile.exists;
     const bundleConfig = bundleConfigExists
-      ? fs.readFileSync(bundleConfigPath, 'utf8')
+      ? bundleConfigFile.content
       : options.virtualConfig?.content;
     const updatedBundleConfig = bundleConfig
       ? setBundleDropProjectType(bundleConfig, 'bare')
@@ -345,12 +531,20 @@ export async function initProjectConfigAi(options: InitProjectOptions = {}): Pro
           reason: 'Persist the reviewed bare React Native project type.',
         }
       : null;
-    const localChanges = [metroChange, bundleConfigChange].filter(
+    const localChanges = [
+      metroChange,
+      bundleConfigChange,
+      bootstrapChange,
+      bootstrapGitignoreChange,
+    ].filter(
       (change): change is NonNullable<typeof change> => Boolean(change),
     );
-    if (!aiChanges.length && !localChanges.length) {
+    if (!aiChanges.length && !localChanges.length && !shouldMigrateCodePush) {
       console.log(chalk.gray('No bare native changes are required.'));
-      if (!options.dryRun) await runDoctor({ projectType: 'bare', cwd: projectRoot });
+      if (!options.dryRun) {
+        await runDoctor({ projectType: 'bare', cwd: projectRoot });
+        logRuntimeInitializationNextStep();
+      }
       return;
     }
     const bareOriginals = new Map(originals);
@@ -372,6 +566,10 @@ export async function initProjectConfigAi(options: InitProjectOptions = {}): Pro
       originals: bareOriginals,
       changes: previewChanges,
     })));
+    if (shouldMigrateCodePush) {
+      const command = codePushRemovalCommand(detectPackageManager(projectRoot));
+      console.log(chalk.yellow(`Dependency migration command: ${command.join(' ')}`));
+    }
     if (options.dryRun) {
       console.log(chalk.gray('Dry run complete. No files changed.'));
       return;
@@ -383,10 +581,21 @@ export async function initProjectConfigAi(options: InitProjectOptions = {}): Pro
       console.log(chalk.gray('No files changed.'));
       return;
     }
-    const result = applySetupPatchPlans({ projectRoot, projectType, changes: aiChanges });
+    let dependencyBackup: ReturnType<typeof removeCodePushWithPackageManager> | undefined;
+    let result: ReturnType<typeof applySetupPatchPlans> | undefined;
     let metroResult: ReturnType<typeof applyExpoConfigurationChanges> | undefined;
     try {
-      validateAppliedSetupChanges({ projectRoot, projectType, changes: aiChanges });
+      if (shouldMigrateCodePush) {
+        dependencyBackup = removeCodePushWithPackageManager(projectRoot);
+      }
+      result = applySetupPatchPlans({ projectRoot, projectType, changes: aiChanges });
+      validateAppliedSetupChanges({
+        projectRoot,
+        projectType,
+        changes: aiChanges,
+        migrateExpoUpdates: false,
+        originals,
+      });
       if (localChanges.length) {
         metroResult = applyExpoConfigurationChanges({
           projectRoot,
@@ -396,10 +605,18 @@ export async function initProjectConfigAi(options: InitProjectOptions = {}): Pro
       await runDoctor({ projectType: 'bare', cwd: projectRoot });
     } catch (error) {
       if (metroResult) restoreExpoConfiguration(metroResult);
-      restoreSetupBackups(result);
+      if (result) restoreSetupBackups(result);
+      if (dependencyBackup) {
+        restoreDependencyMigration(dependencyBackup);
+        console.log(chalk.yellow(
+          'Package files were restored; reinstall dependencies to repair node_modules.',
+        ));
+      }
       throw error;
     }
+    if (!result) throw new Error('Bare setup transaction completed without a backup result.');
     console.log(chalk.green(`✅ Bare React Native setup complete. Backups: ${result.backupDir}`));
+    logRuntimeInitializationNextStep();
     return;
   }
 
@@ -426,6 +643,11 @@ export async function initProjectConfigAi(options: InitProjectOptions = {}): Pro
       projectRoot,
       evaluatedConfig.dynamicConfigPath,
     );
+    if (!dynamicConfigFile) {
+      throw new Error(
+        'Expo did not identify the authoritative dynamic app config path. No files changed.',
+      );
+    }
     if (
       !hasBundleDropPlugin(evaluatedConfig.exp) &&
       !unusualAiChanges.some(change => change.file === dynamicConfigFile)
@@ -438,6 +660,7 @@ export async function initProjectConfigAi(options: InitProjectOptions = {}): Pro
   }
   const combinedChanges = [
     ...deterministic,
+    ...(bootstrapChange ? [bootstrapChange] : []),
     ...unusualAiChanges.map(change => ({
       file: change.file,
       original: originals.get(change.file) ?? null,
@@ -508,6 +731,13 @@ export async function initProjectConfigAi(options: InitProjectOptions = {}): Pro
       projectRoot,
       changes: combinedChanges.filter(change => change.file !== 'package.json'),
     });
+    validateAppliedSetupChanges({
+      projectRoot,
+      projectType: 'expo',
+      changes: unusualAiChanges,
+      migrateExpoUpdates: Boolean(options.migrateExpoUpdates),
+      originals,
+    });
     assertBundleDropPluginPresent(projectRoot);
     if (hasNativeDirectories && options.prebuild) {
       prebuildBackup = runLayeredPrebuild(projectRoot);
@@ -524,6 +754,7 @@ export async function initProjectConfigAi(options: InitProjectOptions = {}): Pro
     throw error;
   }
   console.log(chalk.green(`✅ Expo setup complete. Backups: ${applyResult.backupDir}`));
+  logRuntimeInitializationNextStep();
   if (!hasNativeDirectories) {
     console.log(chalk.gray('Run expo run:*, explicit prebuild/manual build, or EAS Build to generate native integration.'));
   }

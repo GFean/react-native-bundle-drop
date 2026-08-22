@@ -53,6 +53,17 @@ RCT_EXTERN_METHOD(fsSha256File:(NSString *)path
                   resolve:(RCTPromiseResolveBlock)resolve
                   reject:(RCTPromiseRejectBlock)reject)
 
+RCT_EXTERN_METHOD(fsSha256String:(NSString *)value
+                  resolve:(RCTPromiseResolveBlock)resolve
+                  reject:(RCTPromiseRejectBlock)reject)
+
+RCT_EXTERN_METHOD(fsVerifyEs256Signature:(NSString *)signingInput
+                  signatureBase64Url:(NSString *)signatureBase64Url
+                  xBase64Url:(NSString *)xBase64Url
+                  yBase64Url:(NSString *)yBase64Url
+                  resolve:(RCTPromiseResolveBlock)resolve
+                  reject:(RCTPromiseRejectBlock)reject)
+
 RCT_EXTERN_METHOD(fsFileSize:(NSString *)path
                   resolve:(RCTPromiseResolveBlock)resolve
                   reject:(RCTPromiseRejectBlock)reject)
@@ -78,6 +89,13 @@ RCT_EXTERN_METHOD(fsUnzip:(NSString *)zipPath
 
 RCT_EXTERN_METHOD(fsDownloadFile:(NSString *)url
                   destPath:(NSString *)destPath
+                  resolve:(RCTPromiseResolveBlock)resolve
+                  reject:(RCTPromiseRejectBlock)reject)
+
+RCT_EXTERN_METHOD(fsDownloadFileBounded:(NSString *)url
+                  destPath:(NSString *)destPath
+                  maxBytes:(nonnull NSNumber *)maxBytes
+                  timeoutMs:(nonnull NSNumber *)timeoutMs
                   resolve:(RCTPromiseResolveBlock)resolve
                   reject:(RCTPromiseRejectBlock)reject)
 

@@ -30,6 +30,13 @@ export type { BundleListItem } from './api/types';
 export type { BundleDropProjectConfig } from './loadConfig';
 export type { BundleDropConfig } from './context';
 export type { BundleDropInitOptions, BundleDropRuntimeConfig } from './runtime/initState';
+export { getRuntimeDeliveryDiagnosticCounters } from './runtime-delivery/diagnostics';
+export type {
+  RuntimeDeliveryDiagnosticCounters,
+  RuntimeDeliveryDiagnosticDetails,
+  RuntimeDeliveryDiagnosticEvent,
+  RuntimeDeliveryDiagnosticName,
+} from './runtime-delivery/diagnostics';
 export { useBundleDrop } from './useBundleDrop';
 export type { UseBundleDropReturn } from './useBundleDrop';
 export { bundleDropConfig } from './context';

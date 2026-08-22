@@ -2,6 +2,7 @@ import { tryInstallPatchTransport } from '../../patch-engine/patchTransport';
 import { mockReportPatchApplyFailure } from '../mocks/api/clientApi';
 import { mockInstallFromPatchSet } from '../mocks/install/installFromZip';
 import { resetNativeFsMocks } from '../mocks/native/fs';
+import { InstallPhaseError } from '../../errors';
 
 jest.mock('../../context', () => ({
   runtimeVersion: undefined,
@@ -52,6 +53,33 @@ describe('patch-engine/patchTransport', () => {
         algorithm: 'asset-only-v1',
       })
     );
+  });
+
+  it('forwards signed target hashes to patch reconstruction', async () => {
+    mockInstallFromPatchSet.mockResolvedValueOnce({
+      bundlePath: '/bundles/target/main.jsbundle',
+      metadataFromZip: { hash: 'target-hash' },
+    });
+    await tryInstallPatchTransport({
+      target: {
+        mode: 'patch',
+        hash: 'target-hash',
+        baseHash: 'base-hash',
+        expectedManifestHash: 'manifest-hash',
+        expectedJsBundleHash: 'js-hash',
+        patchSet: {
+          algorithm: 'xdelta3-vcdiff',
+          patchesUrl: 'https://cdn.example.com/patch.zip',
+          patchSetHash: 'patch-hash',
+        },
+      },
+      projectSlug: 'bundle-drop-app',
+      platform: 'android',
+    });
+    expect(mockInstallFromPatchSet).toHaveBeenCalledWith(expect.objectContaining({
+      expectedManifestHash: 'manifest-hash',
+      expectedJsBundleHash: 'js-hash',
+    }));
   });
 
   it('reports an empty runtime version when neither resolve nor config provides one', async () => {
@@ -125,5 +153,24 @@ describe('patch-engine/patchTransport', () => {
       jest.useRealTimers();
       warnSpy.mockRestore();
     }
+  });
+
+  it('surfaces capability rejection without telemetry or full fallback conversion', async () => {
+    const rejected = new InstallPhaseError('download', new Error('HTTP 401: expired'));
+    mockInstallFromPatchSet.mockRejectedValueOnce(rejected);
+
+    await expect(tryInstallPatchTransport({
+      target: {
+        mode: 'patch', hash: 'target-hash', baseHash: 'base-hash',
+        patchSet: {
+          algorithm: 'xdelta3-vcdiff',
+          patchesUrl: 'https://cdn.example.com/expired-patch.zip',
+          patchSetHash: 'patch-hash',
+        },
+      },
+      projectSlug: 'bundle-drop-app',
+      platform: 'android',
+    })).rejects.toBe(rejected);
+    expect(mockReportPatchApplyFailure).not.toHaveBeenCalled();
   });
 });

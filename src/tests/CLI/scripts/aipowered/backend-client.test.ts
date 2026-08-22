@@ -130,7 +130,7 @@ describe('CLI/scripts/aipowered/backend-client', () => {
       serverUrl: 'https://api.example.com',
       authToken: 'token',
       request: {} as any,
-    })).rejects.toThrow('{"code":"INVALID_SETUP"}');
+    })).rejects.toThrow(/^AI setup planning failed$/);
 
     mockAxiosNodePost.mockRejectedValueOnce({ response: { data: 'maintenance' } });
     await expect(requestAiSetupPlan({
@@ -145,5 +145,99 @@ describe('CLI/scripts/aipowered/backend-client', () => {
       authToken: 'token',
       request: {} as any,
     })).rejects.toThrow('AI setup planning failed');
+  });
+
+  it('prefers bounded sanitized backend details without exposing structured data', async () => {
+    mockAxiosNodePost.mockRejectedValueOnce({
+      response: {
+        status: 424,
+        data: {
+          error: 'Invalid request.',
+          details: {
+            reason: 'AI setup plan removed existing native structure: RCTBundleURLProvider',
+            ignored: { arbitrary: 'must not be serialized' },
+          },
+        },
+      },
+    });
+    await expect(requestAiSetupPlan({
+      serverUrl: 'https://api.example.com',
+      authToken: 'token',
+      request: {} as any,
+    })).rejects.toThrow(
+      'AI setup planning failed: AI setup plan removed existing native structure: RCTBundleURLProvider',
+    );
+
+    mockAxiosNodePost.mockRejectedValueOnce({
+      response: {
+        data: {
+          error: 'Invalid request.',
+          details: { reason: 'Safe reason\u001b[2J\roverwrite\u202e' },
+        },
+      },
+    });
+    await expect(requestAiSetupPlan({
+      serverUrl: 'https://api.example.com',
+      authToken: 'token',
+      request: {} as any,
+    })).rejects.toThrow('Safe reason\\x1b[2J\\roverwrite\\u202e');
+
+    mockAxiosNodePost.mockRejectedValueOnce({
+      response: {
+        data: {
+          error: 'Invalid request.',
+          details: { reason: { message: 'AI setup plan removed a file' }, source: 'arbitrary' },
+        },
+      },
+    });
+    await expect(requestAiSetupPlan({
+      serverUrl: 'https://api.example.com',
+      authToken: 'token',
+      request: {} as any,
+    })).rejects.toThrow('AI setup planning failed: Invalid request.');
+
+    const getterDetails = {};
+    Object.defineProperty(getterDetails, 'reason', {
+      enumerable: true,
+      get: () => {
+        throw new Error('must not invoke backend object getters');
+      },
+    });
+    mockAxiosNodePost.mockRejectedValueOnce({
+      response: { data: { error: 'Invalid request.', details: getterDetails } },
+    });
+    await expect(requestAiSetupPlan({
+      serverUrl: 'https://api.example.com',
+      authToken: 'token',
+      request: {} as any,
+    })).rejects.toThrow('AI setup planning failed: Invalid request.');
+
+    mockAxiosNodePost.mockRejectedValueOnce({
+      response: {
+        data: {
+          error: 'Invalid request.',
+          details: { reason: 'bdp_proj_0123456789abcdefghijklmnopqrstuvwxyzABCDEFG' },
+        },
+      },
+    });
+    await expect(requestAiSetupPlan({
+      serverUrl: 'https://api.example.com',
+      authToken: 'token',
+      request: {} as any,
+    })).rejects.toThrow('AI setup planning failed: Invalid request.');
+
+    mockAxiosNodePost.mockRejectedValueOnce({
+      response: {
+        data: {
+          error: 'Invalid request.',
+          details: { reason: 'x'.repeat(1001) },
+        },
+      },
+    });
+    await expect(requestAiSetupPlan({
+      serverUrl: 'https://api.example.com',
+      authToken: 'token',
+      request: {} as any,
+    })).rejects.toThrow('AI setup planning failed: Invalid request.');
   });
 });

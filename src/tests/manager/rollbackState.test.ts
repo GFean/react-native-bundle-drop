@@ -862,6 +862,37 @@ describe('manager/rollbackState', () => {
     nowSpy.mockRestore();
   });
 
+  it('forces native rollback instead of activating a previous OTA bundle', async () => {
+    setMockFile(
+      CURRENT_POINTER_PATH,
+      JSON.stringify({
+        hash: 'bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb',
+        bundlePath: '/mock/doc/bundle-drop/bundles/bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb/main.jsbundle',
+        updatedAt: '2026-03-01T00:00:00.000Z',
+      }),
+    );
+    setMockFile(
+      PREVIOUS_POINTER_PATH,
+      JSON.stringify({
+        hash: 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',
+        bundlePath: '/mock/doc/bundle-drop/bundles/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa/main.jsbundle',
+        updatedAt: '2026-02-01T00:00:00.000Z',
+      }),
+    );
+
+    await expect(
+      rollbackToPreviousOrNative({ forceNative: true }),
+    ).resolves.toEqual({ rolledBack: true, toNative: true });
+
+    expect(readMockJson(CURRENT_POINTER_PATH)).toBeNull();
+    expect(readMockJson(PREVIOUS_POINTER_PATH)).toBeNull();
+    expect(readMockJson(STATE_PATH)).toEqual(
+      expect.objectContaining({ candidateCommitted: true, crashCount: 0 }),
+    );
+    expect(readMockJson(STATE_PATH)).not.toHaveProperty('activeHash');
+    expect(readMockJson(STATE_PATH)).not.toHaveProperty('candidateHash');
+  });
+
   it('falls back to native when the previous pointer matches the active bundle', async () => {
     const nowSpy = jest.spyOn(Date, 'now').mockReturnValue(32_000_000);
 

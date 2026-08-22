@@ -1,7 +1,22 @@
 import crypto from 'crypto';
-import fs from 'fs-extra';
 import path from 'path';
 import { setBundleDropProjectType } from '../../../expo/projectType';
+import { addRuntimeDeliveryBootstrapGitignoreRules } from '../../../runtime-delivery/bootstrapConfig';
+import {
+  createSafeBackupDirectory,
+  inspectProjectFile,
+  removeProjectFile,
+  restoreProjectFile,
+  writeBackupFile,
+  writeProjectFileAtomically,
+} from '../safe-file-transaction';
+import {
+  assertCommonJsMetroConfig,
+  findSingleMetroConfig,
+  hasAuthoritativeMetroWrapper,
+  hasExecutableMetroWrapperReference,
+  newCommonJsMetroConfigFile,
+} from '../metro-config-authority';
 
 export { setBundleDropProjectType } from '../../../expo/projectType';
 
@@ -87,7 +102,7 @@ const updateBundleDropConfig = (content: string): string => {
 };
 
 const findFirstExisting = (projectRoot: string, candidates: string[]) =>
-  candidates.find(candidate => fs.existsSync(path.join(projectRoot, candidate)));
+  candidates.find(candidate => inspectProjectFile(projectRoot, candidate).exists);
 
 export function planExpoProjectConfiguration(params: {
   projectRoot: string;
@@ -101,10 +116,10 @@ export function planExpoProjectConfiguration(params: {
     'app.config.cjs',
     'app.config.mjs',
   ]);
-  const appJsonPath = path.join(params.projectRoot, 'app.json');
+  const appJson = inspectProjectFile(params.projectRoot, 'app.json');
 
-  if (!appConfigFile && fs.existsSync(appJsonPath)) {
-    const original = fs.readFileSync(appJsonPath, 'utf8');
+  if (!appConfigFile && appJson.exists) {
+    const original = appJson.content;
     const updated = updateAppJson(original, params.migrateExpoUpdates);
     if (updated !== original) {
       changes.push({
@@ -116,15 +131,17 @@ export function planExpoProjectConfiguration(params: {
     }
   }
 
-  const metroFile = findFirstExisting(params.projectRoot, [
-    'metro.config.js',
-    'metro.config.ts',
-    'metro.config.cjs',
-    'metro.config.mjs',
-  ]);
+  const metroFile = findSingleMetroConfig(params.projectRoot);
   if (metroFile) {
-    const original = fs.readFileSync(path.join(params.projectRoot, metroFile), 'utf8');
-    if (!original.includes('withBundleDropExpo')) {
+    const original = inspectProjectFile(params.projectRoot, metroFile).content;
+    if (!hasAuthoritativeMetroWrapper(original, 'withBundleDropExpo')) {
+      if (hasExecutableMetroWrapperReference(original, 'withBundleDropExpo')) {
+        throw new Error(
+          `${metroFile} contains a non-authoritative withBundleDropExpo reference. ` +
+            'Remove the dead, aliased, or malformed wrapper before rerunning setup.',
+        );
+      }
+      assertCommonJsMetroConfig(params.projectRoot, metroFile);
       changes.push({
         file: metroFile,
         original,
@@ -133,18 +150,19 @@ export function planExpoProjectConfiguration(params: {
       });
     }
   } else {
+    const newMetroFile = newCommonJsMetroConfigFile(params.projectRoot);
     changes.push({
-      file: 'metro.config.js',
+      file: newMetroFile,
       original: null,
       updated: NEW_EXPO_METRO_CONFIG,
       reason: 'Create an Expo Metro config with the Bundle Drop wrapper.',
     });
   }
 
-  const bundleConfigPath = path.join(params.projectRoot, 'bundle.drop.config.js');
-  const bundleConfigExists = fs.existsSync(bundleConfigPath);
+  const bundleConfigFile = inspectProjectFile(params.projectRoot, 'bundle.drop.config.js');
+  const bundleConfigExists = bundleConfigFile.exists;
   const bundleConfig = bundleConfigExists
-    ? fs.readFileSync(bundleConfigPath, 'utf8')
+    ? bundleConfigFile.content
     : params.bundleConfigContent;
   if (!bundleConfig) {
     throw new Error('bundle.drop.config.js is required before Expo configuration can be planned.');
@@ -160,8 +178,9 @@ export function planExpoProjectConfiguration(params: {
   }
 
   if (params.migrateExpoUpdates) {
-    const packagePath = path.join(params.projectRoot, 'package.json');
-    const packageJson = fs.readFileSync(packagePath, 'utf8');
+    const packageFile = inspectProjectFile(params.projectRoot, 'package.json');
+    if (!packageFile.exists) throw new Error('package.json is required for expo-updates migration.');
+    const packageJson = packageFile.content;
     const updatedPackageJson = updatePackageJson(packageJson);
     if (updatedPackageJson !== packageJson) {
       changes.push({
@@ -173,17 +192,15 @@ export function planExpoProjectConfiguration(params: {
     }
   }
 
-  const fingerprintIgnorePath = path.join(params.projectRoot, '.fingerprintignore');
-  const fingerprintIgnore = fs.existsSync(fingerprintIgnorePath)
-    ? fs.readFileSync(fingerprintIgnorePath, 'utf8')
-    : '';
+  const fingerprintIgnoreFile = inspectProjectFile(params.projectRoot, '.fingerprintignore');
+  const fingerprintIgnore = fingerprintIgnoreFile.exists ? fingerprintIgnoreFile.content : '';
   if (
     EXPO_RUNTIME_SOURCE_PATTERN.test(updatedBundleConfig) &&
     !fingerprintIgnore.split(/\r?\n/).includes(TRANSIENT_GRADLE_KOTLIN_FINGERPRINT_PATTERN)
   ) {
     changes.push({
       file: '.fingerprintignore',
-      original: fs.existsSync(fingerprintIgnorePath) ? fingerprintIgnore : null,
+      original: fingerprintIgnoreFile.exists ? fingerprintIgnore : null,
       updated:
         `${fingerprintIgnore.trimEnd()}${fingerprintIgnore.trim() ? '\n' : ''}` +
         `${TRANSIENT_GRADLE_KOTLIN_FINGERPRINT_PATTERN}\n`,
@@ -191,14 +208,15 @@ export function planExpoProjectConfiguration(params: {
     });
   }
 
-  const gitignorePath = path.join(params.projectRoot, '.gitignore');
-  const gitignore = fs.existsSync(gitignorePath) ? fs.readFileSync(gitignorePath, 'utf8') : '';
-  if (!gitignore.split(/\r?\n/).includes('.bundle-drop/')) {
+  const gitignoreFile = inspectProjectFile(params.projectRoot, '.gitignore');
+  const gitignore = gitignoreFile.exists ? gitignoreFile.content : '';
+  const updatedGitignore = addRuntimeDeliveryBootstrapGitignoreRules(gitignore);
+  if (updatedGitignore !== gitignore) {
     changes.push({
       file: '.gitignore',
-      original: fs.existsSync(gitignorePath) ? gitignore : null,
-      updated: `${gitignore.trimEnd()}${gitignore.trim() ? '\n' : ''}.bundle-drop/\n`,
-      reason: 'Ignore generated build identity and Metro configuration artifacts.',
+      original: gitignoreFile.exists ? gitignore : null,
+      updated: updatedGitignore,
+      reason: 'Commit the public trust bootstrap while ignoring generated runtime artifacts.',
     });
   }
 
@@ -223,6 +241,7 @@ const assertSetupPathAllowed = (file: string) => {
     file === 'package.json' ||
     file === '.fingerprintignore' ||
     file === '.gitignore' ||
+    file === '.bundle-drop/runtime-delivery.generated.json' ||
     file === 'bundle.drop.config.js' ||
     file === 'app.json' ||
     /^app\.config\.(js|ts|cjs|mjs)$/.test(file) ||
@@ -234,20 +253,15 @@ const assertSetupPathAllowed = (file: string) => {
 
 export function restoreExpoConfiguration(result: ExpoSetupApplyResult) {
   for (const changed of [...result.changedFiles].reverse()) {
-    const targetPath = path.join(result.projectRoot, changed.file);
-    const backupPath = path.join(result.backupDir, changed.file);
     if (changed.existed) {
-      fs.copyFileSync(backupPath, targetPath);
-    } else if (fs.existsSync(targetPath)) {
-      fs.unlinkSync(targetPath);
+      restoreProjectFile(result.projectRoot, result.backupDir, changed.file);
+    } else {
+      removeProjectFile(result.projectRoot, changed.file);
     }
   }
   if (result.buildReceiptInvalidated) {
     const receiptFile = path.join('.bundle-drop', 'build-identity.json');
-    const targetPath = path.join(result.projectRoot, receiptFile);
-    const backupPath = path.join(result.backupDir, receiptFile);
-    fs.ensureDirSync(path.dirname(targetPath));
-    fs.copyFileSync(backupPath, targetPath);
+    restoreProjectFile(result.projectRoot, result.backupDir, receiptFile);
   }
 }
 
@@ -257,46 +271,48 @@ export function applyExpoConfigurationChanges(params: {
 }): ExpoSetupApplyResult {
   const result: ExpoSetupApplyResult = {
     projectRoot: params.projectRoot,
-    backupDir: path.join(
-      params.projectRoot,
-      '.bundledrop-backup',
-      new Date().toISOString().replace(/[:.]/g, '-'),
-    ),
+    backupDir: createSafeBackupDirectory(params.projectRoot, 'expo-setup'),
     changedFiles: [],
     buildReceiptInvalidated: false,
   };
 
   try {
     const receiptFile = path.join('.bundle-drop', 'build-identity.json');
-    const receiptPath = path.join(params.projectRoot, receiptFile);
-    if (fs.existsSync(receiptPath)) {
-      const backupPath = path.join(result.backupDir, receiptFile);
-      fs.ensureDirSync(path.dirname(backupPath));
-      fs.copyFileSync(receiptPath, backupPath);
-      fs.unlinkSync(receiptPath);
+    const receipt = inspectProjectFile(params.projectRoot, receiptFile);
+    if (receipt.exists) {
+      writeBackupFile(
+        result.backupDir,
+        receiptFile,
+        receipt.content,
+        receipt.mode,
+      );
+      removeProjectFile(params.projectRoot, receiptFile);
       result.buildReceiptInvalidated = true;
     }
     for (const change of params.changes) {
       assertSetupPathAllowed(change.file);
-      const targetPath = path.join(params.projectRoot, change.file);
-      const exists = fs.existsSync(targetPath);
-      if (exists !== (change.original !== null)) {
+      const target = inspectProjectFile(params.projectRoot, change.file);
+      if (target.exists !== (change.original !== null)) {
         throw new Error(`File existence changed since Expo setup preview: ${change.file}`);
       }
-      if (exists) {
-        const current = fs.readFileSync(targetPath, 'utf8');
-        if (sha256(current) !== sha256(change.original || '')) {
+      if (target.exists) {
+        if (sha256(target.content) !== sha256(change.original || '')) {
           throw new Error(`File changed since Expo setup preview: ${change.file}`);
         }
-        const backupPath = path.join(result.backupDir, change.file);
-        fs.ensureDirSync(path.dirname(backupPath));
-        fs.copyFileSync(targetPath, backupPath);
+        writeBackupFile(
+          result.backupDir,
+          change.file,
+          target.content,
+          target.mode,
+        );
       }
-      result.changedFiles.push({ file: change.file, existed: exists });
-      fs.ensureDirSync(path.dirname(targetPath));
-      const temporaryPath = `${targetPath}.bundledrop-tmp`;
-      fs.writeFileSync(temporaryPath, change.updated, 'utf8');
-      fs.renameSync(temporaryPath, targetPath);
+      result.changedFiles.push({ file: change.file, existed: target.exists });
+      writeProjectFileAtomically(
+        params.projectRoot,
+        change.file,
+        change.updated,
+        target.mode,
+      );
     }
     return result;
   } catch (error) {

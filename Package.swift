@@ -35,6 +35,7 @@ let package = Package(
         "BundleDropBridge.m",
         "BundleDropBundleVerifier.swift",
         "BundleDropFileOps.swift",
+        "BundleDropRuntimeCrypto.swift",
         "BundleDropLocator.h",
         "BundleDropLocator.m",
         "BundleDropLocator.swift",
@@ -74,6 +75,7 @@ let package = Package(
         "BundleDropBundleVerifier.swift",
         "BundleDropLocator.swift",
         "BundleDropOtaResolver.swift",
+        "BundleDropRuntimeCrypto.swift",
       ]
     ),
     .testTarget(

@@ -8,11 +8,14 @@ jest.mock('child_process', () => ({
 }));
 
 import {
+  codePushRemovalCommand,
   detectPackageManager,
   expoUpdatesRemovalCommand,
+  removeCodePushWithPackageManager,
   removeExpoUpdatesWithPackageManager,
   restoreDependencyMigration,
 } from '../../../../CLI/scripts/expo/package-manager';
+import * as safeFileTransaction from '../../../../CLI/scripts/safe-file-transaction';
 import { createTempProjectDir, removeTempDir } from '../../../utils/tempDir';
 
 describe('CLI/scripts/expo/package-manager', () => {
@@ -24,6 +27,7 @@ describe('CLI/scripts/expo/package-manager', () => {
   });
 
   afterEach(() => {
+    jest.restoreAllMocks();
     removeTempDir(projectRoot);
   });
 
@@ -77,6 +81,15 @@ describe('CLI/scripts/expo/package-manager', () => {
     expect(expoUpdatesRemovalCommand(manager)).toEqual(expected);
   });
 
+  it.each([
+    ['npm', ['npm', 'uninstall', 'react-native-code-push', '--legacy-peer-deps']],
+    ['yarn', ['yarn', 'remove', 'react-native-code-push']],
+    ['pnpm', ['pnpm', 'remove', 'react-native-code-push']],
+    ['bun', ['bun', 'remove', 'react-native-code-push']],
+  ] as const)('builds shell-free CodePush removal argv for %s', (manager, expected) => {
+    expect(codePushRemovalCommand(manager)).toEqual(expected);
+  });
+
   it('backs up package files, executes exact shell-free argv, and verifies removal', () => {
     const originalPackage = {
       packageManager: 'pnpm@10.0.0',
@@ -112,6 +125,40 @@ describe('CLI/scripts/expo/package-manager', () => {
     expect(JSON.parse(fs.readFileSync(path.join(projectRoot, 'package.json'), 'utf8')))
       .toEqual(originalPackage);
     expect(fs.readFileSync(path.join(projectRoot, 'pnpm-lock.yaml'), 'utf8')).toBe('original lock');
+  });
+
+  it('removes CodePush with the detected package manager and leaves it absent for rescans', () => {
+    const originalPackage = {
+      packageManager: 'yarn@4.0.0',
+      dependencies: {
+        'react-native': '0.86.0',
+        'react-native-code-push': '9.0.0',
+      },
+    };
+    writePackage(originalPackage);
+    fs.writeFileSync(path.join(projectRoot, 'yarn.lock'), 'original lock');
+    mockSpawnSync.mockImplementation((_command, _args, options) => {
+      const packagePath = path.join(options.cwd, 'package.json');
+      const pkg = JSON.parse(fs.readFileSync(packagePath, 'utf8'));
+      delete pkg.dependencies['react-native-code-push'];
+      fs.writeFileSync(packagePath, JSON.stringify(pkg));
+      fs.writeFileSync(path.join(options.cwd, 'yarn.lock'), 'updated lock');
+      return { status: 0 };
+    });
+
+    const backup = removeCodePushWithPackageManager(projectRoot);
+
+    expect(mockSpawnSync).toHaveBeenCalledWith(
+      'yarn',
+      ['remove', 'react-native-code-push'],
+      { cwd: projectRoot, stdio: 'inherit', shell: false },
+    );
+    expect(backup.backupDir).toContain('code-push-');
+    const migratedPackage = JSON.parse(
+      fs.readFileSync(path.join(projectRoot, 'package.json'), 'utf8'),
+    );
+    expect(migratedPackage.dependencies).toEqual({ 'react-native': '0.86.0' });
+    expect(JSON.stringify(migratedPackage)).not.toContain('react-native-code-push');
   });
 
   it.each([
@@ -161,6 +208,37 @@ describe('CLI/scripts/expo/package-manager', () => {
     expect(fs.existsSync(path.join(projectRoot, 'package-lock.json'))).toBe(false);
   });
 
+  it('fails safely if package.json disappears before its backup is written', () => {
+    writePackage({ dependencies: { 'expo-updates': '1.0.0' } });
+    const realInspect = safeFileTransaction.inspectProjectFile;
+    let packageInspections = 0;
+    jest.spyOn(safeFileTransaction, 'inspectProjectFile').mockImplementation((root, relativePath) => {
+      if (relativePath === 'package.json' && ++packageInspections === 3) {
+        return { exists: false, content: '', mode: 0o666 };
+      }
+      return realInspect(root, relativePath);
+    });
+
+    expect(() => removeExpoUpdatesWithPackageManager(projectRoot)).toThrow(
+      'Package file disappeared before migration: package.json',
+    );
+    expect(mockSpawnSync).not.toHaveBeenCalled();
+  });
+
+  it('restores the backup if a successful command removes package.json', () => {
+    const original = '{"dependencies":{"expo-updates":"1.0.0"}}\n';
+    fs.writeFileSync(path.join(projectRoot, 'package.json'), original);
+    mockSpawnSync.mockImplementation((_command, _args, options) => {
+      fs.unlinkSync(path.join(options.cwd, 'package.json'));
+      return { status: 0 };
+    });
+
+    expect(() => removeExpoUpdatesWithPackageManager(projectRoot)).toThrow(
+      'completed but package.json is missing',
+    );
+    expect(fs.readFileSync(path.join(projectRoot, 'package.json'), 'utf8')).toBe(original);
+  });
+
   it('checks optional and peer dependency declarations after command completion', () => {
     for (const dependencyGroup of ['optionalDependencies', 'peerDependencies']) {
       writePackage({ [dependencyGroup]: { 'expo-updates': '1.0.0' } });
@@ -168,6 +246,67 @@ describe('CLI/scripts/expo/package-manager', () => {
       expect(() => removeExpoUpdatesWithPackageManager(projectRoot)).toThrow(
         'expo-updates is still declared',
       );
+    }
+  });
+
+  it('rejects a symlinked dependency-migration backup root without spawning', () => {
+    const outsideRoot = createTempProjectDir();
+    const sentinel = path.join(outsideRoot, 'sentinel.txt');
+    fs.writeFileSync(sentinel, 'outside-safe');
+    writePackage({ dependencies: { 'expo-updates': '1.0.0' } });
+    fs.symlinkSync(outsideRoot, path.join(projectRoot, '.bundledrop-backup'));
+    try {
+      expect(() => removeExpoUpdatesWithPackageManager(projectRoot))
+        .toThrow('symlinked or non-directory');
+      expect(mockSpawnSync).not.toHaveBeenCalled();
+      expect(fs.readFileSync(sentinel, 'utf8')).toBe('outside-safe');
+    } finally {
+      removeTempDir(outsideRoot);
+    }
+  });
+
+  it('rejects symlinked package and lock files without changing external sentinels', () => {
+    const outsideRoot = createTempProjectDir();
+    const outsidePackage = path.join(outsideRoot, 'package.json');
+    const outsideLock = path.join(outsideRoot, 'yarn.lock');
+    const packageContent = JSON.stringify({
+      packageManager: 'yarn@4.0.0',
+      dependencies: { 'expo-updates': '1.0.0' },
+    });
+    fs.writeFileSync(outsidePackage, packageContent);
+    fs.writeFileSync(outsideLock, 'outside-lock');
+    fs.unlinkSync(path.join(projectRoot, 'package.json'));
+    fs.symlinkSync(outsidePackage, path.join(projectRoot, 'package.json'));
+    try {
+      expect(() => removeExpoUpdatesWithPackageManager(projectRoot))
+        .toThrow('symlinked or non-regular');
+      expect(mockSpawnSync).not.toHaveBeenCalled();
+      expect(fs.readFileSync(outsidePackage, 'utf8')).toBe(packageContent);
+
+      fs.unlinkSync(path.join(projectRoot, 'package.json'));
+      writePackage(JSON.parse(packageContent));
+      fs.symlinkSync(outsideLock, path.join(projectRoot, 'yarn.lock'));
+      expect(() => removeExpoUpdatesWithPackageManager(projectRoot))
+        .toThrow('symlinked or non-regular');
+      expect(mockSpawnSync).not.toHaveBeenCalled();
+      expect(fs.readFileSync(outsideLock, 'utf8')).toBe('outside-lock');
+    } finally {
+      removeTempDir(outsideRoot);
+    }
+  });
+
+  it('rejects a package symlink before parsing its external contents', () => {
+    const outsideRoot = createTempProjectDir();
+    const outsidePackage = path.join(outsideRoot, 'package.json');
+    fs.writeFileSync(outsidePackage, '{malformed external json');
+    fs.unlinkSync(path.join(projectRoot, 'package.json'));
+    fs.symlinkSync(outsidePackage, path.join(projectRoot, 'package.json'));
+    try {
+      expect(() => detectPackageManager(projectRoot)).toThrow('symlinked or non-regular');
+      expect(mockSpawnSync).not.toHaveBeenCalled();
+      expect(fs.readFileSync(outsidePackage, 'utf8')).toBe('{malformed external json');
+    } finally {
+      removeTempDir(outsideRoot);
     }
   });
 });

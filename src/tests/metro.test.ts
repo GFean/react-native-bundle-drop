@@ -10,7 +10,7 @@ jest.mock('../expo', () => ({
   resolveExpoMetroRuntimeVersion: (...args: unknown[]) => mockResolveExpoMetroRuntimeVersion(...args),
 }));
 
-import { withBundleDropExpo } from '../metro';
+import { withBundleDrop, withBundleDropExpo } from '../metro';
 import type { ExpoBuildIdentity } from '../expo';
 
 const identity = (platform: 'ios' | 'android'): ExpoBuildIdentity => {
@@ -33,13 +33,40 @@ const identity = (platform: 'ios' | 'android'): ExpoBuildIdentity => {
 describe('withBundleDropExpo', () => {
   const roots: string[] = [];
 
+  const readGeneratedConfig = (root: string): Record<string, unknown> => {
+    const generatedPath = path.join(root, '.bundle-drop/generated/bundle.drop.config.js');
+    delete require.cache[require.resolve(generatedPath)];
+    return require(generatedPath) as Record<string, unknown>;
+  };
+
   const fixture = () => {
     const root = createTempProjectDir();
     roots.push(root);
     fs.writeFileSync(
       path.join(root, 'bundle.drop.config.js'),
-      "module.exports = { serverUrl: 'https://api.example.com' };\n",
+      "module.exports = { serverUrl: 'https://api.example.com', org: { slug: 'org' }, project: { name: 'App', slug: 'app' } };\n",
     );
+    fs.ensureDirSync(path.join(root, '.bundle-drop'));
+    fs.writeJsonSync(path.join(root, '.bundle-drop/runtime-delivery.generated.json'), {
+      schemaVersion: 1,
+      project: {
+        serverUrl: 'https://api.example.com',
+        orgSlug: 'org',
+        projectSlug: 'app',
+      },
+      runtimeDelivery: {
+        manifestBaseUrl: 'https://manifests.example.com',
+        manifestAccessId: `mft_${'A'.repeat(43)}`,
+        publicKeys: {
+          key: {
+            kty: 'EC',
+            crv: 'P-256',
+            x: 'd-g4y_28QdARnFF6HO0T00laLEfHhVFXTmuWHqBWmfM',
+            y: '_Z_xWbhjDp3IVMtLA_rN3guVyprP34OvBikPWpVQfUI',
+          },
+        },
+      },
+    });
     return root;
   };
 
@@ -96,6 +123,14 @@ describe('withBundleDropExpo', () => {
     expect(fs.readFileSync(generatedPath, 'utf8')).toContain(
       'runtimeVersion: {"ios":"ios-runtime","android":"android-runtime"}',
     );
+    expect(fs.readFileSync(generatedPath, 'utf8')).toContain(
+      'runtimeDelivery: {"manifestBaseUrl":"https://manifests.example.com"',
+    );
+    expect(readGeneratedConfig(root)).toEqual(expect.objectContaining({
+      runtimeDelivery: expect.objectContaining({
+        manifestBaseUrl: 'https://manifests.example.com',
+      }),
+    }));
     expect(fs.existsSync(path.join(root, '.bundle-drop/build-identity.json'))).toBe(false);
   });
 
@@ -138,5 +173,87 @@ describe('withBundleDropExpo', () => {
     } finally {
       cwdSpy.mockRestore();
     }
+  });
+
+  it('wraps bare Metro config with the same generated trust bootstrap', () => {
+    const root = fixture();
+    const result = withBundleDrop(
+      { resolver: { sourceExts: ['js'], extraNodeModules: { existing: '/existing' } } },
+      { projectRoot: root },
+    );
+    const generatedPath = path.join(root, '.bundle-drop/generated/bundle.drop.config.js');
+    expect(result.resolver?.extraNodeModules).toEqual({
+      existing: '/existing',
+      'bundle-drop-config': generatedPath,
+    });
+    const generated = fs.readFileSync(generatedPath, 'utf8');
+    expect(generated).toContain(
+      'runtimeDelivery: {"manifestBaseUrl":"https://manifests.example.com"',
+    );
+    expect(readGeneratedConfig(root)).toEqual(expect.objectContaining({
+      runtimeDelivery: expect.objectContaining({
+        manifestBaseUrl: 'https://manifests.example.com',
+      }),
+    }));
+    expect(generated).not.toContain('runtimeVersion:');
+  });
+
+  it('uses the current project as the default bare root', () => {
+    const root = fixture();
+    const cwdSpy = jest.spyOn(process, 'cwd').mockReturnValue(root);
+    try {
+      const result = withBundleDrop<{
+        resolver?: { extraNodeModules?: Record<string, string> };
+      }>({});
+      expect(result.resolver?.extraNodeModules?.['bundle-drop-config']).toBe(
+        path.join(root, '.bundle-drop/generated/bundle.drop.config.js'),
+      );
+    } finally {
+      cwdSpy.mockRestore();
+    }
+  });
+
+  it('fails closed when generated trust belongs to another project', () => {
+    const root = fixture();
+    const bootstrapPath = path.join(root, '.bundle-drop/runtime-delivery.generated.json');
+    const bootstrap = fs.readJsonSync(bootstrapPath);
+    bootstrap.project.projectSlug = 'other-app';
+    fs.writeJsonSync(bootstrapPath, bootstrap);
+    expect(() => withBundleDrop({}, { projectRoot: root })).toThrow('belongs to a different');
+  });
+
+  it('ignores retired inline delivery authority when no generated bootstrap exists', () => {
+    const root = fixture();
+    fs.removeSync(path.join(root, '.bundle-drop/runtime-delivery.generated.json'));
+    fs.writeFileSync(
+      path.join(root, 'bundle.drop.config.js'),
+      "module.exports = { serverUrl: 'https://api.example.com', org: { slug: 'org' }, project: { name: 'App', slug: 'app' }, runtimeDelivery: { mode: 'v2', manifestBaseUrl: 'https://stale.example.com' } };\n",
+    );
+    withBundleDrop({}, { projectRoot: root });
+    const resolvedConfig = readGeneratedConfig(root) as {
+      runtimeDelivery?: { mode?: string };
+      serverUrl?: string;
+      org?: { slug?: string };
+      project?: { slug?: string };
+    };
+    expect(resolvedConfig).toEqual(expect.objectContaining({
+      serverUrl: 'https://api.example.com',
+      org: { slug: 'org' },
+      project: expect.objectContaining({ slug: 'app' }),
+    }));
+    expect(resolvedConfig).not.toHaveProperty('runtimeDelivery');
+    expect(resolvedConfig.runtimeDelivery?.mode ?? 'v1').toBe('v1');
+  });
+
+  it('rejects an incomplete base config even without a generated bootstrap', () => {
+    const invalidRoot = fixture();
+    fs.removeSync(path.join(invalidRoot, '.bundle-drop/runtime-delivery.generated.json'));
+    fs.writeFileSync(
+      path.join(invalidRoot, 'bundle.drop.config.js'),
+      "module.exports = { serverUrl: 'https://api.example.com' };\n",
+    );
+    expect(() => withBundleDrop({}, { projectRoot: invalidRoot })).toThrow(
+      'must define serverUrl, org.slug, and project.slug',
+    );
   });
 });

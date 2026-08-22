@@ -1,5 +1,6 @@
 import { defaultChannel } from '../context';
 import type { UpdatePolicy } from '../types';
+import type { RuntimeDeliveryDiagnosticEvent } from '../runtime-delivery/diagnostics';
 
 export const BUNDLE_DROP_NOT_INITIALIZED_MESSAGE =
   'BundleDrop has not been initialized. Call BundleDrop.init({ environment, ... }) before using OTA APIs or useBundleDrop().';
@@ -20,6 +21,8 @@ export type BundleDropInitOptions = {
   policy?: UpdatePolicy;
   /** Optional listener for human-readable status messages emitted during checks, downloads, and apply flow. */
   onStatusUpdate?: (status: string) => void;
+  /** Optional sink for structured runtime-delivery diagnostic counter events. */
+  onRuntimeDeliveryDiagnostic?: (event: RuntimeDeliveryDiagnosticEvent) => void;
   /** When `true`, startup performs only a resolve/check and skips download/apply even if policy would normally do more. */
   checkOnly?: boolean;
 };
@@ -38,6 +41,8 @@ export type BundleDropRuntimeConfig = {
   policy: UpdatePolicy;
   /** Optional listener receiving status messages from runtime actions. */
   onStatusUpdate?: (status: string) => void;
+  /** Optional sink receiving structured runtime-delivery diagnostic counter events. */
+  onRuntimeDeliveryDiagnostic?: (event: RuntimeDeliveryDiagnosticEvent) => void;
   /** Whether startup is limited to a resolve/check without downloading or applying. */
   checkOnly: boolean;
 };
@@ -48,6 +53,7 @@ type BundleDropInitConfig = {
   initialChannelName: string;
   policy: UpdatePolicy;
   onStatusUpdate?: (status: string) => void;
+  onRuntimeDeliveryDiagnostic?: (event: RuntimeDeliveryDiagnosticEvent) => void;
   checkOnly: boolean;
 };
 
@@ -103,6 +109,7 @@ export function resolveBundleDropRuntimeConfig(
     channelName,
     policy: options.policy || 'manual',
     onStatusUpdate: options.onStatusUpdate,
+    onRuntimeDeliveryDiagnostic: options.onRuntimeDeliveryDiagnostic,
     checkOnly: !!options.checkOnly,
   };
 }
@@ -121,6 +128,7 @@ export function initializeBundleDropRuntime(options: BundleDropInitOptions): {
       initialChannelName: nextConfig.channelName,
       policy: nextConfig.policy,
       onStatusUpdate: nextConfig.onStatusUpdate,
+      onRuntimeDeliveryDiagnostic: nextConfig.onRuntimeDeliveryDiagnostic,
       checkOnly: nextConfig.checkOnly,
     };
     runtimeConfigKey = nextKey;
@@ -137,6 +145,7 @@ export function initializeBundleDropRuntime(options: BundleDropInitOptions): {
   initConfig = {
     ...initConfig,
     onStatusUpdate: nextConfig.onStatusUpdate,
+    onRuntimeDeliveryDiagnostic: nextConfig.onRuntimeDeliveryDiagnostic,
   };
 
   return { config: assertBundleDropInitialized(), alreadyInitialized: true };
@@ -153,6 +162,7 @@ export function getBundleDropRuntimeConfig(): BundleDropRuntimeConfig | null {
     channelName: runtimeChannelName,
     policy: initConfig.policy,
     onStatusUpdate: initConfig.onStatusUpdate,
+    onRuntimeDeliveryDiagnostic: initConfig.onRuntimeDeliveryDiagnostic,
     checkOnly: initConfig.checkOnly,
   };
 }

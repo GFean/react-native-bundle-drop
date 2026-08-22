@@ -243,7 +243,9 @@ export function getRollbackPolicy(): Required<RollbackPolicy> {
   return bundleDropConfig.rollback;
 }
 
-export async function rollbackToPreviousOrNative(): Promise<{ rolledBack: boolean; toNative?: boolean }> {
+export async function rollbackToPreviousOrNative(
+  options: { forceNative?: boolean } = {},
+): Promise<{ rolledBack: boolean; toNative?: boolean }> {
   const [current, previous, state] = await Promise.all([
     readCurrentBundlePointer(),
     readPreviousBundlePointer(),
@@ -251,7 +253,7 @@ export async function rollbackToPreviousOrNative(): Promise<{ rolledBack: boolea
   ]);
   const previousIsFailed = previous ? !!state?.failedBundles?.[previous.hash] : false;
 
-  if (previous && previous.hash !== current?.hash && !previousIsFailed) {
+  if (!options.forceNative && previous && previous.hash !== current?.hash && !previousIsFailed) {
     await writeCurrentBundlePointer({ ...previous, updatedAt: new Date().toISOString() });
     const metadata = await readBundleMetadata(previous.bundlePath);
     await updateBundleInfo({

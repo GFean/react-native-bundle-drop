@@ -59,6 +59,50 @@ describe('api/clientApi', () => {
     );
   });
 
+  it('uses the shared artifact-authorization and throttled heartbeat contracts exactly', async () => {
+    const { clientApi, apiClient } = loadClientApiModule();
+    const post = jest.spyOn(apiClient, 'post').mockResolvedValue(apiResponse({ action: 'NOOP' }));
+    const authorization = {
+      channelName: 'General',
+      platform: 'android',
+      runtimeVersion: '1.0.0',
+      generation: 7,
+      targetReleaseRef: 'release-7',
+      targetHash: 'a'.repeat(64),
+      mode: 'patch' as const,
+      patchArtifactRef: 'patch-6-7',
+      currentHash: 'b'.repeat(64),
+      rejectedHashes: ['c'.repeat(64)],
+      installId: 'install-7',
+      transport: {
+        manifestVersion: 1 as const,
+        patchAlgorithms: ['xdelta3-vcdiff'],
+        supportsContentAddressedAssets: true,
+      },
+    };
+    await clientApi.postOtaArtifactAuthorization('team/app', authorization);
+    expect(post).toHaveBeenCalledWith(
+      '/projects/team%2Fapp/ota/artifacts/authorize',
+      authorization,
+      { headers: { Accept: 'application/json' }, timeout: 15000 },
+    );
+
+    const heartbeat = {
+      channelName: 'General',
+      platform: 'android',
+      runtimeVersion: '1.0.0',
+      installId: 'install-7',
+      currentHash: 'b'.repeat(64),
+      environment: 'production',
+    };
+    await clientApi.postOtaActiveInstallHeartbeat('team/app', heartbeat);
+    expect(post).toHaveBeenCalledWith(
+      '/projects/team%2Fapp/ota/active-install',
+      heartbeat,
+      { headers: { Accept: 'application/json' }, timeout: 3000 },
+    );
+  });
+
   it('calls the public channel and installed-report endpoints with encoded params', async () => {
     const { clientApi, apiClient } = loadClientApiModule();
     const get = jest.spyOn(apiClient, 'get').mockResolvedValue(apiResponse(['General']));

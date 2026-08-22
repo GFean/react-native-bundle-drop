@@ -3,13 +3,31 @@ import {
   getAvailableChannels,
   checkForUpdate,
   getInstalledBundleInfo,
+  authorizeRuntimeDeliveryUpdate,
 } from '../../manager/updateCheck';
 import type { OtaResolveResponse } from '../../api/types';
-import { mockGetBundleList, mockGetPublicChannels, mockPostOtaResolve } from '../mocks/api/clientApi';
-import { resetContextMocks, setMockConfig, setMockPlatform } from '../mocks/context';
-import { mockSupportsXdelta, resetNativeFsMocks, setMockFile } from '../mocks/native/fs';
+import {
+  mockGetBundleList,
+  mockGetPublicChannels,
+  mockPostOtaActiveInstallHeartbeat,
+  mockPostOtaArtifactAuthorization,
+  mockPostOtaResolve,
+} from '../mocks/api/clientApi';
+import {
+  resetContextMocks,
+  setMockConfig,
+  setMockPlatform,
+  setMockRuntimeVersion,
+} from '../mocks/context';
+import {
+  mockSupportsXdelta,
+  mockVerifyEs256Signature,
+  resetNativeFsMocks,
+  setMockFile,
+} from '../mocks/native/fs';
 import { mockGetDownloadedBundlePathNative, resetBundleDropNativeMocks } from '../mocks/native/bundleDropNative';
 import { initializeBundleDropRuntime, resetBundleDropRuntimeForTests } from '../../runtime/initState';
+import * as manifestStateModule from '../../runtime-delivery/manifestState';
 
 jest.mock('../../context', () => require('../mocks/context'));
 jest.mock('../../native/fs', () => require('../mocks/native/fs'));
@@ -22,6 +40,109 @@ const PREVIOUS_POINTER_PATH = '/mock/doc/bundle-drop/previous.json';
 const STATE_PATH = '/mock/doc/bundle-drop/state.json';
 const USER_PROPERTIES_PATH = '/mock/doc/bundle-drop/user-properties.json';
 const INSTALL_ID_PATH = '/mock/doc/bundle-drop/install-id.txt';
+const RUNTIME_DELIVERY_STATE_PATH = '/mock/doc/bundle-drop/runtime-delivery-state.json';
+const v2Hash = (character: string) => character.repeat(64);
+
+const makeV2Envelope = (overrides: Record<string, unknown> = {}) => {
+  const protectedHeader = Buffer.from(JSON.stringify({
+    alg: 'ES256',
+    kid: 'v2-key',
+    typ: 'bundledrop-manifest+jws',
+  })).toString('base64url');
+  const payload = Buffer.from(JSON.stringify({
+    schemaVersion: 3,
+    type: 'lane',
+    projectSlug: 'bundle-drop-app',
+    channelName: 'General',
+    platform: 'android',
+    runtimeVersion: '1.0.0',
+    generation: 4,
+    generatedAt: '2026-08-17T00:00:00.000Z',
+    resolutionMode: 'local',
+    publishingMode: 'automatic',
+    rolloutAlgorithm: 'sha256-install-id-uint32be-mod100-v1',
+    revokedHashes: [],
+    releases: [{
+      releaseRef: 'release-next',
+      bundleHash: v2Hash('a'),
+      bundleVersion: 4,
+      version: '1.0.4',
+      runtimeVersion: '1.0.0',
+      manifestHash: v2Hash('b'),
+      jsBundleHash: v2Hash('c'),
+      fullBundleHash: v2Hash('d'),
+      fullBundleSizeBytes: 1000,
+      available: true,
+      expiresAt: null,
+    }],
+    publishedRollouts: [],
+    patchPolicy: { enabled: true, maxPatchToFullRatio: 0.7 },
+    patchEdges: [],
+    candidateSetComplete: true,
+    ...overrides,
+  })).toString('base64url');
+  return JSON.stringify({
+    protected: protectedHeader,
+    payload,
+    signature: 'A'.repeat(86),
+  });
+};
+
+const manifestResponse = (body = makeV2Envelope()): Response => new Response(body, {
+  status: 200,
+  headers: { 'content-type': 'application/jose+json' },
+});
+
+const makeAuthorityLeaseEnvelope = () => {
+  const now = Date.now();
+  return JSON.stringify({
+    protected: Buffer.from(JSON.stringify({
+      alg: 'ES256',
+      kid: 'v2-key',
+      typ: 'bundledrop-authority-lease+jws',
+    })).toString('base64url'),
+    payload: Buffer.from(JSON.stringify({
+      schemaVersion: 1,
+      type: 'publisher-lease',
+      manifestOrigin: 'https://manifests.example.com',
+      generatedAt: new Date(now - 1_000).toISOString(),
+      expiresAt: new Date(now + 10_000).toISOString(),
+    })).toString('base64url'),
+    signature: 'A'.repeat(86),
+  });
+};
+
+const authorityLeaseResponse = (): Response => new Response(makeAuthorityLeaseEnvelope(), {
+  status: 200,
+  headers: { 'content-type': 'application/jose+json' },
+});
+
+const mockV2Fetch = (...manifestBodies: string[]): jest.SpyInstance => {
+  let manifestIndex = 0;
+  return jest.spyOn(global, 'fetch').mockImplementation(input => {
+    if (String(input).includes('/v2/_authority/publisher-lease.json')) {
+      return Promise.resolve(authorityLeaseResponse()) as never;
+    }
+    const lastManifestBody = manifestBodies.length > 0
+      ? manifestBodies[manifestBodies.length - 1]
+      : undefined;
+    const body = manifestBodies[manifestIndex] ?? lastManifestBody ?? makeV2Envelope();
+    manifestIndex += 1;
+    return Promise.resolve(manifestResponse(body)) as never;
+  });
+};
+
+const enableRuntimeDelivery = () => {
+  setMockConfig({
+    runtimeDelivery: {
+      manifestBaseUrl: 'https://manifests.example.com',
+      manifestAccessId: 'access-id',
+      publicKeys: {
+        'v2-key': { kty: 'EC', crv: 'P-256', x: 'A'.repeat(43), y: 'A'.repeat(43) },
+      },
+    },
+  });
+};
 
 describe('manager/updateCheck', () => {
   beforeEach(() => {
@@ -32,6 +153,489 @@ describe('manager/updateCheck', () => {
     mockGetBundleList.mockReset();
     mockGetPublicChannels.mockReset();
     mockPostOtaResolve.mockReset();
+    mockPostOtaArtifactAuthorization.mockReset();
+    mockPostOtaActiveInstallHeartbeat.mockReset().mockResolvedValue({ data: undefined } as never);
+  });
+
+  it('uses a verified complete v2 manifest without calling /resolve', async () => {
+    enableRuntimeDelivery();
+    setMockFile(INSTALL_ID_PATH, 'install-1');
+    mockVerifyEs256Signature.mockResolvedValue(true);
+    const fetchSpy = mockV2Fetch();
+    try {
+      await expect(checkForUpdate()).resolves.toEqual({
+        action: 'INSTALL',
+        upToDate: false,
+        channelName: 'General',
+        hash: v2Hash('a'),
+        bundleHash: v2Hash('a'),
+        bundleVersion: 4,
+        version: '1.0.4',
+        runtimeVersion: '1.0.0',
+        mode: 'full',
+        baseHash: undefined,
+        runtimeDelivery: {
+          generation: 4,
+          targetReleaseRef: 'release-next',
+          selectedMode: 'full',
+          baseHash: undefined,
+          patchAlgorithm: undefined,
+          patchSetHash: undefined,
+          patchArtifactRef: undefined,
+          missingAssetsHash: undefined,
+          manifestHash: v2Hash('b'),
+          jsBundleHash: v2Hash('c'),
+          fullBundleHash: v2Hash('d'),
+        },
+      });
+      expect(mockPostOtaResolve).not.toHaveBeenCalled();
+      expect(fetchSpy).toHaveBeenCalledWith(
+        'https://manifests.example.com/v2/access-id/lanes/R2VuZXJhbA/android/MS4wLjA/current.json',
+        expect.objectContaining({ method: 'GET' }),
+      );
+    } finally {
+      fetchSpy.mockRestore();
+    }
+  });
+
+  it('emits local rollback and no-op statuses from verified v2 manifests', async () => {
+    enableRuntimeDelivery();
+    setMockFile(INSTALL_ID_PATH, 'install-1');
+    setMockFile(CURRENT_POINTER_PATH, JSON.stringify({ hash: v2Hash('9') }));
+    mockGetDownloadedBundlePathNative.mockResolvedValue(
+      `/mock/doc/bundle-drop/bundles/${v2Hash('9')}/main.jsbundle`,
+    );
+    mockVerifyEs256Signature.mockResolvedValue(true);
+    const fetchSpy = mockV2Fetch(
+      makeV2Envelope({
+        revokedHashes: [v2Hash('9')],
+        releases: [],
+      }),
+      makeV2Envelope({ generation: 5 }),
+    );
+    const status = jest.fn();
+    try {
+      await expect(checkForUpdate('General', status)).resolves.toEqual(expect.objectContaining({
+        action: 'ROLLBACK',
+        reason: 'CURRENT_REVOKED_NO_COMPATIBLE_TARGET',
+      }));
+      expect(status).toHaveBeenLastCalledWith('↩️ Rollback requested');
+
+      setMockFile(CURRENT_POINTER_PATH, JSON.stringify({ hash: v2Hash('a') }));
+      mockGetDownloadedBundlePathNative.mockResolvedValue(
+        `/mock/doc/bundle-drop/bundles/${v2Hash('a')}/main.jsbundle`,
+      );
+      await expect(checkForUpdate('General', status)).resolves.toEqual(expect.objectContaining({
+        action: 'NOOP',
+        reason: 'UP_TO_DATE',
+      }));
+      expect(status).toHaveBeenLastCalledWith('✅ You have the latest version');
+    } finally {
+      fetchSpy.mockRestore();
+    }
+  });
+
+  it('keeps targeted/dynamic lanes and invalid manifests authoritative on /resolve', async () => {
+    enableRuntimeDelivery();
+    mockVerifyEs256Signature.mockResolvedValue(true);
+    mockPostOtaResolve.mockResolvedValue({ data: { action: 'NOOP', reason: 'TARGETING_NOT_MATCHED' } } as never);
+    const fetchSpy = mockV2Fetch(
+      makeV2Envelope({
+        resolutionMode: 'dynamic',
+        dynamicReason: 'private-targeting',
+        candidateSetComplete: false,
+        releases: [],
+        publishedRollouts: [],
+        patchEdges: [],
+      }),
+      JSON.stringify({ protected: 'bad', payload: 'bad', signature: 'bad' }),
+    );
+    try {
+      await expect(checkForUpdate()).resolves.toEqual(expect.objectContaining({
+        action: 'NOOP',
+        reason: 'TARGETING_NOT_MATCHED',
+      }));
+      expect(mockPostOtaResolve).toHaveBeenCalledTimes(1);
+      expect(mockPostOtaResolve).toHaveBeenLastCalledWith(
+        'bundle-drop-app',
+        expect.objectContaining({
+          transport: expect.objectContaining({ activeInstallHeartbeatVersion: 1 }),
+        }),
+      );
+      await new Promise(resolve => setTimeout(resolve, 0));
+      expect(mockPostOtaActiveInstallHeartbeat).toHaveBeenCalledTimes(1);
+
+      setMockFile(CURRENT_POINTER_PATH, JSON.stringify({ hash: v2Hash('8') }));
+      mockGetDownloadedBundlePathNative.mockResolvedValue(
+        `/mock/doc/bundle-drop/bundles/${v2Hash('8')}/main.jsbundle`,
+      );
+      await checkForUpdate();
+      expect(mockPostOtaResolve).toHaveBeenCalledTimes(2);
+      expect(mockPostOtaResolve).toHaveBeenLastCalledWith(
+        'bundle-drop-app',
+        expect.objectContaining({
+          transport: expect.objectContaining({ activeInstallHeartbeatVersion: 1 }),
+        }),
+      );
+      await new Promise(resolve => setTimeout(resolve, 0));
+      expect(mockPostOtaActiveInstallHeartbeat).toHaveBeenCalledTimes(2);
+    } finally {
+      fetchSpy.mockRestore();
+    }
+  });
+
+  it('falls back to /resolve when existing anti-rollback state is malformed', async () => {
+    enableRuntimeDelivery();
+    setMockFile(INSTALL_ID_PATH, 'install-1');
+    setMockFile(RUNTIME_DELIVERY_STATE_PATH, '{');
+    mockVerifyEs256Signature.mockResolvedValue(true);
+    mockPostOtaResolve.mockResolvedValue({
+      data: { action: 'NOOP', reason: 'UP_TO_DATE' },
+    } as never);
+    const fetchSpy = mockV2Fetch();
+    const warn = jest.spyOn(console, 'warn').mockImplementation(() => undefined);
+    try {
+      await expect(checkForUpdate()).resolves.toEqual(expect.objectContaining({
+        action: 'NOOP',
+        reason: 'UP_TO_DATE',
+      }));
+      expect(mockPostOtaResolve).toHaveBeenCalledTimes(1);
+    } finally {
+      fetchSpy.mockRestore();
+      warn.mockRestore();
+    }
+  });
+
+  it('uses persisted revocations when both the v2 manifest and origin resolver are unavailable', async () => {
+    enableRuntimeDelivery();
+    setMockFile(INSTALL_ID_PATH, 'install-1');
+    setMockFile(CURRENT_POINTER_PATH, JSON.stringify({ hash: v2Hash('9') }));
+    setMockFile(RUNTIME_DELIVERY_STATE_PATH, JSON.stringify({
+      schemaVersion: 1,
+      lanes: {
+        'bundle-drop-app/General/android/1.0.0': {
+          highestGeneration: 4,
+          payloadSha256: v2Hash('e'),
+          revokedHashes: [v2Hash('9')],
+          verifiedAt: '2026-08-17T00:00:00.000Z',
+        },
+      },
+    }));
+    mockGetDownloadedBundlePathNative.mockResolvedValue(
+      `/mock/doc/bundle-drop/bundles/${v2Hash('9')}/main.jsbundle`,
+    );
+    mockPostOtaResolve.mockRejectedValue(new Error('origin offline'));
+    const fetchSpy = jest.spyOn(global, 'fetch').mockRejectedValue(new Error('manifest offline'));
+    const warn = jest.spyOn(console, 'warn').mockImplementation(() => undefined);
+    try {
+      await expect(checkForUpdate()).resolves.toEqual({
+        action: 'ROLLBACK',
+        channelName: 'General',
+        reason: 'CURRENT_REVOKED_ORIGIN_UNAVAILABLE',
+      });
+    } finally {
+      fetchSpy.mockRestore();
+      warn.mockRestore();
+    }
+  });
+
+  it('authorizes v2 artifacts only at install time and validates the target identity', async () => {
+    enableRuntimeDelivery();
+    setMockFile(INSTALL_ID_PATH, 'install-1');
+    mockPostOtaArtifactAuthorization.mockResolvedValue({
+      data: {
+        action: 'INSTALL',
+        mode: 'full',
+        target: {
+          bundleHash: v2Hash('a'),
+          bundleVersion: 4,
+          version: '1.0.4',
+          runtimeVersion: '1.0.0',
+          downloadUrl: 'https://cdn.example.com/bundle.zip',
+          manifestUrl: 'https://cdn.example.com/bundle-manifest.json',
+        },
+      },
+    } as never);
+    const decision = await authorizeRuntimeDeliveryUpdate({
+      action: 'INSTALL',
+      channelName: 'General',
+      hash: v2Hash('a'),
+      runtimeVersion: '1.0.0',
+      mode: 'full',
+      runtimeDelivery: { generation: 4, targetReleaseRef: 'release-next', selectedMode: 'full' },
+    });
+    expect(decision).toEqual(expect.objectContaining({
+      action: 'INSTALL',
+      hash: v2Hash('a'),
+      downloadUrl: 'https://cdn.example.com/bundle.zip',
+    }));
+    expect(mockPostOtaArtifactAuthorization).toHaveBeenCalledWith(
+      'bundle-drop-app',
+      expect.objectContaining({
+        generation: 4,
+        targetReleaseRef: 'release-next',
+        targetHash: v2Hash('a'),
+        mode: 'full',
+        patchArtifactRef: null,
+        installId: 'install-1',
+      }),
+    );
+  });
+
+  it('accepts an authorized full fallback for a selected patch and rejects unsafe patch changes', async () => {
+    enableRuntimeDelivery();
+    setMockFile(INSTALL_ID_PATH, 'install-1');
+    const selectedPatch = {
+      action: 'INSTALL' as const,
+      channelName: 'General',
+      hash: v2Hash('a'),
+      runtimeVersion: '1.0.0',
+      mode: 'patch' as const,
+      baseHash: v2Hash('9'),
+      runtimeDelivery: {
+        generation: 5,
+        targetReleaseRef: 'release-next',
+        selectedMode: 'patch' as const,
+        baseHash: v2Hash('9'),
+        patchAlgorithm: 'xdelta3-vcdiff',
+        patchSetHash: v2Hash('8'),
+        patchArtifactRef: 'patch-next',
+      },
+    };
+    mockPostOtaArtifactAuthorization.mockResolvedValueOnce({
+      data: {
+        action: 'INSTALL',
+        mode: 'full',
+        target: {
+          bundleHash: v2Hash('a'),
+          runtimeVersion: '1.0.0',
+          downloadUrl: 'https://cdn.example.com/full.zip',
+          manifestUrl: 'https://cdn.example.com/manifest.json',
+        },
+      },
+    } as never);
+    await expect(authorizeRuntimeDeliveryUpdate(selectedPatch)).resolves.toEqual(
+      expect.objectContaining({ action: 'INSTALL', mode: 'full', hash: v2Hash('a') }),
+    );
+
+    mockPostOtaArtifactAuthorization.mockResolvedValueOnce({
+      data: {
+        action: 'INSTALL',
+        mode: 'patch',
+        baseHash: v2Hash('7'),
+        target: {
+          bundleHash: v2Hash('a'),
+          runtimeVersion: '1.0.0',
+          manifestUrl: 'https://cdn.example.com/manifest.json',
+        },
+        patchSet: {
+          algorithm: 'xdelta3-vcdiff',
+          patchSetHash: v2Hash('8'),
+          patchesUrl: 'https://cdn.example.com/patch.zip',
+        },
+        fallback: { mode: 'full', downloadUrl: 'https://cdn.example.com/full.zip' },
+      },
+    } as never);
+    mockPostOtaResolve.mockResolvedValueOnce({ data: { action: 'NOOP', reason: 'UP_TO_DATE' } } as never);
+    await expect(authorizeRuntimeDeliveryUpdate(selectedPatch)).resolves.toEqual(
+      expect.objectContaining({ action: 'NOOP', reason: 'UP_TO_DATE' }),
+    );
+    expect(mockPostOtaResolve).toHaveBeenCalledTimes(1);
+
+    const authorizedPatch = (overrides: Record<string, unknown> = {}) => ({
+      action: 'INSTALL' as const,
+      mode: 'patch' as const,
+      baseHash: v2Hash('9'),
+      target: {
+        bundleHash: v2Hash('a'),
+        runtimeVersion: '1.0.0',
+        manifestUrl: 'https://cdn.example.com/manifest.json',
+      },
+      patchSet: {
+        algorithm: 'xdelta3-vcdiff',
+        patchSetHash: v2Hash('8'),
+        patchesUrl: 'https://cdn.example.com/patch.zip',
+        ...overrides,
+      },
+      fallback: { mode: 'full' as const, downloadUrl: 'https://cdn.example.com/full.zip' },
+    });
+    const unsafePatchResponses = [
+      authorizedPatch({ algorithm: 'asset-only-v1' }),
+      authorizedPatch({ patchSetHash: v2Hash('7') }),
+      authorizedPatch({ assets: { missingAssetsHash: v2Hash('6') } }),
+    ];
+    mockPostOtaResolve.mockResolvedValue({ data: { action: 'NOOP', reason: 'UP_TO_DATE' } } as never);
+    for (const response of unsafePatchResponses) {
+      mockPostOtaArtifactAuthorization.mockResolvedValueOnce({ data: response } as never);
+      await expect(authorizeRuntimeDeliveryUpdate(selectedPatch)).resolves.toEqual(
+        expect.objectContaining({ action: 'NOOP', reason: 'UP_TO_DATE' }),
+      );
+    }
+
+    mockPostOtaArtifactAuthorization.mockResolvedValueOnce({ data: authorizedPatch() } as never);
+    await expect(authorizeRuntimeDeliveryUpdate(selectedPatch)).resolves.toEqual(
+      expect.objectContaining({
+        action: 'INSTALL',
+        mode: 'patch',
+        baseHash: v2Hash('9'),
+        runtimeDelivery: selectedPatch.runtimeDelivery,
+      }),
+    );
+  });
+
+  it('falls back to /resolve when artifact authorization reports a stale generation', async () => {
+    enableRuntimeDelivery();
+    setMockFile(INSTALL_ID_PATH, 'install-1');
+    mockPostOtaArtifactAuthorization.mockRejectedValueOnce(new Error('HTTP 409 stale generation'));
+    mockPostOtaResolve.mockResolvedValueOnce({ data: { action: 'NOOP', reason: 'UP_TO_DATE' } } as never);
+    await expect(authorizeRuntimeDeliveryUpdate({
+      action: 'INSTALL',
+      channelName: 'General',
+      hash: v2Hash('a'),
+      runtimeVersion: '1.0.0',
+      mode: 'full',
+      runtimeDelivery: {
+        generation: 3,
+        targetReleaseRef: 'release-next',
+        selectedMode: 'full',
+      },
+    })).resolves.toEqual(expect.objectContaining({ action: 'NOOP', reason: 'UP_TO_DATE' }));
+    expect(mockPostOtaResolve).toHaveBeenCalledTimes(1);
+  });
+
+  it('passes through non-v2 decisions and accepts authoritative non-install authorization results', async () => {
+    const noop = { action: 'NOOP' as const, channelName: 'General', reason: 'UP_TO_DATE' };
+    await expect(authorizeRuntimeDeliveryUpdate(noop)).resolves.toBe(noop);
+    const v1Install = { action: 'INSTALL' as const, channelName: 'General', hash: v2Hash('a') };
+    await expect(authorizeRuntimeDeliveryUpdate(v1Install)).resolves.toBe(v1Install);
+
+    enableRuntimeDelivery();
+    setMockFile(INSTALL_ID_PATH, 'install-1');
+    mockPostOtaArtifactAuthorization.mockResolvedValueOnce({
+      data: { action: 'ROLLBACK', reason: 'CURRENT_REVOKED' },
+    } as never);
+    await expect(authorizeRuntimeDeliveryUpdate({
+      action: 'INSTALL',
+      channelName: 'General',
+      hash: v2Hash('a'),
+      runtimeDelivery: { generation: 4, targetReleaseRef: 'release-next', selectedMode: 'full' },
+    })).resolves.toEqual({
+      action: 'ROLLBACK',
+      channelName: 'General',
+      reason: 'CURRENT_REVOKED',
+    });
+  });
+
+  it('rejects changed authorization targets and missing runtime identity through safe /resolve fallback', async () => {
+    enableRuntimeDelivery();
+    setMockFile(INSTALL_ID_PATH, 'install-1');
+    const local = {
+      action: 'INSTALL' as const,
+      channelName: 'General',
+      hash: v2Hash('a'),
+      runtimeDelivery: { generation: 4, targetReleaseRef: 'release-next', selectedMode: 'full' as const },
+    };
+    mockPostOtaArtifactAuthorization.mockResolvedValueOnce({
+      data: {
+        action: 'INSTALL',
+        mode: 'full',
+        target: {
+          bundleHash: v2Hash('b'),
+          runtimeVersion: '1.0.0',
+          downloadUrl: 'https://cdn.example.com/other.zip',
+          manifestUrl: 'https://cdn.example.com/other-manifest.json',
+        },
+      },
+    } as never);
+    mockPostOtaResolve.mockResolvedValueOnce({ data: { action: 'NOOP', reason: 'UP_TO_DATE' } } as never);
+    await expect(authorizeRuntimeDeliveryUpdate(local)).resolves.toEqual(expect.objectContaining({
+      action: 'NOOP',
+    }));
+    expect(mockPostOtaResolve).toHaveBeenLastCalledWith(
+      'bundle-drop-app',
+      expect.objectContaining({
+        transport: expect.objectContaining({ activeInstallHeartbeatVersion: 1 }),
+      }),
+    );
+
+    setMockRuntimeVersion(undefined);
+    mockPostOtaResolve.mockResolvedValueOnce({ data: { action: 'NOOP', reason: 'UP_TO_DATE' } } as never);
+    await expect(authorizeRuntimeDeliveryUpdate(local)).resolves.toEqual(expect.objectContaining({
+      action: 'NOOP',
+    }));
+  });
+
+  it('returns rollback or null when authorization and origin fallback both fail', async () => {
+    enableRuntimeDelivery();
+    setMockFile(INSTALL_ID_PATH, 'install-1');
+    setMockFile(CURRENT_POINTER_PATH, JSON.stringify({ hash: v2Hash('9') }));
+    setMockFile(RUNTIME_DELIVERY_STATE_PATH, JSON.stringify({
+      schemaVersion: 1,
+      lanes: {
+        'bundle-drop-app/General/android/1.0.0': {
+          highestGeneration: 4,
+          payloadSha256: v2Hash('e'),
+          revokedHashes: [v2Hash('9')],
+          verifiedAt: '2026-08-17T00:00:00.000Z',
+        },
+      },
+    }));
+    mockGetDownloadedBundlePathNative.mockResolvedValue(
+      `/mock/doc/bundle-drop/bundles/${v2Hash('9')}/main.jsbundle`,
+    );
+    const local = {
+      action: 'INSTALL' as const,
+      channelName: 'General',
+      hash: v2Hash('a'),
+      runtimeDelivery: { generation: 4, targetReleaseRef: 'release-next', selectedMode: 'full' as const },
+    };
+    mockPostOtaArtifactAuthorization.mockRejectedValue(new Error('authorization offline'));
+    mockPostOtaResolve.mockRejectedValue(new Error('origin offline'));
+    const warn = jest.spyOn(console, 'warn').mockImplementation(() => undefined);
+    try {
+      await expect(authorizeRuntimeDeliveryUpdate(local)).resolves.toEqual({
+        action: 'ROLLBACK',
+        channelName: 'General',
+        reason: 'CURRENT_REVOKED_ORIGIN_UNAVAILABLE',
+      });
+
+      setMockFile(RUNTIME_DELIVERY_STATE_PATH, JSON.stringify({ schemaVersion: 1, lanes: {} }));
+      await expect(authorizeRuntimeDeliveryUpdate(local)).resolves.toBeNull();
+    } finally {
+      warn.mockRestore();
+    }
+  });
+
+  it('fails safely when last-known revocation state itself cannot be read', async () => {
+    enableRuntimeDelivery();
+    setMockFile(INSTALL_ID_PATH, 'install-1');
+    setMockFile(CURRENT_POINTER_PATH, JSON.stringify({ hash: v2Hash('9') }));
+    mockGetDownloadedBundlePathNative.mockResolvedValue(
+      `/mock/doc/bundle-drop/bundles/${v2Hash('9')}/main.jsbundle`,
+    );
+    const stateSpy = jest.spyOn(manifestStateModule, 'readVerifiedLaneState')
+      .mockRejectedValue(new Error('state unavailable'));
+    const fetchSpy = jest.spyOn(global, 'fetch').mockRejectedValue(new Error('manifest offline'));
+    mockPostOtaResolve.mockRejectedValue(new Error('origin offline'));
+    const warn = jest.spyOn(console, 'warn').mockImplementation(() => undefined);
+    try {
+      await expect(checkForUpdate()).resolves.toBeNull();
+      mockPostOtaArtifactAuthorization.mockRejectedValue(new Error('authorization offline'));
+      await expect(authorizeRuntimeDeliveryUpdate({
+        action: 'INSTALL',
+        channelName: 'General',
+        hash: v2Hash('a'),
+        runtimeDelivery: {
+          generation: 4,
+          targetReleaseRef: 'release-next',
+          selectedMode: 'full',
+        },
+      })).resolves.toBeNull();
+    } finally {
+      stateSpy.mockRestore();
+      fetchSpy.mockRestore();
+      warn.mockRestore();
+    }
   });
 
   it('fetches the available public channels for the configured project', async () => {

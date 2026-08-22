@@ -16,6 +16,12 @@ type MockConfig = {
   runtimeVersion?: RuntimeVersionConfig;
   defaultChannel?: string;
   rollback?: RollbackConfig;
+  runtimeDelivery?: {
+    mode?: 'v1' | 'shadow' | 'v2';
+    manifestBaseUrl: string;
+    manifestAccessId: string;
+    publicKeys: Record<string, { kty: 'EC'; crv: 'P-256'; x: string; y: string }>;
+  };
 };
 
 type MockBundleDropContext = {
@@ -30,6 +36,7 @@ type MockBundleDropContext = {
     healthCheckMode: 'auto' | 'manual';
     healthyAfterSec: number;
   };
+  runtimeDelivery?: MockConfig['runtimeDelivery'];
 };
 
 const createConfig = (): MockConfig => ({
@@ -94,6 +101,7 @@ const syncDerivedValues = () => {
       healthCheckMode: config.rollback?.healthCheckMode === 'manual' ? 'manual' : 'auto',
       healthyAfterSec: config.rollback?.healthyAfterSec ?? 0,
     },
+    runtimeDelivery: config.runtimeDelivery,
   };
 };
 
@@ -116,6 +124,7 @@ export let bundleDropConfig: MockBundleDropContext = {
     healthCheckMode: config.rollback?.healthCheckMode === 'manual' ? 'manual' : 'auto',
     healthyAfterSec: config.rollback?.healthyAfterSec ?? 0,
   },
+  runtimeDelivery: config.runtimeDelivery,
 };
 
 export const setMockConfig = (partial: Partial<MockConfig>) => {
@@ -125,6 +134,13 @@ export const setMockConfig = (partial: Partial<MockConfig>) => {
 
 export const setMockPlatform = (nextPlatform: 'ios' | 'android') => {
   platform = nextPlatform;
+  syncDerivedValues();
+};
+
+export const setMockRuntimeVersion = (nextRuntimeVersion: string | undefined) => {
+  config.runtimeVersion = nextRuntimeVersion
+    ? { ios: nextRuntimeVersion, android: nextRuntimeVersion }
+    : undefined;
   syncDerivedValues();
 };
 

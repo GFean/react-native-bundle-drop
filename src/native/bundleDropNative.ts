@@ -7,7 +7,8 @@ export function isBundleDropNativeAvailable(): boolean {
 }
 
 export function isExpoOtaStartupEnabledNative(): boolean {
-  return BundleDropExpoIdentity?.otaStartupEnabled === true;
+  const nativeValue = BundleDropExpoIdentity?.otaStartupEnabled;
+  return nativeValue === true || nativeValue === 1;
 }
 
 export async function getDownloadedBundlePathNative(): Promise<string | null> {

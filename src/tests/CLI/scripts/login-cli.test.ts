@@ -741,6 +741,7 @@ describe('CLI/scripts/login-cli', () => {
       organizations: [{ name: 'Alpha', slug: 'alpha-org', orgId: 'org-1' }],
       downloadApiKey: 'download-key',
       authToken: 'jwt-token',
+      dryRun: true,
       projectType: 'expo',
     });
     expect(mockRunPostInitPrompts).toHaveBeenCalledWith({ projectType: 'expo' });
@@ -824,7 +825,7 @@ describe('CLI/scripts/login-cli', () => {
     expect(process.exitCode).toBe(1);
   });
 
-  it('falls back to a printed URL when the browser cannot be opened and skips setup for existing configs', async () => {
+  it('falls back to a printed URL and refreshes bootstrap without rerunning existing setup', async () => {
     queuePromptResponse({ shouldOpenBrowser: true });
     mockHasExistingBundleDropConfig.mockReturnValue(true);
     mockSpawn.mockImplementation(() => createSpawnChild('error'));
@@ -875,16 +876,15 @@ describe('CLI/scripts/login-cli', () => {
 
     await loginPromise;
 
-    expect(mockInitConfig).not.toHaveBeenCalled();
+    expect(mockInitConfig).toHaveBeenCalledWith(expect.objectContaining({
+      authToken: 'jwt-token',
+      dryRun: false,
+    }));
+    expect(mockDetectProjectType).not.toHaveBeenCalled();
     expect(mockRunPostInitPrompts).not.toHaveBeenCalled();
     expect(
       consoleLogSpy.mock.calls.some(call =>
         call.join(' ').includes('Could not open the browser automatically. Open this URL manually:')
-      ),
-    ).toBe(true);
-    expect(
-      consoleLogSpy.mock.calls.some(call =>
-        call.join(' ').includes('Skipping setup prompts.')
       ),
     ).toBe(true);
   });
