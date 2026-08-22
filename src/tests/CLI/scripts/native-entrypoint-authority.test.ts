@@ -61,6 +61,18 @@ describe('CLI/scripts/native-entrypoint-authority', () => {
     expect(findNativeEntrypointAuthorityIssue(projectRoot, 'android', [entrypoint])).toBeNull();
   });
 
+  it('ignores commented Android application declarations without joining surrounding markup', () => {
+    const entrypoint = 'android/app/src/main/java/com/example/MainApplication.kt';
+    write(entrypoint, 'package com.example\nclass MainApplication\n');
+    write(
+      'android/app/src/main/AndroidManifest.xml',
+      '<manifest><!-- <application android:name="com.example.WrongApplication" /> -->' +
+        '<application android:name="com.example.MainApplication" /></manifest>',
+    );
+
+    expect(findNativeEntrypointAuthorityIssue(projectRoot, 'android', [entrypoint])).toBeNull();
+  });
+
   it.each([
     ['missing entrypoint', null, 'Android application entrypoint is missing'],
     ['missing main manifest', undefined, 'main AndroidManifest.xml is missing'],

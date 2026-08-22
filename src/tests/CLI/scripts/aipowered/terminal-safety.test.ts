@@ -25,7 +25,7 @@ describe('AI setup terminal safety', () => {
     const value = 'summary\tline one\r\nline two\n';
 
     expect(hasUnsafeTerminalControl(value)).toBe(false);
-    expect(escapeTerminalControls(value)).toBe(value.replace('\r', '\\r'));
+    expect(escapeTerminalControls(value)).toBe('summary\tline one\\r\nline two\n');
     expect(() => assertSafeProviderPlan(safePlan())).not.toThrow();
   });
 

@@ -187,6 +187,14 @@ const findNamedSourceBlocks = (
 
 const escapeRegExp = (value: string) => value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 
+const trimTrailingClosingBraces = (value: string) => {
+  let suffix = value.trim();
+  while (suffix.endsWith('}')) {
+    suffix = suffix.slice(0, -1).trimEnd();
+  }
+  return suffix.trim();
+};
+
 const findObjcImplementations = (code: string): ObjcImplementation[] =>
   [...code.matchAll(/@implementation\s+([A-Za-z_]\w*)(?:\s*\(([^)]*)\))?/g)]
     .flatMap(match => {
@@ -243,13 +251,13 @@ const hasAuthoritativeLazyHostCall = (
 });
 
 const hasExactAndroidModuleReference = (code: string) => {
-  const escapedName = ANDROID_BUNDLE_DROP_MODULE.replace(/\./g, '\\.');
+  const escapedName = escapeRegExp(ANDROID_BUNDLE_DROP_MODULE);
   return new RegExp(`(?:^|\\n)[ \\t]*import\\s+${escapedName}[ \\t]*;?[ \\t]*(?:\\n|$)`).test(code) ||
     code.includes(`${ANDROID_BUNDLE_DROP_MODULE}.resolveJSBundleFile`);
 };
 
 const hasExactAndroidNativePathsReference = (code: string) => {
-  const escapedName = ANDROID_BUNDLE_DROP_PATHS.replace(/\./g, '\\.');
+  const escapedName = escapeRegExp(ANDROID_BUNDLE_DROP_PATHS);
   return new RegExp(`\\bimport\\s+${escapedName}\\s*;?`).test(code) ||
     code.includes(`${ANDROID_BUNDLE_DROP_PATHS}.getDownloadedBundlePath`);
 };
@@ -634,7 +642,7 @@ const hasCanonicalReturnedResolverSuffix = (
   language: ResolverLanguage,
   requiresNonNullResult: boolean,
 ) => {
-  const suffix = afterResolver.trim().replace(/(?:\s*}\s*)+$/, '').trim();
+  const suffix = trimTrailingClosingBraces(afterResolver);
   if (!suffix || suffix === ';') return !requiresNonNullResult;
   if (language === 'kotlin' && resolver === 'BundleDropModule.resolveJSBundleFile') {
     return /^!!\s*;?$/.test(suffix) ||
@@ -1030,7 +1038,7 @@ export const hasBareIosStartupIntegration = (
     );
   }
 
-  const escapedHeader = IOS_BUNDLE_DROP_LOCATOR_HEADER.replace(/[/.]/g, '\\$&');
+  const escapedHeader = escapeRegExp(IOS_BUNDLE_DROP_LOCATOR_HEADER);
   if (!new RegExp(`#import\\s*[<"]${escapedHeader}[>"]`).test(nativeCode)) return false;
   const startup = objcStartupMethods(nativeCode);
   if (!startup) return false;

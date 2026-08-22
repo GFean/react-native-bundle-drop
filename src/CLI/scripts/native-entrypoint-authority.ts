@@ -8,6 +8,24 @@ export type NativeEntrypointPlatform = 'android' | 'ios';
 
 const toPosix = (filePath: string) => filePath.split(path.sep).join('/');
 
+const maskXmlComments = (source: string) => {
+  let masked = '';
+  let cursor = 0;
+
+  while (cursor < source.length) {
+    const commentStart = source.indexOf('<!--', cursor);
+    if (commentStart < 0) return masked + source.slice(cursor);
+
+    masked += source.slice(cursor, commentStart);
+    const commentEnd = source.indexOf('-->', commentStart + 4);
+    const maskedEnd = commentEnd < 0 ? source.length : commentEnd + 3;
+    masked += ' '.repeat(maskedEnd - commentStart);
+    cursor = maskedEnd;
+  }
+
+  return masked;
+};
+
 const androidPackageFromPath = (relativePath: string) => {
   const match = relativePath.match(
     /^android\/app\/src\/main\/(?:java|kotlin)\/(.+)\/MainApplication\.(?:java|kt)$/,
@@ -71,7 +89,7 @@ const androidAuthorityIssue = (projectRoot: string, entrypoint: string): string 
   const gradleNamespace = androidGradleNamespace(projectRoot);
   for (const manifestPath of manifests) {
     const manifest = inspectProjectFile(projectRoot, manifestPath);
-    const manifestSource = manifest.content.replace(/<!--[\s\S]*?-->/g, '');
+    const manifestSource = maskXmlComments(manifest.content);
     const applicationTags = [...manifestSource.matchAll(/<application\b[^>]*>/gi)];
     if (applicationTags.length > 1) {
       return `${manifestPath} has multiple application declarations.`;
