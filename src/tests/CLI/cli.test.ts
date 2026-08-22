@@ -50,7 +50,7 @@ jest.mock('../../expo', () => ({
 }));
 jest.mock('axios', () => require('../mocks/modules/axiosNode'));
 
-import { buildProgram } from '../../CLI/cli';
+import { buildProgram, runCli } from '../../CLI/cli';
 
 describe('CLI/cli', () => {
   const originalEnv = { ...process.env };
@@ -115,7 +115,7 @@ describe('CLI/cli', () => {
     );
   });
 
-  it('routes Expo setup escape hatches and exact build receipts', async () => {
+  it('routes explicit setup migration flags and exact build receipts', async () => {
     await parseCommand(
       'init',
       '--token',
@@ -123,6 +123,7 @@ describe('CLI/cli', () => {
       '--project-type',
       'expo',
       '--dry-run',
+      '--migrate-code-push',
       '--migrate-expo-updates',
       '--prebuild',
       '--yes',
@@ -130,6 +131,7 @@ describe('CLI/cli', () => {
     expect(mockRunPostInitPrompts).toHaveBeenCalledWith(expect.objectContaining({
       projectType: 'expo',
       dryRun: true,
+      migrateCodePush: true,
       migrateExpoUpdates: true,
       prebuild: true,
       yes: true,
@@ -402,6 +404,82 @@ describe('CLI/cli', () => {
     });
   });
 
+  it('syncs the authenticated v2 bootstrap without rerunning project setup', async () => {
+    mockInitConfig.mockResolvedValue({
+      bootstrapContent: '{"schemaVersion":1}\n',
+    });
+
+    await parseCommand('sync', '--token', 'token-123');
+
+    expect(mockInitConfig).toHaveBeenCalledWith({
+      serverUrl: 'https://api.bundledrop.app',
+      projects: [],
+      organizations: [],
+      authToken: 'token-123',
+      dryRun: false,
+    });
+    expect(mockRunPostInitPrompts).not.toHaveBeenCalled();
+  });
+
+  it('dry-runs sync from stored auth and reports missing authentication', async () => {
+    const authDir = path.join(tempHome, '.bundle-drop');
+    fs.mkdirSync(authDir, { recursive: true });
+    fs.writeFileSync(
+      path.join(authDir, 'auth.json'),
+      JSON.stringify({ token: 'stored-token', baseUrl: 'https://legacy.example.com/' }),
+    );
+    mockInitConfig.mockResolvedValue({ bootstrapContent: '{"schemaVersion":1}\n' });
+
+    await parseCommand('sync', '--dry-run');
+
+    expect(mockInitConfig).toHaveBeenCalledWith(expect.objectContaining({
+      serverUrl: 'https://legacy.example.com',
+      authToken: 'stored-token',
+      dryRun: true,
+    }));
+    expect(consoleLogSpy).toHaveBeenCalledWith(
+      expect.stringContaining('No files changed'),
+    );
+
+    fs.unlinkSync(path.join(authDir, 'auth.json'));
+    await expect(parseCommand('sync')).rejects.toThrow('Not authenticated');
+  });
+
+  it('accepts explicit disabled convergence without requiring a bootstrap', async () => {
+    mockInitConfig.mockResolvedValue({
+      runtimeDeliveryAvailable: false,
+      bootstrapRetired: true,
+    });
+
+    await expect(parseCommand('sync', '--token', 'token-123')).resolves.toBeUndefined();
+  });
+
+  it('previews authoritative v1 retirement without writing', async () => {
+    mockInitConfig.mockResolvedValue({
+      runtimeDeliveryAvailable: false,
+      bootstrapRetired: true,
+    });
+
+    await parseCommand('sync', '--token', 'token-123', '--dry-run');
+
+    expect(consoleLogSpy).toHaveBeenCalledWith(
+      expect.stringContaining('stale bootstrap would be removed. No files changed'),
+    );
+  });
+
+  it('fails sync when setup is absent or the backend omits runtime delivery trust', async () => {
+    mockHasExistingBundleDropConfig.mockReturnValue(false);
+    await expect(parseCommand('sync', '--token', 'token-123')).rejects.toThrow(
+      'requires bundle.drop.config.js',
+    );
+
+    mockHasExistingBundleDropConfig.mockReturnValue(true);
+    mockInitConfig.mockResolvedValue({});
+    await expect(parseCommand('sync', '--token', 'token-123')).rejects.toThrow(
+      'did not return a valid runtime delivery bootstrap',
+    );
+  });
+
   it('reads stored auth for init and falls back to baseUrl when present', async () => {
     const authDir = path.join(tempHome, '.bundle-drop');
     fs.mkdirSync(authDir, { recursive: true });
@@ -417,7 +495,7 @@ describe('CLI/cli', () => {
       'utf8',
     );
 
-    await parseCommand('init');
+    await parseCommand('init', '--migrate-code-push');
 
     expect(mockInitConfig).toHaveBeenCalledWith({
       serverUrl: 'https://legacy.example.com',
@@ -428,7 +506,9 @@ describe('CLI/cli', () => {
       dryRun: true,
       projectType: 'bare',
     });
-    expect(mockRunPostInitPrompts).toHaveBeenCalledTimes(1);
+    expect(mockRunPostInitPrompts).toHaveBeenCalledWith(expect.objectContaining({
+      migrateCodePush: true,
+    }));
   });
 
   it('passes a newly selected stored-auth config to setup without writing it early', async () => {
@@ -633,6 +713,61 @@ describe('CLI/cli', () => {
     mockLogin.mockRejectedValueOnce(new Error('login failed'));
 
     await expect(parseCommand('login')).rejects.toThrow('login failed');
+  });
+
+  it('prints executable command failures without an internal stack trace', async () => {
+    const consoleErrorSpy = jest.spyOn(console, 'error').mockImplementation(() => undefined);
+    const originalExitCode = process.exitCode;
+    mockRunPostInitPrompts.mockRejectedValueOnce(
+      new Error('Refusing to send project files to untrusted AI planning server.'),
+    );
+
+    try {
+      await runCli([
+        'node',
+        'bundle-drop',
+        'init',
+        '--token',
+        'token-123',
+        '--dry-run',
+      ]);
+
+      expect(consoleErrorSpy).toHaveBeenCalledTimes(1);
+      expect(consoleErrorSpy.mock.calls[0][0]).toBe(
+        '❌ Refusing to send project files to untrusted AI planning server.\n' +
+          'Manual setup: https://bundledrop.app/docs/manual-setup',
+      );
+      expect(consoleErrorSpy.mock.calls[0][0]).not.toContain('at runSetupWithManualFallback');
+      expect(process.exitCode).toBe(1);
+    } finally {
+      consoleErrorSpy.mockRestore();
+      process.exitCode = originalExitCode;
+    }
+  });
+
+  it('normalizes non-Error setup failures before linking to manual setup', async () => {
+    const consoleErrorSpy = jest.spyOn(console, 'error').mockImplementation(() => undefined);
+    const originalExitCode = process.exitCode;
+    mockRunPostInitPrompts.mockRejectedValueOnce('setup unavailable');
+
+    try {
+      await runCli([
+        'node',
+        'bundle-drop',
+        'init',
+        '--token',
+        'token-123',
+        '--dry-run',
+      ]);
+
+      expect(consoleErrorSpy).toHaveBeenCalledWith(
+        '❌ setup unavailable\nManual setup: https://bundledrop.app/docs/manual-setup',
+      );
+      expect(process.exitCode).toBe(1);
+    } finally {
+      consoleErrorSpy.mockRestore();
+      process.exitCode = originalExitCode;
+    }
   });
 
   it('prints whoami details from stored auth', async () => {

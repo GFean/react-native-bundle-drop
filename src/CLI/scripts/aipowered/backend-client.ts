@@ -3,8 +3,31 @@ import {
   AiSetupPlanRequest,
   AiSetupPlanResponse,
 } from './types';
+import { findKnownBundleDropCredential } from './credential-safety';
+import { escapeTerminalControls } from './terminal-safety';
 
 const DEFAULT_AI_INIT_TIMEOUT_MS = 180000;
+const MAX_BACKEND_DIAGNOSTIC_LENGTH = 1000;
+
+const safeBackendDiagnostic = (value: unknown) => {
+  if (typeof value !== 'string') return null;
+  const diagnostic = value.trim();
+  if (
+    !diagnostic ||
+    diagnostic.length > MAX_BACKEND_DIAGNOSTIC_LENGTH ||
+    findKnownBundleDropCredential(diagnostic)
+  ) {
+    return null;
+  }
+  return escapeTerminalControls(diagnostic);
+};
+
+const safeBackendDetailReason = (details: unknown) => {
+  if (!details || typeof details !== 'object' || Array.isArray(details)) return null;
+  const descriptor = Object.getOwnPropertyDescriptor(details, 'reason');
+  if (!descriptor || !Object.prototype.hasOwnProperty.call(descriptor, 'value')) return null;
+  return safeBackendDiagnostic(descriptor.value);
+};
 
 const resolveTimeoutMs = () => {
   const value = Number(process.env.BUNDLE_DROP_AI_INIT_TIMEOUT_MS || '');
@@ -36,10 +59,12 @@ export async function requestAiSetupPlan(params: {
         'AI setup planning timed out. Try again, or increase BUNDLE_DROP_AI_INIT_TIMEOUT_MS.',
       );
     }
-    const message =
-      raw && typeof raw === 'object'
-        ? raw.error || JSON.stringify(raw)
-        : raw || error?.message || 'AI setup planning failed';
-    throw new Error(`AI setup planning failed: ${message}`);
+    const diagnostic = raw && typeof raw === 'object'
+      ? safeBackendDetailReason(raw.details) || safeBackendDiagnostic(raw.error)
+      : safeBackendDiagnostic(raw);
+    const fallback = diagnostic || safeBackendDiagnostic(error?.message);
+    throw new Error(fallback
+      ? `AI setup planning failed: ${fallback}`
+      : 'AI setup planning failed');
   }
 }

@@ -1,56 +1,59 @@
-import fs from 'fs-extra';
-import path from 'path';
+import { inspectProjectFile } from './safe-file-transaction';
+import {
+  assertCommonJsMetroConfig,
+  findSingleMetroConfig,
+  hasAuthoritativeMetroWrapper,
+  hasExecutableMetroWrapperReference,
+  newCommonJsMetroConfigFile,
+} from './metro-config-authority';
 
 const APPEND_SNIPPET = `
-// Bundle Drop: ensure bundle.drop.config.js is resolvable from node_modules
-(() => {
-  const path = require('path');
-  module.exports = module.exports || {};
-  module.exports.resolver = module.exports.resolver || {};
-  module.exports.resolver.extraNodeModules = {
-    ...(module.exports.resolver.extraNodeModules || {}),
-    'bundle-drop-config': path.resolve(__dirname, 'bundle.drop.config.js'),
-  };
-})();
+// Bundle Drop: merge package-managed runtime delivery bootstrap into Metro.
+const { withBundleDrop } = require('@gfean/react-native-bundle-drop/metro');
+module.exports = withBundleDrop(module.exports || {}, { projectRoot: __dirname });
 `;
 
-const NEW_METRO_TEMPLATE = `const path = require('path');
-const { getDefaultConfig } = require('@react-native/metro-config');
+const NEW_METRO_TEMPLATE = `const { getDefaultConfig } = require('@react-native/metro-config');
+const { withBundleDrop } = require('@gfean/react-native-bundle-drop/metro');
 
 const config = getDefaultConfig(__dirname);
-config.resolver = config.resolver || {};
-config.resolver.extraNodeModules = {
-  ...(config.resolver.extraNodeModules || {}),
-  'bundle-drop-config': path.resolve(__dirname, 'bundle.drop.config.js'),
-};
-
-module.exports = config;
+module.exports = withBundleDrop(config, { projectRoot: __dirname });
 `;
 
 export type MetroConfigChange = {
-  file: 'metro.config.js';
+  file: string;
   original: string | null;
   updated: string;
   reason: string;
 };
 
 export function planBareMetroConfig(projectRoot: string): MetroConfigChange | null {
-  const metroPath = path.join(projectRoot, 'metro.config.js');
-  if (!fs.existsSync(metroPath)) {
+  const metroConfigPath = findSingleMetroConfig(projectRoot);
+  if (!metroConfigPath) {
     return {
-      file: 'metro.config.js',
+      file: newCommonJsMetroConfigFile(projectRoot),
       original: null,
       updated: `${NEW_METRO_TEMPLATE.trim()}\n`,
-      reason: 'Create the bare React Native Metro alias for bundle.drop.config.js.',
+      reason: 'Create the bare React Native Metro wrapper for Bundle Drop.',
     };
   }
 
-  const content = fs.readFileSync(metroPath, 'utf8');
-  if (content.includes('bundle-drop-config')) return null;
+  const metroFile = inspectProjectFile(projectRoot, metroConfigPath);
+  const content = metroFile.content;
+  if (hasAuthoritativeMetroWrapper(content, 'withBundleDrop')) return null;
+  if (hasExecutableMetroWrapperReference(content, 'withBundleDrop')) {
+    throw new Error(
+      `${metroConfigPath} contains a non-authoritative withBundleDrop reference. ` +
+        'Remove the dead, aliased, or malformed wrapper before rerunning setup.',
+    );
+  }
+  assertCommonJsMetroConfig(projectRoot, metroConfigPath);
   return {
-    file: 'metro.config.js',
+    file: metroConfigPath,
     original: content,
     updated: `${content.trim()}\n${APPEND_SNIPPET}`,
-    reason: 'Add the Bundle Drop alias without replacing the existing Metro config.',
+    reason: content.includes('bundle-drop-config')
+      ? 'Migrate the legacy Bundle Drop alias to the package-managed Metro wrapper.'
+      : 'Add the Bundle Drop Metro wrapper without replacing the existing config.',
   };
 }

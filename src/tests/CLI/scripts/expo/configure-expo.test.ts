@@ -111,10 +111,85 @@ describe('CLI/scripts/expo/configure-expo', () => {
       "projectType: 'expo'",
     );
     expect(fs.readFileSync(path.join(projectRoot, '.gitignore'), 'utf8')).toBe(
-      'node_modules\n.bundle-drop/\n',
+      'node_modules\n\n' +
+        '# Bundle Drop: commit the public trust bootstrap; ignore generated runtime artifacts.\n' +
+        '!.bundle-drop/\n.bundle-drop/*\n' +
+        '!.bundle-drop/runtime-delivery.generated.json\n',
     );
     expect(fs.existsSync(path.join(projectRoot, '.fingerprintignore'))).toBe(false);
     expect(planExpoProjectConfiguration({ projectRoot, migrateExpoUpdates: true })).toEqual([]);
+  });
+
+  it('requires one authoritative exported Expo Metro wrapper', () => {
+    writeStandardBundleConfig();
+    write(
+      'metro.config.js',
+      "const { getDefaultConfig } = require('expo/metro-config');\n" +
+        "const { withBundleDropExpo } = require('@gfean/react-native-bundle-drop/metro');\n" +
+        'const ignored = withBundleDropExpo(getDefaultConfig(__dirname));\n' +
+        'module.exports = getDefaultConfig(__dirname);\n',
+    );
+
+    expect(() => planExpoProjectConfiguration({
+      projectRoot,
+      migrateExpoUpdates: false,
+    })).toThrow('contains a non-authoritative withBundleDropExpo reference');
+
+    write('metro.config.cjs', 'module.exports = {};\n');
+    expect(() => planExpoProjectConfiguration({
+      projectRoot,
+      migrateExpoUpdates: false,
+    })).toThrow('Multiple Metro config files');
+  });
+
+  it.each([
+    [
+      'aliased package export',
+      "const { withBundleDropExpo: other } = require('@gfean/react-native-bundle-drop/metro');\n" +
+        'const config = {};\nmodule.exports = withBundleDropExpo(config);\n',
+    ],
+    [
+      'nested dead export',
+      "const { withBundleDropExpo } = require('@gfean/react-native-bundle-drop/metro');\n" +
+        'const config = {};\nfunction dead() { module.exports = withBundleDropExpo(config); }\n' +
+        'module.exports = config;\n',
+    ],
+    [
+      'zero-argument wrapper',
+      "const { withBundleDropExpo } = require('@gfean/react-native-bundle-drop/metro');\n" +
+        'module.exports = withBundleDropExpo();\n',
+    ],
+    [
+      'unsupported base value',
+      "const { withBundleDropExpo } = require('@gfean/react-native-bundle-drop/metro');\n" +
+        'const config = undefined;\nmodule.exports = withBundleDropExpo(config);\n',
+    ],
+  ])('fails closed on a non-authoritative Expo %s', (_label, content) => {
+    writeStandardBundleConfig();
+    write('metro.config.js', content);
+
+    expect(() => planExpoProjectConfiguration({
+      projectRoot,
+      migrateExpoUpdates: false,
+    })).toThrow('contains a non-authoritative withBundleDropExpo reference');
+  });
+
+  it('uses a CommonJS Metro file for ESM packages and does not append across syntax modes', () => {
+    writeStandardBundleConfig();
+    write('package.json', JSON.stringify({ type: 'module' }));
+
+    expect(planExpoProjectConfiguration({
+      projectRoot,
+      migrateExpoUpdates: false,
+    })).toEqual(expect.arrayContaining([
+      expect.objectContaining({ file: 'metro.config.cjs', original: null }),
+    ]));
+
+    write('metro.config.mjs', 'export default {};\n');
+    expect(() => planExpoProjectConfiguration({
+      projectRoot,
+      migrateExpoUpdates: false,
+    })).toThrow('will not append CommonJS');
   });
 
   it('registers the plugin once without removing Expo Updates when migration is declined', () => {
@@ -186,7 +261,10 @@ describe('CLI/scripts/expo/configure-expo', () => {
       original: null,
       updated: '**/*-gradle-plugin/.kotlin/**/*\n',
     }));
-    expect(gitignore).toEqual(expect.objectContaining({ original: null, updated: '.bundle-drop/\n' }));
+    expect(gitignore).toEqual(expect.objectContaining({
+      original: null,
+      updated: expect.stringContaining('!.bundle-drop/runtime-delivery.generated.json'),
+    }));
   });
 
   it('preserves an existing Expo runtime policy', () => {
@@ -445,6 +523,130 @@ describe('CLI/scripts/expo/configure-expo', () => {
     const changes = planExpoProjectConfiguration({ projectRoot, migrateExpoUpdates: false });
 
     expect(() => applyExpoConfigurationChanges({ projectRoot, changes })).not.toThrow();
-    expect(fs.readFileSync(path.join(projectRoot, '.gitignore'), 'utf8')).toBe('.bundle-drop/\n');
+    expect(fs.readFileSync(path.join(projectRoot, '.gitignore'), 'utf8')).toContain(
+      '!.bundle-drop/runtime-delivery.generated.json',
+    );
+  });
+
+  it('rejects Expo target, parent, and backup symlink escapes without partial writes', () => {
+    const outsideRoot = createTempProjectDir();
+    const outsideSentinel = path.join(outsideRoot, 'sentinel.txt');
+    fs.writeFileSync(outsideSentinel, 'outside-safe');
+    const originalApp = '{"expo":{}}\n';
+    const appPath = write('app.json', originalApp);
+    try {
+      fs.symlinkSync(outsideSentinel, `${appPath}.bundledrop-tmp`);
+      applyExpoConfigurationChanges({
+        projectRoot,
+        changes: [{
+          file: 'app.json',
+          original: originalApp,
+          updated: '{"expo":{"plugins":[]}}\n',
+          reason: 'test random temp',
+        }],
+      });
+      expect(fs.readFileSync(outsideSentinel, 'utf8')).toBe('outside-safe');
+
+      fs.rmSync(path.join(projectRoot, '.bundledrop-backup'), { recursive: true });
+      fs.symlinkSync(outsideRoot, path.join(projectRoot, '.bundledrop-backup'));
+      expect(() => applyExpoConfigurationChanges({ projectRoot, changes: [] }))
+        .toThrow('symlinked or non-directory');
+      expect(fs.readFileSync(outsideSentinel, 'utf8')).toBe('outside-safe');
+
+      fs.unlinkSync(path.join(projectRoot, '.bundledrop-backup'));
+      fs.unlinkSync(appPath);
+      fs.symlinkSync(outsideSentinel, appPath);
+      expect(() => applyExpoConfigurationChanges({
+        projectRoot,
+        changes: [{
+          file: 'app.json',
+          original: 'outside-safe',
+          updated: originalApp,
+          reason: 'reject target symlink',
+        }],
+      })).toThrow('symlinked or non-regular');
+      expect(fs.readFileSync(outsideSentinel, 'utf8')).toBe('outside-safe');
+
+      fs.unlinkSync(appPath);
+      fs.symlinkSync(outsideRoot, path.join(projectRoot, '.bundle-drop'));
+      expect(() => applyExpoConfigurationChanges({ projectRoot, changes: [] }))
+        .toThrow('symlinked or non-directory');
+      expect(fs.readFileSync(outsideSentinel, 'utf8')).toBe('outside-safe');
+    } finally {
+      removeTempDir(outsideRoot);
+    }
+  });
+
+  it('rolls back an earlier Expo write when a later target is a symlink', () => {
+    const outsideRoot = createTempProjectDir();
+    const outsideSentinel = path.join(outsideRoot, 'sentinel.txt');
+    fs.writeFileSync(outsideSentinel, 'outside-safe');
+    const originalApp = '{"expo":{}}\n';
+    const appPath = write('app.json', originalApp);
+    fs.symlinkSync(outsideSentinel, path.join(projectRoot, 'metro.config.js'));
+    try {
+      expect(() => applyExpoConfigurationChanges({
+        projectRoot,
+        changes: [
+          {
+            file: 'app.json',
+            original: originalApp,
+            updated: '{"expo":{"plugins":[]}}\n',
+            reason: 'first change',
+          },
+          {
+            file: 'metro.config.js',
+            original: 'outside-safe',
+            updated: 'module.exports = {};\n',
+            reason: 'symlink escape',
+          },
+        ],
+      })).toThrow('symlinked or non-regular');
+      expect(fs.readFileSync(appPath, 'utf8')).toBe(originalApp);
+      expect(fs.readFileSync(outsideSentinel, 'utf8')).toBe('outside-safe');
+    } finally {
+      removeTempDir(outsideRoot);
+    }
+  });
+
+  it.each([
+    'app.json',
+    'metro.config.js',
+    'bundle.drop.config.js',
+    'package.json',
+    '.fingerprintignore',
+    '.gitignore',
+  ])('refuses to read a symlinked %s while planning', targetFile => {
+    const root = createTempProjectDir();
+    const outsideRoot = createTempProjectDir();
+    const outsideSecret = path.join(outsideRoot, 'secret.txt');
+    fs.writeFileSync(outsideSecret, 'planning-secret-sentinel');
+    const regularFiles: Record<string, string> = {
+      'app.json': '{"expo":{}}\n',
+      'metro.config.js': "module.exports = require('expo/metro-config');\n",
+      'bundle.drop.config.js': "module.exports = { runtimeVersion: { source: 'expo' } };\n",
+      'package.json': '{"dependencies":{"expo-updates":"1.0.0"}}\n',
+      '.fingerprintignore': '',
+      '.gitignore': '',
+    };
+    try {
+      for (const [file, content] of Object.entries(regularFiles)) {
+        const filePath = path.join(root, file);
+        if (file === targetFile) {
+          if (fs.existsSync(filePath)) fs.unlinkSync(filePath);
+          fs.symlinkSync(outsideSecret, filePath);
+        }
+        else fs.writeFileSync(filePath, content);
+      }
+
+      expect(() => planExpoProjectConfiguration({
+        projectRoot: root,
+        migrateExpoUpdates: true,
+      })).toThrow('symlinked or non-regular transaction target');
+      expect(fs.readFileSync(outsideSecret, 'utf8')).toBe('planning-secret-sentinel');
+    } finally {
+      removeTempDir(root);
+      removeTempDir(outsideRoot);
+    }
   });
 });

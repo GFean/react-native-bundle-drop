@@ -152,6 +152,26 @@ export const mockSha256File = jest.fn(async (path: string) => {
   return require('crypto').createHash('sha256').update(Buffer.from(content)).digest('hex');
 });
 
+export const mockSha256String = jest.fn(async (value: string) =>
+  require('crypto').createHash('sha256').update(value, 'utf8').digest('hex')
+);
+
+export const mockVerifyEs256Signature = jest.fn(async (
+  signingInput: string,
+  signatureBase64Url: string,
+  xBase64Url: string,
+  yBase64Url: string,
+) => require('crypto').verify(
+  'sha256',
+  Buffer.from(signingInput, 'utf8'),
+  {
+    key: { kty: 'EC', crv: 'P-256', x: xBase64Url, y: yBase64Url },
+    format: 'jwk',
+    dsaEncoding: 'ieee-p1363',
+  },
+  Buffer.from(signatureBase64Url, 'base64url'),
+));
+
 export const mockFileSize = jest.fn(async (path: string) => {
   const normalized = normalizePath(path);
   const content = files.get(normalized);
@@ -333,6 +353,13 @@ export const mockDownloadFile = jest.fn(async (url: string, destPath: string) =>
   }
 });
 
+export const mockDownloadFileBounded = jest.fn(async (
+  url: string,
+  destPath: string,
+  _maxBytes: number,
+  _timeoutMs: number,
+) => mockDownloadFile(url, destPath));
+
 export const resetNativeFsMocks = () => {
   mockExists.mockClear();
   mockReadFile.mockClear();
@@ -343,6 +370,8 @@ export const resetNativeFsMocks = () => {
   mockMoveFile.mockClear();
   mockCopyFile.mockClear();
   mockSha256File.mockClear();
+  mockSha256String.mockClear();
+  mockVerifyEs256Signature.mockClear();
   mockFileSize.mockClear();
   mockApplyXdelta.mockClear();
   mockVerifyBundleFiles.mockClear();
@@ -350,6 +379,7 @@ export const resetNativeFsMocks = () => {
   mockSupportsXdelta.mockResolvedValue(true);
   mockUnzip.mockClear();
   mockDownloadFile.mockClear();
+  mockDownloadFileBounded.mockClear();
   unzipEntries.clear();
   downloadContentsByUrl.clear();
   downloadFailuresByUrl.clear();
@@ -401,12 +431,15 @@ const BundleDropFS = {
   moveFile: mockMoveFile,
   copyFile: mockCopyFile,
   sha256File: mockSha256File,
+  sha256String: mockSha256String,
+  verifyEs256Signature: mockVerifyEs256Signature,
   fileSize: mockFileSize,
   applyXdelta: mockApplyXdelta,
   verifyBundleFiles: mockVerifyBundleFiles,
   supportsXdelta: mockSupportsXdelta,
   unzip: mockUnzip,
   downloadFile: mockDownloadFile,
+  downloadFileBounded: mockDownloadFileBounded,
 };
 
 export default BundleDropFS;

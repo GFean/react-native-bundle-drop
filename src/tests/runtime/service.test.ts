@@ -4,6 +4,17 @@ const INIT_ERROR =
   'BundleDrop has not been initialized. Call BundleDrop.init({ environment, ... }) before using OTA APIs or useBundleDrop().';
 const DISABLED_STATUS = 'BundleDrop is disabled';
 
+const createBundleListItem = (hash = 'hash-12', bundleVersion = 12) => ({
+  hash,
+  bundleVersion,
+  version: `1.0.${bundleVersion}`,
+  platform: 'android' as const,
+  runtimeVersion: '1.0.0',
+  releaseNotes: null,
+  createdAt: '2026-03-29T00:00:00.000Z',
+  downloadUrl: `https://cdn.example.com/${hash}.zip`,
+});
+
 const loadRuntimeServiceModule = (overrides?: {
   rollbackResult?: { rolledBack: boolean; reason?: string };
   pendingState?: { hasBundle: boolean; info?: unknown; pendingApply: boolean };
@@ -33,6 +44,7 @@ const loadRuntimeServiceModule = (overrides?: {
   setOtaEnabledPromise?: Promise<void>;
   nativeModuleAvailable?: boolean;
   expoOtaStartupEnabled?: boolean;
+  runtimeDeliveryMode?: 'v1' | 'shadow' | 'v2';
 }) => {
   jest.resetModules();
 
@@ -160,7 +172,19 @@ const loadRuntimeServiceModule = (overrides?: {
     readBundleInfo,
   }));
   jest.doMock('../../context', () => ({
-    config: { projectType: 'expo' },
+    config: {
+      projectType: 'expo',
+      runtimeDelivery: overrides?.runtimeDeliveryMode
+        ? overrides.runtimeDeliveryMode === 'v2'
+          ? {
+              mode: 'v2',
+              manifestBaseUrl: 'https://manifests.example.com',
+              manifestAccessId: 'access-id',
+              publicKeys: { key: {} },
+            }
+          : { mode: overrides.runtimeDeliveryMode }
+        : undefined,
+    },
     defaultChannel: 'General',
   }));
   jest.doMock('../../fs/bundlePointer', () => ({
@@ -776,6 +800,7 @@ describe('runtime/service', () => {
     await rollback.service.waitForBundleDropStartupForTests();
     expect(rollbackStatus).toHaveBeenCalledWith('↩️ Server requested rollback...');
     expect(rollback.mocks.rollbackToPreviousOrNative).toHaveBeenCalledTimes(1);
+    expect(rollback.mocks.rollbackToPreviousOrNative).toHaveBeenCalledWith({ forceNative: true });
     expect(rollback.mocks.restartReactNativeNative).toHaveBeenCalledTimes(1);
 
     const incompatible = loadRuntimeServiceModule({
@@ -819,6 +844,83 @@ describe('runtime/service', () => {
     });
     await upToDate.service.waitForBundleDropStartupForTests();
     expect(upToDateStatus).toHaveBeenCalledWith('✅ You have the latest version');
+  });
+
+  it.each([
+    'CURRENT_REVOKED_NO_COMPATIBLE_TARGET',
+    'CURRENT_REVOKED_NO_SAFE_TARGET',
+    'CURRENT_REVOKED_ORIGIN_UNAVAILABLE',
+  ])('forces native rollback for %s', async reason => {
+    const { service, mocks } = loadRuntimeServiceModule({
+      decision: { action: 'ROLLBACK', reason },
+    });
+
+    service.initBundleDrop({ environment: 'production', checkOnly: true });
+    await service.waitForBundleDropStartupForTests();
+
+    expect(mocks.rollbackToPreviousOrNative).toHaveBeenCalledWith({ forceNative: true });
+  });
+
+  it('preserves previous-or-native behavior for non-revocation rollback reasons', async () => {
+    const { service, mocks } = loadRuntimeServiceModule({
+      decision: { action: 'ROLLBACK', reason: 'SERVER_REQUESTED_ROLLBACK' },
+    });
+
+    service.initBundleDrop({ environment: 'production', checkOnly: true });
+    await service.waitForBundleDropStartupForTests();
+
+    expect(mocks.rollbackToPreviousOrNative).toHaveBeenCalledWith();
+  });
+
+  it.each(['immediate', 'on-next-launch'] as const)(
+    'applies an authorization rollback during %s startup',
+    async policy => {
+      const { service, mocks } = loadRuntimeServiceModule({
+        decision: {
+          action: 'INSTALL',
+          hash: 'new-hash',
+          mode: 'full',
+          runtimeDelivery: {
+            generation: 7,
+            targetReleaseRef: 'release-7',
+            selectedMode: 'full',
+          },
+        },
+        downloadResult: {
+          status: 'rollback',
+          reason: 'CURRENT_REVOKED_NO_SAFE_TARGET',
+        },
+      });
+
+      service.initBundleDrop({ environment: 'production', policy });
+      await service.waitForBundleDropStartupForTests();
+
+      expect(mocks.downloadUpdate).toHaveBeenCalledTimes(1);
+      expect(mocks.rollbackToPreviousOrNative).toHaveBeenCalledWith({ forceNative: true });
+      expect(mocks.restartReactNativeNative).toHaveBeenCalledTimes(1);
+      expect(mocks.applyUpdate).not.toHaveBeenCalled();
+    },
+  );
+
+  it('preserves previous-or-native behavior for a non-revocation authorization rollback', async () => {
+    const { service, mocks } = loadRuntimeServiceModule({
+      decision: {
+        action: 'INSTALL',
+        hash: 'new-hash',
+        downloadUrl: 'https://cdn.example/new.zip',
+      },
+      downloadResult: {
+        status: 'rollback',
+        reason: 'SERVER_REQUESTED_ROLLBACK',
+      },
+    });
+
+    service.initBundleDrop({ environment: 'production', policy: 'immediate' });
+    await service.waitForBundleDropStartupForTests();
+
+    expect(mocks.rollbackToPreviousOrNative).toHaveBeenCalledWith();
+    expect(mocks.restartReactNativeNative).toHaveBeenCalledTimes(1);
+    expect(mocks.applyUpdate).not.toHaveBeenCalled();
   });
 
   it('guards missing resolved targets and handles staged, up-to-date, and incompatible startup downloads', async () => {
@@ -1027,6 +1129,65 @@ describe('runtime/service', () => {
     expect(incompatible.mocks.applyUpdate).not.toHaveBeenCalled();
   });
 
+  it('preserves v2 authorization context through manual, next-launch, immediate, and check-only startup policies', async () => {
+    const v2Decision = {
+      action: 'INSTALL',
+      hash: 'hash-v2',
+      bundleVersion: 7,
+      runtimeVersion: '1.0.0',
+      mode: 'full',
+      runtimeDelivery: {
+        generation: 7,
+        targetReleaseRef: 'release-v2',
+        selectedMode: 'full',
+      },
+    };
+
+    const manual = loadRuntimeServiceModule({
+      pendingState: { hasBundle: false, info: null, pendingApply: false },
+      decision: v2Decision,
+    });
+    manual.service.initBundleDrop({ environment: 'production', policy: 'manual' });
+    await manual.service.waitForBundleDropStartupForTests();
+    expect(manual.mocks.downloadUpdate).not.toHaveBeenCalled();
+
+    const nextLaunch = loadRuntimeServiceModule({
+      pendingState: { hasBundle: false, info: null, pendingApply: false },
+      decision: v2Decision,
+    });
+    nextLaunch.service.initBundleDrop({ environment: 'production', policy: 'on-next-launch' });
+    await nextLaunch.service.waitForBundleDropStartupForTests();
+    expect(nextLaunch.mocks.downloadUpdate).toHaveBeenCalledWith({
+      channelName: 'General',
+      resolvedTarget: expect.objectContaining({
+        hash: 'hash-v2',
+        downloadUrl: undefined,
+        runtimeDelivery: v2Decision.runtimeDelivery,
+      }),
+    }, expect.any(Function));
+
+    const immediate = loadRuntimeServiceModule({
+      pendingState: { hasBundle: false, info: null, pendingApply: false },
+      decision: v2Decision,
+    });
+    immediate.service.initBundleDrop({ environment: 'production', policy: 'immediate' });
+    await immediate.service.waitForBundleDropStartupForTests();
+    expect(immediate.mocks.downloadUpdate).toHaveBeenCalled();
+    expect(immediate.mocks.applyUpdate).toHaveBeenCalled();
+
+    const checkOnly = loadRuntimeServiceModule({
+      pendingState: { hasBundle: false, info: null, pendingApply: false },
+      decision: v2Decision,
+    });
+    checkOnly.service.initBundleDrop({
+      environment: 'production',
+      policy: 'immediate',
+      checkOnly: true,
+    });
+    await checkOnly.service.waitForBundleDropStartupForTests();
+    expect(checkOnly.mocks.downloadUpdate).not.toHaveBeenCalled();
+  });
+
   it('exposes runtime actions, fetch fallbacks, and install helpers through the singleton service', async () => {
     const { service, mocks } = loadRuntimeServiceModule({
       decision: {
@@ -1155,10 +1316,17 @@ describe('runtime/service', () => {
       },
       status: '↩️ Rollback requested: CURRENT_REVOKED_NO_SAFE_TARGET',
     });
+    expect(rollbackDownload.mocks.rollbackToPreviousOrNative).not.toHaveBeenCalled();
+    expect(rollbackDownload.mocks.restartReactNativeNative).not.toHaveBeenCalled();
+
     await expect(rollbackDownload.service.downloadAndStage()).resolves.toEqual({
       result: { status: 'rollback', reason: 'CURRENT_REVOKED_NO_SAFE_TARGET' },
       status: '↩️ Rollback requested: CURRENT_REVOKED_NO_SAFE_TARGET',
     });
+    expect(rollbackDownload.mocks.rollbackToPreviousOrNative).toHaveBeenCalledWith({
+      forceNative: true,
+    });
+    expect(rollbackDownload.mocks.restartReactNativeNative).toHaveBeenCalledTimes(1);
 
     const noBundleApply = loadRuntimeServiceModule({
       applyResult: { status: 'noBundle' },
@@ -1235,8 +1403,8 @@ describe('runtime/service', () => {
     });
   });
 
-  it('maps rollback statuses without explicit reasons', async () => {
-    const { service } = loadRuntimeServiceModule({
+  it('executes previous-or-native rollback for manual downloads without an explicit reason', async () => {
+    const { service, mocks } = loadRuntimeServiceModule({
       decision: {
         action: 'ROLLBACK',
       },
@@ -1250,10 +1418,15 @@ describe('runtime/service', () => {
       response: { action: 'ROLLBACK' },
       status: '↩️ Rollback requested',
     });
+    expect(mocks.rollbackToPreviousOrNative).not.toHaveBeenCalled();
+    expect(mocks.restartReactNativeNative).not.toHaveBeenCalled();
+
     await expect(service.downloadAndStage()).resolves.toEqual({
       result: { status: 'rollback' },
       status: '↩️ Rollback requested',
     });
+    expect(mocks.rollbackToPreviousOrNative).toHaveBeenCalledWith();
+    expect(mocks.restartReactNativeNative).toHaveBeenCalledTimes(1);
   });
 
   it('returns empty fetch fallbacks and guards bundle list items without download urls', async () => {
@@ -1288,8 +1461,9 @@ describe('runtime/service', () => {
     });
   });
 
-  it('uses resolved patch transport when a selected bundle matches the server target', async () => {
+  it('uses resolved patch transport when an authoritative v2 target matches the selected bundle', async () => {
     const { service, mocks } = loadRuntimeServiceModule({
+      runtimeDeliveryMode: 'v2',
       decision: {
         action: 'INSTALL',
         hash: 'hash-12',
@@ -1317,16 +1491,7 @@ describe('runtime/service', () => {
     await service.waitForBundleDropStartupForTests();
 
     await expect(
-      service.installBundleFromListItem({
-        hash: 'hash-12',
-        bundleVersion: 12,
-        version: '1.0.12',
-        platform: 'android',
-        runtimeVersion: '1.0.0',
-        releaseNotes: null,
-        createdAt: '2026-03-29T00:00:00.000Z',
-        downloadUrl: 'https://cdn.example.com/hash-12.zip',
-      }),
+      service.installBundleFromListItem(createBundleListItem()),
     ).resolves.toEqual({
       result: { status: 'staged' },
       status: '✅ v12 downloaded. Will apply on next launch or when you call applyUpdate.',
@@ -1351,42 +1516,171 @@ describe('runtime/service', () => {
     expect(mocks.installBundle).not.toHaveBeenCalled();
   });
 
-  it('falls back to direct full install when list-item resolve fails', async () => {
+  it('applies an authoritative rollback instead of installing a selected v2 bundle', async () => {
     const { service, mocks } = loadRuntimeServiceModule({
-      checkError: new Error('resolve unavailable'),
-      installResult: { status: 'staged' },
+      runtimeDeliveryMode: 'v2',
+      decision: {
+        action: 'ROLLBACK',
+        reason: 'CURRENT_REVOKED_NO_SAFE_TARGET',
+      },
     });
 
     service.initBundleDrop({ environment: 'production' });
     await service.waitForBundleDropStartupForTests();
 
     await expect(
-      service.installBundleFromListItem({
-        hash: 'hash-13',
-        bundleVersion: 13,
-        version: '1.0.13',
-        platform: 'android',
-        runtimeVersion: '1.0.0',
-        releaseNotes: null,
-        createdAt: '2026-03-29T00:00:00.000Z',
-        downloadUrl: 'https://cdn.example.com/hash-13.zip',
-      }),
+      service.installBundleFromListItem(createBundleListItem()),
     ).resolves.toEqual({
-      result: { status: 'staged' },
-      status: '✅ v13 downloaded. Will apply on next launch or when you call applyUpdate.',
+      result: { status: 'rollback', reason: 'CURRENT_REVOKED_NO_SAFE_TARGET' },
+      status: '↩️ Rollback requested: CURRENT_REVOKED_NO_SAFE_TARGET',
     });
 
-    expect(mocks.installBundle).toHaveBeenCalledWith(
-      'hash-13',
-      'https://cdn.example.com/hash-13.zip',
-      13,
-      '1.0.13',
-      '1.0.0',
-      expect.objectContaining({
-        channelName: 'General',
-      }),
-    );
+    expect(mocks.rollbackToPreviousOrNative).toHaveBeenCalledWith({ forceNative: true });
+    expect(mocks.restartReactNativeNative).toHaveBeenCalledTimes(1);
+    expect(mocks.downloadUpdate).not.toHaveBeenCalled();
+    expect(mocks.installBundle).not.toHaveBeenCalled();
   });
+
+  it('applies a rollback returned by v2 list-item artifact authorization', async () => {
+    const { service, mocks } = loadRuntimeServiceModule({
+      runtimeDeliveryMode: 'v2',
+      decision: {
+        action: 'INSTALL',
+        hash: 'hash-12',
+        runtimeDelivery: {
+          generation: 12,
+          targetReleaseRef: 'release-12',
+          selectedMode: 'full',
+        },
+      },
+      downloadResult: {
+        status: 'rollback',
+        reason: 'CURRENT_REVOKED_NO_SAFE_TARGET',
+      },
+    });
+
+    service.initBundleDrop({ environment: 'production' });
+    await service.waitForBundleDropStartupForTests();
+
+    await expect(
+      service.installBundleFromListItem(createBundleListItem()),
+    ).resolves.toEqual({
+      result: { status: 'rollback', reason: 'CURRENT_REVOKED_NO_SAFE_TARGET' },
+      status: '↩️ Rollback requested: CURRENT_REVOKED_NO_SAFE_TARGET',
+    });
+
+    expect(mocks.downloadUpdate).toHaveBeenCalledTimes(1);
+    expect(mocks.rollbackToPreviousOrNative).toHaveBeenCalledWith({ forceNative: true });
+    expect(mocks.restartReactNativeNative).toHaveBeenCalledTimes(1);
+    expect(mocks.installBundle).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    ['a different INSTALL target', { action: 'INSTALL', hash: 'other-hash' }, undefined],
+    ['a NOOP decision', { action: 'NOOP', reason: 'UP_TO_DATE' }, undefined],
+    ['an empty decision', null, undefined],
+    ['a resolve failure', null, new Error('resolve unavailable')],
+  ])('fails closed for managed list installs after %s', async (_case, decision, checkError) => {
+    const { service, mocks } = loadRuntimeServiceModule({
+      runtimeDeliveryMode: 'v2',
+      decision,
+      checkError,
+    });
+
+    service.initBundleDrop({ environment: 'production' });
+    await service.waitForBundleDropStartupForTests();
+
+    await expect(
+      service.installBundleFromListItem(createBundleListItem()),
+    ).resolves.toEqual({
+      result: { status: 'incompatible' },
+      status: '⚠️ Selected bundle is not authorized by the current runtime delivery decision',
+    });
+
+    expect(mocks.downloadUpdate).not.toHaveBeenCalled();
+    expect(mocks.installBundle).not.toHaveBeenCalled();
+  });
+
+  it.each(['v1', 'shadow'] as const)(
+    'preserves direct list-item fallback for the deprecated %s config when resolve fails',
+    async runtimeDeliveryMode => {
+      const { service, mocks } = loadRuntimeServiceModule({
+        runtimeDeliveryMode,
+        checkError: new Error('resolve unavailable'),
+        installResult: { status: 'staged' },
+      });
+
+      service.initBundleDrop({ environment: 'production' });
+      await service.waitForBundleDropStartupForTests();
+
+      await expect(
+        service.installBundleFromListItem(createBundleListItem('hash-13', 13)),
+      ).resolves.toEqual({
+        result: { status: 'staged' },
+        status: '✅ v13 downloaded. Will apply on next launch or when you call applyUpdate.',
+      });
+
+      expect(mocks.installBundle).toHaveBeenCalledWith(
+        'hash-13',
+        'https://cdn.example.com/hash-13.zip',
+        13,
+        '1.0.13',
+        '1.0.0',
+        expect.objectContaining({
+          channelName: 'General',
+        }),
+      );
+    },
+  );
+
+  it('blocks direct URL installs with managed runtime delivery', async () => {
+    const { service, mocks } = loadRuntimeServiceModule({ runtimeDeliveryMode: 'v2' });
+    const statusSpy = jest.fn();
+
+    service.initBundleDrop({ environment: 'production' });
+    await service.waitForBundleDropStartupForTests();
+
+    await expect(
+      service.installBundle(
+        'hash-12',
+        'https://cdn.example.com/hash-12.zip',
+        12,
+        '1.0.12',
+        '1.0.0',
+        statusSpy,
+      ),
+    ).resolves.toEqual({ status: 'incompatible' });
+
+    expect(statusSpy).toHaveBeenCalledWith(
+      '⚠️ Direct URL installs are unavailable with managed runtime delivery; use downloadUpdate or a bundle-list item',
+    );
+    expect(mocks.installBundle).not.toHaveBeenCalled();
+  });
+
+  it.each(['v1', 'shadow'] as const)(
+    'preserves direct URL installs for the deprecated %s config',
+    async runtimeDeliveryMode => {
+      const { service, mocks } = loadRuntimeServiceModule({
+        runtimeDeliveryMode,
+        installResult: { status: 'staged' },
+      });
+
+      service.initBundleDrop({ environment: 'production' });
+      await service.waitForBundleDropStartupForTests();
+
+      await expect(
+        service.installBundle(
+          'hash-12',
+          'https://cdn.example.com/hash-12.zip',
+          12,
+          '1.0.12',
+          '1.0.0',
+        ),
+      ).resolves.toEqual({ status: 'staged' });
+
+      expect(mocks.installBundle).toHaveBeenCalledTimes(1);
+    },
+  );
 
   it('uses the active runtime channel for singleton actions while still allowing bundle list overrides', async () => {
     const { service, mocks } = loadRuntimeServiceModule({

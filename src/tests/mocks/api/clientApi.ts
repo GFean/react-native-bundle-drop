@@ -9,11 +9,23 @@ import type {
   ReportPatchApplyFailurePayload,
   ReportLocalRollbackPayload,
   BundleListParams,
+  OtaArtifactAuthorizationRequest,
+  OtaActiveInstallHeartbeat,
 } from '../../../api/types';
 
 export const mockPostOtaResolve = jest.fn<
   Promise<AxiosResponse<OtaResolveResponse>>,
   [string, OtaResolveRequest]
+>();
+
+export const mockPostOtaArtifactAuthorization = jest.fn<
+  Promise<AxiosResponse<OtaResolveResponse>>,
+  [string, OtaArtifactAuthorizationRequest]
+>();
+
+export const mockPostOtaActiveInstallHeartbeat = jest.fn<
+  Promise<AxiosResponse<void>>,
+  [string, OtaActiveInstallHeartbeat]
 >();
 
 export const mockGetPublicChannels = jest.fn<
@@ -43,6 +55,8 @@ export const mockGetBundleList = jest.fn<
 
 export const resetClientApiMocks = () => {
   mockPostOtaResolve.mockReset();
+  mockPostOtaArtifactAuthorization.mockReset();
+  mockPostOtaActiveInstallHeartbeat.mockReset();
   mockGetPublicChannels.mockReset();
   mockReportInstalled.mockReset();
   mockReportLocalRollback.mockReset();
@@ -51,6 +65,12 @@ export const resetClientApiMocks = () => {
 };
 
 export const postOtaResolve = (...args: [string, OtaResolveRequest]) => mockPostOtaResolve(...args);
+
+export const postOtaArtifactAuthorization = (...args: [string, OtaArtifactAuthorizationRequest]) =>
+  mockPostOtaArtifactAuthorization(...args);
+
+export const postOtaActiveInstallHeartbeat = (...args: [string, OtaActiveInstallHeartbeat]) =>
+  mockPostOtaActiveInstallHeartbeat(...args);
 
 export const getPublicChannels = (...args: [PublicChannelsParams]) => mockGetPublicChannels(...args);
 

@@ -140,6 +140,90 @@ final class BundleDropLocatorTests: XCTestCase {
     )
   }
 
+  func testBinaryVersionKeyReadsRuntimeVersionFromSignedExpoBuildIdentity() throws {
+    let bundle = try makeBundleFixture(
+      version: "3.4.5",
+      build: "67",
+      embeddedRuntimeVersion: "runtime-from-build"
+    )
+
+    XCTAssertEqual(
+      BundleDropLocatorCore.getBinaryVersionKey(bundle: bundle),
+      "runtime:runtime-from-build|binary:3.4.5-67"
+    )
+  }
+
+  func testEmbeddedBuildIdentityTakesPrecedenceOverLegacyInfoPlistRuntime() throws {
+    let bundle = try makeBundleFixture(
+      version: "3.4.5",
+      build: "67",
+      runtimeVersion: "legacy-runtime",
+      embeddedRuntimeVersion: "signed-runtime"
+    )
+
+    XCTAssertEqual(BundleDropLocatorCore.getRuntimeVersion(bundle: bundle), "signed-runtime")
+  }
+
+  func testEmbeddedRuntimeChangeChangesTheBinaryVersionKey() throws {
+    let runtimeTwo = try makeBundleFixture(
+      version: "3.4.5",
+      build: "67",
+      embeddedRuntimeVersion: "runtime-2"
+    )
+    let runtimeThree = try makeBundleFixture(
+      version: "3.4.5",
+      build: "67",
+      embeddedRuntimeVersion: "runtime-3"
+    )
+
+    XCTAssertNotEqual(
+      BundleDropLocatorCore.getBinaryVersionKey(bundle: runtimeTwo),
+      BundleDropLocatorCore.getBinaryVersionKey(bundle: runtimeThree)
+    )
+  }
+
+  func testExpoBuildFailsClosedWhenRuntimeIdentityIsMissingOrInvalid() throws {
+    let missingIdentity = try makeBundleFixture(
+      version: "3.4.5",
+      build: "67",
+      expoEnabled: true
+    )
+    let wrongPlatformIdentity = try makeBundleFixture(
+      version: "3.4.5",
+      build: "67",
+      expoEnabled: true,
+      embeddedRuntimeVersion: "runtime-2",
+      embeddedPlatform: "android"
+    )
+    let wrongSchemaIdentity = try makeBundleFixture(
+      version: "3.4.5",
+      build: "67",
+      expoEnabled: true,
+      embeddedRuntimeVersion: "runtime-2",
+      embeddedSchemaVersion: 2
+    )
+    let malformedIdentity = try makeBundleFixture(
+      version: "3.4.5",
+      build: "67",
+      expoEnabled: true,
+      embeddedRuntimeVersion: "runtime-2"
+    )
+    try "{".write(
+      to: malformedIdentity.bundleURL.appendingPathComponent(
+        BundleDropLocatorCore.embeddedBuildIdentityFilename
+      ),
+      atomically: true,
+      encoding: .utf8
+    )
+    let bareBuild = try makeBundleFixture(version: "3.4.5", build: "67")
+
+    XCTAssertFalse(BundleDropLocatorCore.hasRuntimeIdentityForOta(bundle: missingIdentity))
+    XCTAssertFalse(BundleDropLocatorCore.hasRuntimeIdentityForOta(bundle: wrongPlatformIdentity))
+    XCTAssertFalse(BundleDropLocatorCore.hasRuntimeIdentityForOta(bundle: wrongSchemaIdentity))
+    XCTAssertFalse(BundleDropLocatorCore.hasRuntimeIdentityForOta(bundle: malformedIdentity))
+    XCTAssertTrue(BundleDropLocatorCore.hasRuntimeIdentityForOta(bundle: bareBuild))
+  }
+
   func testFileSizeReturnsFileSizeAndZeroForMissingFile() throws {
     let file = tempRoot.appendingPathComponent("asset.bin")
     try Data([1, 2, 3, 4]).write(to: file)
@@ -260,14 +344,21 @@ final class BundleDropLocatorTests: XCTestCase {
   private func makeBundleFixture(
     version: String,
     build: String,
-    runtimeVersion: String? = nil
+    runtimeVersion: String? = nil,
+    expoEnabled: Bool = false,
+    embeddedRuntimeVersion: String? = nil,
+    embeddedPlatform: String = "ios",
+    embeddedSchemaVersion: Int = 1
   ) throws -> Bundle {
-    let bundleURL = tempRoot.appendingPathComponent("Fixture.bundle", isDirectory: true)
+    let bundleURL = tempRoot.appendingPathComponent(
+      "Fixture-\(UUID().uuidString).bundle",
+      isDirectory: true
+    )
     try FileManager.default.createDirectory(
       at: bundleURL,
       withIntermediateDirectories: true
     )
-    var plist: [String: String] = [
+    var plist: [String: Any] = [
       "CFBundleIdentifier": "app.bundledrop.fixture",
       "CFBundleInfoDictionaryVersion": "6.0",
       "CFBundleName": "Fixture",
@@ -278,12 +369,27 @@ final class BundleDropLocatorTests: XCTestCase {
     if let runtimeVersion {
       plist[BundleDropLocatorCore.runtimeVersionInfoKey] = runtimeVersion
     }
+    if expoEnabled {
+      plist[BundleDropLocatorCore.expoEnabledInfoKey] = true
+    }
     let data = try PropertyListSerialization.data(
       fromPropertyList: plist,
       format: .xml,
       options: 0
     )
     try data.write(to: bundleURL.appendingPathComponent("Info.plist"))
+
+    if let embeddedRuntimeVersion {
+      let candidate: [String: Any] = [
+        "schemaVersion": embeddedSchemaVersion,
+        "platform": embeddedPlatform,
+        "runtimeVersion": embeddedRuntimeVersion,
+      ]
+      let candidateData = try JSONSerialization.data(withJSONObject: candidate)
+      try candidateData.write(
+        to: bundleURL.appendingPathComponent(BundleDropLocatorCore.embeddedBuildIdentityFilename)
+      )
+    }
 
     return try XCTUnwrap(Bundle(url: bundleURL))
   }

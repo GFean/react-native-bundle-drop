@@ -105,6 +105,41 @@ describe('install/installFromZip', () => {
     ).rejects.toThrow('Bundle manifest is missing');
   });
 
+  it('binds v2 full installs to the signed archive, manifest, and JavaScript hashes', async () => {
+    setMockPlatform('android');
+    const manifest = makeManifest({
+      'main.jsbundle': { content: 'signed-bundle', role: 'jsbundle' as const },
+    });
+    configureUnzipEntries({
+      'main.jsbundle': 'signed-bundle',
+      [BUNDLE_MANIFEST]: JSON.stringify(manifest),
+    });
+
+    await expect(installFromZip({
+      downloadUrl: DOWNLOAD_URL,
+      hash: manifest.bundleHash,
+      platform: 'android',
+      expectedArchiveHash: '0'.repeat(64),
+    })).rejects.toThrow('Full bundle archive hash mismatch');
+
+    await expect(installFromZip({
+      downloadUrl: DOWNLOAD_URL,
+      hash: manifest.bundleHash,
+      platform: 'android',
+      expectedArchiveHash: DOWNLOADED_ZIP_HASH,
+      expectedManifestHash: '0'.repeat(64),
+    })).rejects.toThrow('Signed manifest hash does not match');
+
+    await expect(installFromZip({
+      downloadUrl: DOWNLOAD_URL,
+      hash: manifest.bundleHash,
+      platform: 'android',
+      expectedArchiveHash: DOWNLOADED_ZIP_HASH,
+      expectedManifestHash: manifest.manifestHash,
+      expectedJsBundleHash: '0'.repeat(64),
+    })).rejects.toThrow('Signed JavaScript bundle hash does not match');
+  });
+
   it('rejects invalid canonical hashes for patch installs', async () => {
     setMockPlatform('android');
     setMockFile('/mock/doc/bundle-drop/current.json', JSON.stringify({
@@ -857,6 +892,29 @@ describe('install/installFromZip', () => {
         baseHash: baseManifest.bundleHash,
         targetHash: targetManifest.bundleHash,
         algorithm: XDELTA_PATCH_ALGORITHM,
+        expectedManifestHash: '0'.repeat(64),
+      }),
+    ).rejects.toThrow('Signed manifest hash does not match patch target manifest');
+
+    await expect(
+      installFromPatchSet({
+        patchesUrl: 'https://cdn.example.com/patch.zip',
+        patchSetHash: DOWNLOADED_ZIP_HASH,
+        baseHash: baseManifest.bundleHash,
+        targetHash: targetManifest.bundleHash,
+        algorithm: XDELTA_PATCH_ALGORITHM,
+        expectedManifestHash: targetManifest.manifestHash,
+        expectedJsBundleHash: '0'.repeat(64),
+      }),
+    ).rejects.toThrow('Signed JavaScript bundle hash does not match patch target manifest');
+
+    await expect(
+      installFromPatchSet({
+        patchesUrl: 'https://cdn.example.com/patch.zip',
+        patchSetHash: DOWNLOADED_ZIP_HASH,
+        baseHash: baseManifest.bundleHash,
+        targetHash: targetManifest.bundleHash,
+        algorithm: XDELTA_PATCH_ALGORITHM,
         statusCb: statusSpy,
       }),
     ).resolves.toEqual({
@@ -1386,5 +1444,43 @@ describe('install/installFromZip', () => {
 
     expect(installErr).toBeInstanceOf(InstallPhaseError);
     expect((installErr as InstallPhaseError).phase).toBe('install');
+  });
+
+  it('preserves a rejected missing-assets capability as a download failure', async () => {
+    setMockPlatform('android');
+    const baseManifest = makeManifest({
+      'main.jsbundle': { content: 'base', role: 'jsbundle' as const },
+    });
+    const targetManifest = makeManifest({
+      'main.jsbundle': { content: 'target', role: 'jsbundle' as const },
+    });
+    setMockFile('/mock/doc/bundle-drop/current.json', JSON.stringify({
+      hash: baseManifest.bundleHash,
+      bundlePath: `/mock/doc/bundle-drop/bundles/${baseManifest.bundleHash}/main.jsbundle`,
+    }));
+    configureUnzipEntries({
+      [BUNDLE_MANIFEST]: JSON.stringify(targetManifest),
+      'files/full/main.jsbundle': 'target',
+    });
+    mockDownloadFile
+      .mockImplementationOnce(async (_url: string, destination: string) => {
+        setMockFile(destination, '__downloaded_zip__');
+      })
+      .mockRejectedValueOnce(Object.assign(new Error('HTTP 403: expired'), { status: 403 }));
+
+    const rejection = await installFromPatchSet({
+      patchesUrl: 'https://cdn.example.com/patch.zip',
+      patchSetHash: DOWNLOADED_ZIP_HASH,
+      missingAssetsUrl: 'https://cdn.example.com/missing-assets.zip',
+      missingAssetsHash: 'f'.repeat(64),
+      baseHash: baseManifest.bundleHash,
+      targetHash: targetManifest.bundleHash,
+      algorithm: XDELTA_PATCH_ALGORITHM,
+      platform: 'android',
+    }).catch((error: unknown) => error);
+
+    expect(rejection).toBeInstanceOf(InstallPhaseError);
+    expect((rejection as InstallPhaseError).phase).toBe('download');
+    expect((rejection as InstallPhaseError).originalCause).toMatchObject({ status: 403 });
   });
 });

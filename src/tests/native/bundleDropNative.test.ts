@@ -27,14 +27,37 @@ describe('native/bundleDropNative', () => {
     const enabled = loadBundleDropNativeModule();
     expect(enabled.isExpoOtaStartupEnabledNative()).toBe(true);
 
+    const enabledByIosNumericBoolean = loadBundleDropNativeModule(({ NativeModules }) => {
+      NativeModules.BundleDropExpoIdentity.otaStartupEnabled = 1;
+    });
+    expect(enabledByIosNumericBoolean.isExpoOtaStartupEnabledNative()).toBe(true);
+
     const disabled = loadBundleDropNativeModule(({ NativeModules }) => {
       NativeModules.BundleDropExpoIdentity.otaStartupEnabled = false;
     });
-
     expect(disabled.isExpoOtaStartupEnabledNative()).toBe(false);
 
+    const disabledByIosNumericBoolean = loadBundleDropNativeModule(({ NativeModules }) => {
+      NativeModules.BundleDropExpoIdentity.otaStartupEnabled = 0;
+    });
+    expect(disabledByIosNumericBoolean.isExpoOtaStartupEnabledNative()).toBe(false);
+
+    const invalidStringValue = loadBundleDropNativeModule(({ NativeModules }) => {
+      NativeModules.BundleDropExpoIdentity.otaStartupEnabled = '1';
+    });
+    expect(invalidStringValue.isExpoOtaStartupEnabledNative()).toBe(false);
+
+    const missingIdentity = loadBundleDropNativeModule(({ NativeModules }) => {
+      NativeModules.BundleDropExpoIdentity = undefined;
+    });
+    expect(missingIdentity.isExpoOtaStartupEnabledNative()).toBe(false);
+
     const reactNative = require('react-native') as typeof import('react-native');
-    reactNative.NativeModules.BundleDropExpoIdentity.otaStartupEnabled = true;
+    reactNative.NativeModules.BundleDropExpoIdentity = {
+      appVersion: '1.2.3',
+      appBuildVersion: '45',
+      otaStartupEnabled: true,
+    };
   });
 
   it('returns null and warns when the native getter is unavailable', async () => {

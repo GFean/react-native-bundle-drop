@@ -19,10 +19,21 @@ type InstallFromZipParams = {
   hash?: string;
   platform?: 'ios' | 'android';
   statusCb?: (status: string) => void;
+  expectedArchiveHash?: string;
+  expectedManifestHash?: string;
+  expectedJsBundleHash?: string;
 };
 
 export async function installFromZip(params: InstallFromZipParams): Promise<InstallResult> {
-  const { downloadUrl, hash, statusCb, platform = devicePlatform } = params;
+  const {
+    downloadUrl,
+    hash,
+    statusCb,
+    platform = devicePlatform,
+    expectedArchiveHash,
+    expectedManifestHash,
+    expectedJsBundleHash,
+  } = params;
 
   if (!hash) {
     throw new Error('Missing bundle hash');
@@ -43,6 +54,9 @@ export async function installFromZip(params: InstallFromZipParams): Promise<Inst
     } catch (e) {
       throw new InstallPhaseError('download', e);
     }
+    if (expectedArchiveHash && (await RNFS.sha256File(tempZipPath)) !== expectedArchiveHash) {
+      throw new InstallPhaseError('install', new Error('Full bundle archive hash mismatch'));
+    }
 
     try {
       fileNames = await RNFS.unzip(tempZipPath, tempDir);
@@ -61,6 +75,12 @@ export async function installFromZip(params: InstallFromZipParams): Promise<Inst
       const manifest: BundleManifest | null = await verifyBundleDir(tempDir, hash, platform);
       if (!manifest) {
         throw new Error('Bundle manifest is missing');
+      }
+      if (expectedManifestHash && manifest.manifestHash !== expectedManifestHash) {
+        throw new Error('Signed manifest hash does not match downloaded bundle manifest');
+      }
+      if (expectedJsBundleHash && manifest.jsBundleHash !== expectedJsBundleHash) {
+        throw new Error('Signed JavaScript bundle hash does not match downloaded bundle manifest');
       }
       verifiedHash = manifest.bundleHash;
     } catch (e) {

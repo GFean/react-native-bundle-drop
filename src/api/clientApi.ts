@@ -10,7 +10,37 @@ import {
   ReportLocalRollbackPayload,
   BundleListParams,
   BundleListResponse,
+  OtaArtifactAuthorizationRequest,
+  OtaActiveInstallHeartbeat,
 } from './types';
+
+export function postOtaActiveInstallHeartbeat(
+  projectSlug: string,
+  payload: OtaActiveInstallHeartbeat,
+): Promise<AxiosResponse<void>> {
+  return apiClient.post(
+    `/projects/${encodeURIComponent(projectSlug)}/ota/active-install`,
+    payload,
+    {
+      headers: { Accept: 'application/json' },
+      timeout: 3000,
+    },
+  );
+}
+
+export function postOtaArtifactAuthorization(
+  projectSlug: string,
+  payload: OtaArtifactAuthorizationRequest,
+): Promise<AxiosResponse<OtaResolveResponse>> {
+  return apiClient.post(
+    `/projects/${encodeURIComponent(projectSlug)}/ota/artifacts/authorize`,
+    payload,
+    {
+      headers: { Accept: 'application/json' },
+      timeout: 15000,
+    },
+  );
+}
 
 export function postOtaResolve(
   projectSlug: string,

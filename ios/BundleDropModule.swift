@@ -240,6 +240,36 @@ final class BundleDropModule: NSObject {
   }
 
   @objc
+  func fsSha256String(
+    _ value: String,
+    resolve: @escaping RCTPromiseResolveBlock,
+    reject: @escaping RCTPromiseRejectBlock
+  ) {
+    resolve(BundleDropRuntimeCrypto.sha256String(value))
+  }
+
+  @objc
+  func fsVerifyEs256Signature(
+    _ signingInput: String,
+    signatureBase64Url: String,
+    xBase64Url: String,
+    yBase64Url: String,
+    resolve: @escaping RCTPromiseResolveBlock,
+    reject: @escaping RCTPromiseRejectBlock
+  ) {
+    do {
+      resolve(try BundleDropRuntimeCrypto.verifyEs256Signature(
+        signingInput: signingInput,
+        signatureBase64Url: signatureBase64Url,
+        xBase64Url: xBase64Url,
+        yBase64Url: yBase64Url
+      ))
+    } catch {
+      reject("ERR_ES256_VERIFY", error.localizedDescription, error)
+    }
+  }
+
+  @objc
   func fsFileSize(
     _ path: String,
     resolve: @escaping RCTPromiseResolveBlock,
@@ -329,6 +359,51 @@ final class BundleDropModule: NSObject {
         resolve(nil)
       case .failure(let error):
         reject("ERR_DOWNLOAD", error.localizedDescription, error)
+      }
+    }
+  }
+
+  @objc
+  func fsDownloadFileBounded(
+    _ url: String,
+    destPath: String,
+    maxBytes: NSNumber,
+    timeoutMs: NSNumber,
+    resolve: @escaping RCTPromiseResolveBlock,
+    reject: @escaping RCTPromiseRejectBlock
+  ) {
+    let maxByteCount = maxBytes.int64Value
+    let timeoutSeconds = timeoutMs.doubleValue / 1000
+    guard maxByteCount > 0, timeoutSeconds > 0 else {
+      reject("ERR_DOWNLOAD_NETWORK", "Invalid bounded download limits", nil)
+      return
+    }
+
+    let config = URLSessionConfiguration.default
+    config.timeoutIntervalForRequest = timeoutSeconds
+    config.timeoutIntervalForResource = timeoutSeconds
+    BundleDropFileOps.downloadToFile(
+      urlString: url,
+      destPath: destPath,
+      maxBytes: maxByteCount,
+      configuration: config
+    ) { result in
+      switch result {
+      case .success:
+        resolve(nil)
+      case .failure(let error):
+        let message = error.localizedDescription
+        let errorCode: String
+        if (error as? URLError)?.code == .timedOut {
+          errorCode = "ERR_DOWNLOAD_TIMEOUT"
+        } else if message.hasPrefix("Download exceeds ") {
+          errorCode = "ERR_DOWNLOAD_TOO_LARGE"
+        } else if message.range(of: #"^HTTP \d{3}(?:\b|:)"#, options: .regularExpression) != nil {
+          errorCode = "ERR_DOWNLOAD_HTTP"
+        } else {
+          errorCode = "ERR_DOWNLOAD_NETWORK"
+        }
+        reject(errorCode, message, error)
       }
     }
   }

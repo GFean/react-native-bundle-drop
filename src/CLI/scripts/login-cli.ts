@@ -9,7 +9,7 @@ import { AddressInfo } from 'net';
 import { spawn } from 'child_process';
 import { Socket } from 'net';
 
-import { getBundleDropConfigPath, hasExistingBundleDropConfig, initConfig } from './init-config';
+import { hasExistingBundleDropConfig, initConfig } from './init-config';
 import { runPostInitPrompts } from './post-init';
 import { detectProjectType } from '../../expo';
 
@@ -390,29 +390,49 @@ const login = async () => {
       chalk.cyan(`${authFile.user.firstName} ${authFile.user.lastName}`)
     );
 
-    if (hasExistingBundleDropConfig()) {
-      console.log(
-        chalk.gray(
-          `ℹ️ Found existing bundle.drop.config.js at ${getBundleDropConfigPath()}. Skipping setup prompts.`
-        )
-      );
+    const hadConfig = hasExistingBundleDropConfig();
+    if (hadConfig) {
+      await initConfig({
+        serverUrl: baseUrl,
+        projects: authFile.projects,
+        organizations: authFile.organizations,
+        downloadApiKey: authFile.downloadApiKey,
+        authToken: authFile.token,
+        dryRun: false,
+      });
       return;
     }
 
     const projectType = detectProjectType({ projectRoot: process.cwd() });
-
     const configResult = await initConfig({
       serverUrl: baseUrl,
       projects: authFile.projects,
       organizations: authFile.organizations,
       downloadApiKey: authFile.downloadApiKey,
       authToken: authFile.token,
+      dryRun: true,
       projectType,
     });
-    if (configResult?.created) {
+    if (configResult && fs.existsSync(configResult.configPath)) {
       createdConfigPath = configResult.configPath;
     }
-    await runPostInitPrompts({ projectType });
+    await runPostInitPrompts({
+      projectType,
+      ...(configResult?.bootstrapContent
+        ? { runtimeDeliveryBootstrap: { content: configResult.bootstrapContent } }
+        : {}),
+      ...(configResult
+        ? {
+            virtualConfig: {
+              content: configResult.content,
+              serverUrl: configResult.serverUrl,
+              orgSlug: configResult.orgSlug,
+              projectSlug: configResult.projectSlug,
+              authToken: authFile.token,
+            },
+          }
+        : {}),
+    });
   } catch (error) {
     const message =
       axios.isAxiosError(error)

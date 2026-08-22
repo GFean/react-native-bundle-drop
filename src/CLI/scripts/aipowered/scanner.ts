@@ -8,15 +8,21 @@ import {
   hasBareAndroidStartupIntegration,
   hasBareIosStartupIntegration,
 } from '../native-setup-contract';
+import { inspectProjectDirectory, inspectProjectFile } from '../safe-file-transaction';
+import { findNativeEntrypointAuthorityIssue } from '../native-entrypoint-authority';
 import {
   AiSetupPlanFile,
   AiSetupProjectType,
   AiSetupScannerResult,
 } from './types';
+import { hasUnsafeTerminalControl } from './terminal-safety';
+import { findKnownBundleDropCredential } from './credential-safety';
 
 const MAX_UP = 12;
 const MAX_FILE_BYTES = 80 * 1024;
-const MAX_TOTAL_BYTES = 350 * 1024;
+const MAX_SUMMARIZED_SOURCE_BYTES = 1024 * 1024;
+const MAX_TOTAL_BYTES = 128 * 1024;
+const MAX_NATIVE_SCAN_ENTRIES = 5000;
 const TRUSTED_BUNDLE_DROP_AI_HOSTS = new Set(['api.bundledrop.app']);
 const LOCAL_AI_HOSTS = new Set(['localhost', '127.0.0.1', '::1', '[::1]', '10.0.2.2']);
 const SKIP_DIRS = new Set([
@@ -64,6 +70,8 @@ const CREDENTIAL_LITERAL_PATTERNS: Array<{ name: string; pattern: RegExp }> = [
 ];
 
 export const findCredentialLikeLiteral = (content: string): string | null => {
+  const bundleDropCredential = findKnownBundleDropCredential(content);
+  if (bundleDropCredential) return bundleDropCredential;
   for (const candidate of CREDENTIAL_LITERAL_PATTERNS) {
     if (candidate.pattern.test(content)) return candidate.name;
   }
@@ -71,6 +79,13 @@ export const findCredentialLikeLiteral = (content: string): string | null => {
 };
 
 const assertSafeAiSetupContent = (relativePath: string, content: string) => {
+  if (hasUnsafeTerminalControl(content)) {
+    throw new Error(
+      `Refusing AI setup because ${relativePath} contains unsafe terminal or bidirectional ` +
+        'control characters. Remove them manually, then retry. The file was not shared, ' +
+        'and --yes cannot bypass this safety check.',
+    );
+  }
   const finding = findCredentialLikeLiteral(content);
   if (!finding) return;
   throw new Error(
@@ -110,15 +125,30 @@ const summarizeContextContent = (relativePath: string, rawContent: string, sizeB
   const signalLines = matchedSignals.length
     ? matchedSignals.map(signal => `- ${signal}`).join('\n')
     : '- none detected';
+  const runtimeVersionBlock = relativePath.startsWith('bundle.drop.config.')
+    ? rawContent.match(/\bruntimeVersion\s*:\s*\{([\s\S]*?)\}/)?.[1] || ''
+    : '';
+  const runtimeAuthority = runtimeVersionBlock
+    ? /\bsource\s*:\s*['"]expo['"]/.test(runtimeVersionBlock)
+      ? 'expo_source'
+      : [
+          /\bios\s*:\s*['"][^'"]+['"]/.test(runtimeVersionBlock) ? 'ios_literal' : '',
+          /\bandroid\s*:\s*['"][^'"]+['"]/.test(runtimeVersionBlock) ? 'android_literal' : '',
+        ].filter(Boolean).join(',') || 'cli_validated'
+    : 'cli_validated';
+  const runtimeAuthorityLine = relativePath.startsWith('bundle.drop.config.')
+    ? `runtimeVersionAuthority: ${runtimeAuthority}\n`
+    : '';
 
   return [
     `BundleDrop context summary for ${relativePath}`,
     'Full content omitted to reduce setup-planning tokens; this context file is read-only.',
     `sizeBytes: ${sizeBytes}`,
+    runtimeAuthorityLine.trimEnd(),
     'signals:',
     signalLines,
     '',
-  ].join('\n');
+  ].filter(Boolean).join('\n');
 };
 
 export const isTrustedAiPlanningServer = (serverUrl: string) => {
@@ -146,9 +176,8 @@ export const isBundleDropHostedAiPlanningServer = (serverUrl: string) => {
   }
 };
 
-const loadBundleDropConfig = (configPath: string) => {
+const loadBundleDropConfig = (configPath: string, content: string) => {
   const moduleLike = { exports: {} as any };
-  const content = fs.readFileSync(configPath, 'utf8');
   const localRequire = createRequire(configPath);
   const load = new Function('module', 'exports', 'require', '__dirname', '__filename', content);
   load(moduleLike, moduleLike.exports, localRequire, path.dirname(configPath), configPath);
@@ -170,13 +199,27 @@ const findFilesByName = (root: string, names: Set<string>): string[] => {
   if (!fs.existsSync(root)) return [];
   const matches: string[] = [];
   const stack = [root];
+  let visitedEntries = 0;
 
   while (stack.length) {
     const current = stack.pop()!;
+    visitedEntries += 1;
+    if (visitedEntries > MAX_NATIVE_SCAN_ENTRIES) {
+      throw new Error(
+        `AI setup native source scan exceeded ${MAX_NATIVE_SCAN_ENTRIES} filesystem entries. ` +
+          'Reduce generated/source files or configure native startup manually. ' +
+          'No context was shared and no files were changed.',
+      );
+    }
     const stat = fs.lstatSync(current);
-    if (stat.isSymbolicLink()) continue;
+    if (SKIP_DIRS.has(path.basename(current))) continue;
+    if (stat.isSymbolicLink()) {
+      throw new Error(
+        `AI setup cannot safely inspect symbolic-link source path ${toPosix(path.relative(root, current))}. ` +
+          'No context was shared and no files were changed.',
+      );
+    }
     if (stat.isDirectory()) {
-      if (SKIP_DIRS.has(path.basename(current))) continue;
       for (const entry of fs.readdirSync(current)) {
         stack.push(path.join(current, entry));
       }
@@ -230,18 +273,74 @@ const setupFileKind = (relativePath: string): AiSetupPlanFile['kind'] => {
   return 'ios_entrypoint';
 };
 
-const readSetupFile = (projectRoot: string, relativePath: string): AiSetupPlanFile | null => {
-  const filePath = path.join(projectRoot, relativePath);
-  if (!fs.existsSync(filePath)) return null;
-  const stat = fs.lstatSync(filePath);
-  if (!stat.isFile() || stat.isSymbolicLink() || stat.size > MAX_FILE_BYTES) return null;
-  const rawContent = fs.readFileSync(filePath, 'utf8');
+const isRequiredPatchableSetupFile = (relativePath: string) => {
   const kind = setupFileKind(relativePath);
-  if (kind !== 'package_manifest' && kind !== 'bundle_drop_config') {
+  return kind === 'android_entrypoint' ||
+    kind === 'ios_entrypoint' ||
+    relativePath.startsWith('app.config.');
+};
+
+const isSummarizedSetupFile = (relativePath: string) => {
+  const kind = setupFileKind(relativePath);
+  return kind === 'package_manifest' ||
+    kind === 'bundle_drop_config' ||
+    kind === 'metro_config' ||
+    relativePath === 'app.json';
+};
+
+const setupContextLimitError = (relativePath: string, reason: string) => new Error(
+  `AI setup cannot safely inspect required setup file ${relativePath}: ${reason}. ` +
+    'Reduce or split this file, or configure Bundle Drop manually, then retry. ' +
+    'No context was shared and no files were changed.',
+);
+
+export const authoritativeDynamicExpoConfigFile = (
+  projectRoot: string,
+  candidate: unknown,
+): string | null => {
+  if (candidate === undefined || candidate === null || candidate === '') return null;
+  if (typeof candidate !== 'string' || !candidate.trim()) {
+    throw new Error('Expo did not identify a usable authoritative dynamic app config path. No files changed.');
+  }
+  const absolutePath = path.isAbsolute(candidate) ? candidate : path.resolve(projectRoot, candidate);
+  const relativePath = toPosix(path.relative(projectRoot, absolutePath));
+  if (
+    relativePath.startsWith('../') ||
+    path.isAbsolute(relativePath) ||
+    !/^app\.config\.(js|ts|cjs|mjs)$/.test(relativePath)
+  ) {
+    throw new Error(`Expo reported an unsafe dynamic app config path: ${candidate}. No files changed.`);
+  }
+  const configFile = inspectProjectFile(projectRoot, relativePath);
+  if (!configFile.exists) {
+    throw new Error(`Expo authoritative dynamic app config is missing: ${relativePath}. No files changed.`);
+  }
+  return relativePath;
+};
+
+const readSetupFile = (projectRoot: string, relativePath: string): AiSetupPlanFile | null => {
+  let inspected;
+  try {
+    inspected = inspectProjectFile(projectRoot, relativePath);
+  } catch {
+    throw setupContextLimitError(relativePath, 'the path is not a regular project file');
+  }
+  if (!inspected.exists) return null;
+  const sizeBytes = Buffer.byteLength(inspected.content, 'utf8');
+  const summarized = isSummarizedSetupFile(relativePath);
+  if (sizeBytes > (summarized ? MAX_SUMMARIZED_SOURCE_BYTES : MAX_FILE_BYTES)) {
+    if (isRequiredPatchableSetupFile(relativePath)) {
+      throw setupContextLimitError(relativePath, `it exceeds the ${MAX_FILE_BYTES}-byte per-file limit`);
+    }
+    return null;
+  }
+  const rawContent = inspected.content;
+  const kind = setupFileKind(relativePath);
+  if (!summarized) {
     assertSafeAiSetupContent(relativePath, rawContent);
   }
-  const content = kind === 'package_manifest' || kind === 'bundle_drop_config'
-    ? summarizeContextContent(relativePath, rawContent, stat.size)
+  const content = summarized
+    ? summarizeContextContent(relativePath, rawContent, sizeBytes)
     : rawContent;
   return {
     kind,
@@ -254,8 +353,20 @@ const readSetupFile = (projectRoot: string, relativePath: string): AiSetupPlanFi
 const collectSetupFiles = (
   projectRoot: string,
   projectType: AiSetupProjectType,
+  dynamicExpoConfigFile: string | null,
 ): AiSetupPlanFile[] => {
-  const relativePaths = ['package.json', ...SETUP_CONFIG_FILES];
+  const relativePaths: string[] = [
+    'package.json',
+    ...SETUP_CONFIG_FILES.filter(relativePath =>
+      projectType === 'expo'
+        ? !relativePath.startsWith('app.config.') &&
+          (relativePath !== 'app.json' || !dynamicExpoConfigFile)
+        : relativePath !== 'app.json' && !relativePath.startsWith('app.config.')
+    ),
+  ];
+  if (projectType === 'expo' && dynamicExpoConfigFile) {
+    relativePaths.push(dynamicExpoConfigFile);
+  }
   if (projectType === 'bare') {
     for (const srcDir of ['java', 'kotlin']) {
       relativePaths.push(
@@ -275,11 +386,19 @@ const collectSetupFiles = (
 
   const files: AiSetupPlanFile[] = [];
   let totalBytes = 0;
-  for (const relativePath of relativePaths) {
+  for (const relativePath of [...new Set(relativePaths)]) {
     const file = readSetupFile(projectRoot, relativePath);
     if (!file) continue;
     const bytes = Buffer.byteLength(file.content, 'utf8');
-    if (totalBytes + bytes > MAX_TOTAL_BYTES) continue;
+    if (totalBytes + bytes > MAX_TOTAL_BYTES) {
+      if (isRequiredPatchableSetupFile(relativePath)) {
+        throw setupContextLimitError(
+          relativePath,
+          `including it would exceed the ${MAX_TOTAL_BYTES}-byte total context limit`,
+        );
+      }
+      continue;
+    }
     totalBytes += bytes;
     files.push(file);
   }
@@ -287,11 +406,12 @@ const collectSetupFiles = (
 };
 
 const readPackageSignals = (projectRoot: string) => {
-  const packagePath = path.join(projectRoot, 'package.json');
-  const pkg = fs.existsSync(packagePath) ? readJsonFile(packagePath) : {};
+  const packageFile = inspectProjectFile(projectRoot, 'package.json');
+  const pkg = packageFile.exists ? JSON.parse(packageFile.content) : {};
   const dependencies = {
     ...(pkg.dependencies || {}),
     ...(pkg.devDependencies || {}),
+    ...(pkg.optionalDependencies || {}),
     ...(pkg.peerDependencies || {}),
   } as Record<string, string>;
   return { pkg, dependencies };
@@ -329,11 +449,19 @@ const detectSetupSignals = (
   const nativeEntrypoints = files.filter(file =>
     file.kind === 'android_entrypoint' || file.kind === 'ios_entrypoint'
   );
-  const hasBareNativeIntegration = nativeEntrypoints.length > 0 && nativeEntrypoints.every(file =>
-    file.kind === 'android_entrypoint'
-      ? hasBareAndroidStartupIntegration(file.content)
-      : hasBareIosStartupIntegration(file.path, file.content),
-  );
+  const androidEntrypoints = nativeEntrypoints.filter(file => file.kind === 'android_entrypoint');
+  const iosEntrypoints = nativeEntrypoints.filter(file => file.kind === 'ios_entrypoint');
+  const hasAndroidDirectory = inspectProjectDirectory(projectRoot, 'android');
+  const hasIosDirectory = inspectProjectDirectory(projectRoot, 'ios');
+  const hasBareNativeIntegration =
+    (hasAndroidDirectory || hasIosDirectory) &&
+    (!hasAndroidDirectory || androidEntrypoints.length === 1) &&
+    (!hasIosDirectory || iosEntrypoints.length === 1) &&
+    nativeEntrypoints.every(file =>
+      file.kind === 'android_entrypoint'
+        ? hasBareAndroidStartupIntegration(file.content)
+        : hasBareIosStartupIntegration(file.path, file.content),
+    );
   const hasBundleDropIntegration = projectType === 'expo'
     ? hasBundleDropExpoPlugin
     : hasBareNativeIntegration;
@@ -345,8 +473,8 @@ const detectSetupSignals = (
       : 'unknown' as const;
   const signals = [
     projectType === 'expo' ? 'expoProject' : 'bareProject',
-    fs.existsSync(path.join(projectRoot, 'ios')) ? 'iosDirectory' : '',
-    fs.existsSync(path.join(projectRoot, 'android')) ? 'androidDirectory' : '',
+    hasIosDirectory ? 'iosDirectory' : '',
+    hasAndroidDirectory ? 'androidDirectory' : '',
     expoUpdatesOwnership.packageIsInstalled || expoUpdatesOwnership.packageIsDeclared
       ? 'expoUpdatesDependency'
       : '',
@@ -365,9 +493,7 @@ const detectSetupSignals = (
       hasBundleDropDependency && hasBundleDropConfig && hasBundleDropIntegration
         ? 'configured' as const
         : 'partial' as const,
-    hasNativeDirectories:
-      fs.existsSync(path.join(projectRoot, 'ios')) ||
-      fs.existsSync(path.join(projectRoot, 'android')),
+    hasNativeDirectories: hasIosDirectory || hasAndroidDirectory,
     usesExpoRouter: Boolean(pkg.main === 'expo-router/entry' || dependencies['expo-router']),
     jsEngine: configuredEngine,
     expoUpdatesStatus: expoUpdatesOwnership.state,
@@ -400,11 +526,12 @@ export function scanProjectForAiSetup(
 ): AiSetupScannerResult {
   const projectRoot = findProjectRoot(startDir);
   const configPath = path.join(projectRoot, 'bundle.drop.config.js');
-  if (!fs.existsSync(configPath) && !virtualConfig) {
+  const configFile = inspectProjectFile(projectRoot, 'bundle.drop.config.js');
+  if (!configFile.exists && !virtualConfig) {
     throw new Error('bundle.drop.config.js not found; run `bundle-drop init` first.');
   }
 
-  const config = virtualConfig ? null : loadBundleDropConfig(configPath);
+  const config = virtualConfig ? null : loadBundleDropConfig(configPath, configFile.content);
   const serverUrl = virtualConfig
     ? normalizeServerUrl(virtualConfig.serverUrl)
     : typeof config?.serverUrl === 'string' ? normalizeServerUrl(config.serverUrl) : '';
@@ -419,7 +546,48 @@ export function scanProjectForAiSetup(
     throw new Error(`Refusing to send project files to untrusted AI planning server: ${serverUrl}.`);
   }
 
-  const files = collectSetupFiles(projectRoot, projectType);
+  if (projectType === 'expo') {
+    for (const relativePath of ['package.json', 'app.json', ...SETUP_CONFIG_FILES.filter(
+      file => file.startsWith('app.config.'),
+    )]) {
+      inspectProjectFile(projectRoot, relativePath);
+    }
+  }
+  const expoEvaluation = projectType === 'expo' ? evaluateExpoConfig(projectRoot) : null;
+  const dynamicExpoConfigFile = authoritativeDynamicExpoConfigFile(
+    projectRoot,
+    expoEvaluation?.dynamicConfigPath,
+  );
+  const hasDynamicExpoConfigCandidate = projectType === 'expo' &&
+    SETUP_CONFIG_FILES.some(relativePath =>
+      relativePath.startsWith('app.config.') && inspectProjectFile(projectRoot, relativePath).exists
+    );
+  if (hasDynamicExpoConfigCandidate && !dynamicExpoConfigFile) {
+    throw new Error(
+      'Expo config evaluation did not identify the authoritative dynamic app.config.* file. ' +
+        'No context was shared and no files were changed.',
+    );
+  }
+  const files = collectSetupFiles(projectRoot, projectType, dynamicExpoConfigFile);
+  if (projectType === 'bare') {
+    for (const platform of ['android', 'ios'] as const) {
+      const kind = platform === 'android' ? 'android_entrypoint' : 'ios_entrypoint';
+      const entrypoints = files.filter(file => file.kind === kind).map(file => file.path);
+      if (entrypoints.length > 1) continue;
+      const authorityIssue = findNativeEntrypointAuthorityIssue(
+        projectRoot,
+        platform,
+        entrypoints,
+      );
+      if (authorityIssue) {
+        throw new Error(
+          `AI setup cannot prove the ${platform} application entrypoint: ${authorityIssue} ` +
+            'Resolve native startup ownership manually, then retry. ' +
+            'No context was shared and no files were changed.',
+        );
+      }
+    }
+  }
   if (virtualConfig && !files.some(file => file.kind === 'bundle_drop_config')) {
     const summarizedConfig = summarizeContextContent(
       'bundle.drop.config.js',

@@ -5,6 +5,7 @@ import {
 import type { BundleListItem, UpdateCheckResponse } from '../api/types';
 import { BUNDLE_DROP_ROOT, config as projectConfig, defaultChannel } from '../context';
 import { cleanOrphanedTempZips } from '../fs/fsUtils';
+import { isRuntimeDeliveryConfigured } from '../loadConfig';
 import {
   getDownloadedBundlePathNative,
   isBundleDropNativeAvailable,
@@ -52,6 +53,15 @@ const EXPO_DEVELOPMENT_FALLBACK_WARNING =
   '[BundleDrop] OTA startup is unavailable in this Expo runtime. ' +
   'Expo Go and standard Debug/development-client builds keep Metro priority, so OTA features are disabled. ' +
   'Use a non-Debug/Release native build to test Bundle Drop updates.';
+const CURRENT_REVOKED_ROLLBACK_REASONS = new Set([
+  'CURRENT_REVOKED_NO_COMPATIBLE_TARGET',
+  'CURRENT_REVOKED_NO_SAFE_TARGET',
+  'CURRENT_REVOKED_ORIGIN_UNAVAILABLE',
+]);
+const MANAGED_LIST_INSTALL_NOT_AUTHORIZED_STATUS =
+  '⚠️ Selected bundle is not authorized by the current runtime delivery decision';
+const MANAGED_DIRECT_INSTALL_NOT_AUTHORIZED_STATUS =
+  '⚠️ Direct URL installs are unavailable with managed runtime delivery; use downloadUpdate or a bundle-list item';
 
 type BundleDropRuntimeSnapshot = {
   status: string;
@@ -159,6 +169,10 @@ function isSameStatus(current: string | undefined, next: string | undefined): bo
   return !!current && current === next;
 }
 
+function isCurrentRevokedRollback(reason?: string): boolean {
+  return !!reason && CURRENT_REVOKED_ROLLBACK_REASONS.has(reason);
+}
+
 function getCheckStatus(response: UpdateCheckResponse | null): string {
   if (!response) return '⚠️ Unable to check for updates. Try again.';
   if (response.skippedFailedBundle) {
@@ -218,6 +232,15 @@ function clearHealthTimer() {
 function requestRuntimeRestart() {
   runtimeRestartRequested = true;
   restartReactNativeNative();
+}
+
+async function applyAuthoritativeRollback(reason?: string): Promise<void> {
+  if (isCurrentRevokedRollback(reason)) {
+    await rollbackToPreviousOrNative({ forceNative: true });
+  } else {
+    await rollbackToPreviousOrNative();
+  }
+  requestRuntimeRestart();
 }
 
 async function markActiveCandidateHealthy(expectedHash?: string): Promise<boolean> {
@@ -384,8 +407,7 @@ async function runStartupFlow() {
 
   if (decision.action === 'ROLLBACK') {
     emitStatus('↩️ Server requested rollback...');
-    await rollbackToPreviousOrNative();
-    requestRuntimeRestart();
+    await applyAuthoritativeRollback(decision.reason);
     return;
   }
 
@@ -397,7 +419,7 @@ async function runStartupFlow() {
     ? decision.fallback?.downloadUrl
     : decision.downloadUrl;
 
-  if (!downloadUrl || !decision.hash) {
+  if ((!downloadUrl && !decision.runtimeDelivery) || !decision.hash) {
     emitStatus('⚠️ Update available but missing download URL');
     return;
   }
@@ -413,6 +435,7 @@ async function runStartupFlow() {
     baseHash: decision.baseHash,
     patchSet: decision.patchSet,
     fallback: decision.fallback,
+    ...(decision.runtimeDelivery ? { runtimeDelivery: decision.runtimeDelivery } : {}),
   };
 
   const downloadResult = await downloadUpdateInternal(
@@ -422,6 +445,12 @@ async function runStartupFlow() {
     },
     statusCb,
   );
+
+  if (downloadResult.status === 'rollback') {
+    emitStatus('↩️ Server requested rollback...');
+    await applyAuthoritativeRollback(downloadResult.reason);
+    return;
+  }
 
   if (runtime.policy === 'on-next-launch') {
     if (downloadResult.status === 'staged') {
@@ -585,6 +614,9 @@ export async function downloadAndStage(extraStatusHandler?: StatusHandler): Prom
       { channelName: runtime.channelName },
       status => emitStatus(status, extraStatusHandler),
     );
+    if (result.status === 'rollback') {
+      await applyAuthoritativeRollback(result.reason);
+    }
     const status = getDownloadStatus(result);
     if (status) {
       emitStatus(status, extraStatusHandler);
@@ -696,9 +728,29 @@ export async function installBundleFromListItem(
     const resolvedDecision = await checkForUpdateInternal(runtime.channelName, emitStatus).catch(
       () => null,
     );
+    const usesManagedRuntimeDelivery = isRuntimeDeliveryConfigured(projectConfig.runtimeDelivery);
     const canUseResolvedTransport =
       resolvedDecision?.action === 'INSTALL' &&
       (resolvedDecision.bundleHash ?? resolvedDecision.hash) === bundle.hash;
+
+    if (usesManagedRuntimeDelivery && resolvedDecision?.action === 'ROLLBACK') {
+      const result: DownloadUpdateResult = {
+        status: 'rollback',
+        reason: resolvedDecision.reason,
+      };
+      await applyAuthoritativeRollback(result.reason);
+      const status = getDownloadStatus(result);
+      if (status) emitStatus(status);
+      return { result, status };
+    }
+
+    if (usesManagedRuntimeDelivery && !canUseResolvedTransport) {
+      emitStatus(MANAGED_LIST_INSTALL_NOT_AUTHORIZED_STATUS);
+      return {
+        result: { status: 'incompatible' },
+        status: MANAGED_LIST_INSTALL_NOT_AUTHORIZED_STATUS,
+      };
+    }
 
     const result = canUseResolvedTransport
       ? await downloadUpdateInternal(
@@ -718,6 +770,9 @@ export async function installBundleFromListItem(
               baseHash: resolvedDecision.baseHash,
               patchSet: resolvedDecision.patchSet,
               fallback: resolvedDecision.fallback,
+              ...(resolvedDecision.runtimeDelivery
+                ? { runtimeDelivery: resolvedDecision.runtimeDelivery }
+                : {}),
             },
           },
           emitStatus,
@@ -733,6 +788,10 @@ export async function installBundleFromListItem(
             onStatusUpdate: emitStatus,
           },
         );
+
+    if (usesManagedRuntimeDelivery && result.status === 'rollback') {
+      await applyAuthoritativeRollback(result.reason);
+    }
 
     if (result.status === 'staged') {
       const status = `✅ v${bundle.bundleVersion} downloaded. Will apply on next launch or when you call applyUpdate.`;
@@ -895,6 +954,11 @@ export async function installBundle(
     return { status: 'disabled' };
   }
   await waitForStartupIfNeeded();
+
+  if (isRuntimeDeliveryConfigured(projectConfig.runtimeDelivery)) {
+    emitStatus(MANAGED_DIRECT_INSTALL_NOT_AUTHORIZED_STATUS, onStatusUpdate);
+    return { status: 'incompatible' };
+  }
 
   return withBusy(async () => {
     const result = await installBundleInternal(

@@ -149,4 +149,78 @@ describe('CLI/scripts/aipowered/apply-setup-plan', () => {
       }),
     ).toThrow();
   });
+
+  it('uses random exclusive temps and rejects target, parent, and backup symlink escapes', () => {
+    const outsideRoot = createTempProjectDir();
+    const outsideSentinel = path.join(outsideRoot, 'sentinel.txt');
+    fs.writeFileSync(outsideSentinel, 'outside-safe');
+    try {
+      const original = '{"expo":{}}\n';
+      const appPath = write('app.json', original);
+      fs.symlinkSync(outsideSentinel, `${appPath}.bundledrop-tmp`);
+      applySetupPatchPlans({
+        projectRoot,
+        projectType: 'expo',
+        changes: [changeFor('app.json', original, '{"expo":{"plugins":[]}}\n')],
+      });
+      expect(fs.readFileSync(outsideSentinel, 'utf8')).toBe('outside-safe');
+
+      fs.rmSync(path.join(projectRoot, '.bundledrop-backup'), { recursive: true });
+      fs.symlinkSync(outsideRoot, path.join(projectRoot, '.bundledrop-backup'));
+      expect(() => applySetupPatchPlans({
+        projectRoot,
+        projectType: 'expo',
+        changes: [changeFor('app.json', '{"expo":{"plugins":[]}}\n', original)],
+      })).toThrow('symlinked or non-directory');
+      expect(fs.readFileSync(outsideSentinel, 'utf8')).toBe('outside-safe');
+
+      fs.unlinkSync(path.join(projectRoot, '.bundledrop-backup'));
+      fs.unlinkSync(appPath);
+      fs.symlinkSync(outsideSentinel, appPath);
+      expect(() => applySetupPatchPlans({
+        projectRoot,
+        projectType: 'expo',
+        changes: [changeFor('app.json', 'outside-safe', original)],
+      })).toThrow('symlinked or non-regular');
+      expect(fs.readFileSync(outsideSentinel, 'utf8')).toBe('outside-safe');
+
+      fs.unlinkSync(appPath);
+      fs.symlinkSync(outsideRoot, path.join(projectRoot, 'android'));
+      expect(() => applySetupPatchPlans({
+        projectRoot,
+        projectType: 'bare',
+        changes: [changeFor(
+          'android/app/src/main/java/demo/MainApplication.kt',
+          'outside-safe',
+          'updated',
+        )],
+      })).toThrow('symlinked or non-directory');
+      expect(fs.readFileSync(outsideSentinel, 'utf8')).toBe('outside-safe');
+    } finally {
+      removeTempDir(outsideRoot);
+    }
+  });
+
+  it('rolls back an earlier write when a later target is a symlink', () => {
+    const outsideRoot = createTempProjectDir();
+    const outsideSentinel = path.join(outsideRoot, 'sentinel.txt');
+    fs.writeFileSync(outsideSentinel, 'outside-safe');
+    const originalApp = '{"expo":{}}\n';
+    const appPath = write('app.json', originalApp);
+    fs.symlinkSync(outsideSentinel, path.join(projectRoot, 'metro.config.js'));
+    try {
+      expect(() => applySetupPatchPlans({
+        projectRoot,
+        projectType: 'expo',
+        changes: [
+          changeFor('app.json', originalApp, '{"expo":{"plugins":[]}}\n'),
+          changeFor('metro.config.js', 'outside-safe', 'module.exports = {};\n'),
+        ],
+      })).toThrow('symlinked or non-regular');
+      expect(fs.readFileSync(appPath, 'utf8')).toBe(originalApp);
+      expect(fs.readFileSync(outsideSentinel, 'utf8')).toBe('outside-safe');
+    } finally {
+      removeTempDir(outsideRoot);
+    }
+  });
 });

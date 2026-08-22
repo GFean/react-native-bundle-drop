@@ -47,6 +47,7 @@ describe('runtime/initState', () => {
       channelName: 'General',
       policy: 'manual',
       onStatusUpdate: undefined,
+      onRuntimeDeliveryDiagnostic: undefined,
       checkOnly: false,
     });
 
@@ -67,6 +68,7 @@ describe('runtime/initState', () => {
         channelName: 'Beta',
         policy: 'immediate',
         onStatusUpdate,
+        onRuntimeDeliveryDiagnostic: undefined,
         checkOnly: true,
       },
     });
@@ -88,21 +90,26 @@ describe('runtime/initState', () => {
     ).toThrow('requires a non-empty environment');
 
     const firstStatusHandler = jest.fn();
+    const firstDiagnosticHandler = jest.fn();
     initializeBundleDropRuntime({
       environment: 'production',
       channelName: 'General',
       onStatusUpdate: firstStatusHandler,
+      onRuntimeDeliveryDiagnostic: firstDiagnosticHandler,
     });
 
     const secondStatusHandler = jest.fn();
+    const secondDiagnosticHandler = jest.fn();
     const reinitialized = initializeBundleDropRuntime({
       environment: 'production',
       channelName: 'General',
       onStatusUpdate: secondStatusHandler,
+      onRuntimeDeliveryDiagnostic: secondDiagnosticHandler,
     });
 
     expect(reinitialized.alreadyInitialized).toBe(true);
     expect(reinitialized.config.onStatusUpdate).toBe(secondStatusHandler);
+    expect(reinitialized.config.onRuntimeDeliveryDiagnostic).toBe(secondDiagnosticHandler);
 
     expect(setBundleDropChannel('  Beta ')).toEqual({
       environment: 'production',
@@ -110,6 +117,7 @@ describe('runtime/initState', () => {
       channelName: 'Beta',
       policy: 'manual',
       onStatusUpdate: secondStatusHandler,
+      onRuntimeDeliveryDiagnostic: secondDiagnosticHandler,
       checkOnly: false,
     });
     expect(getBundleDropRuntimeConfig()).toEqual({
@@ -118,6 +126,7 @@ describe('runtime/initState', () => {
       channelName: 'Beta',
       policy: 'manual',
       onStatusUpdate: secondStatusHandler,
+      onRuntimeDeliveryDiagnostic: secondDiagnosticHandler,
       checkOnly: false,
     });
 
@@ -156,6 +165,7 @@ describe('runtime/initState', () => {
       channelName: 'Dev',
       policy: 'manual',
       onStatusUpdate: undefined,
+      onRuntimeDeliveryDiagnostic: undefined,
       checkOnly: false,
     });
     expect(getBundleDropRuntimeConfigOrWarn()).toEqual(initialized.config);

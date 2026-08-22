@@ -1,17 +1,43 @@
 import axios from 'axios';
 import chalk from 'chalk';
 import fs from 'fs-extra';
+import { createRequire } from 'module';
 import path from 'path';
 import prompts from 'prompts';
 
 import type { ProjectType } from '../../expo';
+import {
+  createGeneratedRuntimeDeliveryBootstrap,
+  ensureRuntimeDeliveryBootstrapGitignore,
+  normalizeRuntimeDeliveryBootstrap,
+  removeGeneratedRuntimeDeliveryBootstrap,
+  runtimeDeliveryBootstrapPath,
+  serializeGeneratedRuntimeDeliveryBootstrap,
+  writeGeneratedRuntimeDeliveryBootstrap,
+  type GeneratedRuntimeDeliveryBootstrap,
+} from '../../runtime-delivery/bootstrapConfig';
+import {
+  inspectProjectFile,
+  writeProjectFileAtomically,
+} from './safe-file-transaction';
 
 const DOCS_PROJECT_CREATION_URL = 'https://bundledrop.app/docs/project-creation';
 const DOCS_INSTALLATION_URL = 'https://bundledrop.app/docs/installation';
 
 type Project = { name: string; slug: string; orgId: string };
 type Org = { slug: string; orgId: string; name: string };
-type ProjectCredentials = { projectSlug?: string; downloadApiKey?: string; downloadKeyHint?: string };
+type LegacyRuntimeDeliveryMode = 'v1' | 'shadow' | 'v2';
+type ProjectCredentials = {
+  projectId: string;
+  projectSlug: string;
+  orgId: string;
+  orgSlug: string;
+  /** Temporary compatibility field returned by older backends. */
+  runtimeDeliveryMode?: LegacyRuntimeDeliveryMode;
+  downloadApiKey?: string;
+  downloadKeyHint?: string | null;
+  runtimeDelivery?: unknown | null;
+};
 
 type BundleDropConfigValues = {
   projectType?: ProjectType;
@@ -22,8 +48,84 @@ type BundleDropConfigValues = {
   apiKey: string;
 };
 
+export { normalizeRuntimeDeliveryBootstrap } from '../../runtime-delivery/bootstrapConfig';
+
 function normalizeServerUrl(url: string): string {
   return url.replace(/\/$/, '');
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return Boolean(value) && typeof value === 'object' && !Array.isArray(value);
+}
+
+function validateProjectCredentials(
+  value: unknown,
+  expected: { orgSlug: string; projectSlug: string },
+): ProjectCredentials {
+  if (!isRecord(value)) {
+    throw new Error(
+      'Project credentials response is malformed. Existing local credentials were preserved.',
+    );
+  }
+
+  const projectId = typeof value.projectId === 'string' ? value.projectId.trim() : '';
+  const projectSlug = typeof value.projectSlug === 'string' ? value.projectSlug.trim() : '';
+  const orgId = typeof value.orgId === 'string' ? value.orgId.trim() : '';
+  const orgSlug = typeof value.orgSlug === 'string' ? value.orgSlug.trim() : '';
+  const runtimeDeliveryMode = value.runtimeDeliveryMode;
+  const downloadApiKey = value.downloadApiKey;
+  const downloadKeyHint = value.downloadKeyHint;
+  if (!projectId || !projectSlug || !orgId || !orgSlug) {
+    throw new Error(
+      'Project credentials response is missing its authoritative project identity. ' +
+        'Existing local credentials were preserved.',
+    );
+  }
+  if (
+    runtimeDeliveryMode !== undefined &&
+    !['v1', 'shadow', 'v2'].includes(runtimeDeliveryMode as string)
+  ) {
+    throw new Error(
+      'Project credentials response contains an invalid legacy runtime delivery mode. ' +
+        'Existing local credentials were preserved.',
+    );
+  }
+  if (projectSlug !== expected.projectSlug || orgSlug !== expected.orgSlug) {
+    throw new Error(
+      `Project credentials identity mismatch: expected ${expected.orgSlug}/${expected.projectSlug}, ` +
+        `received ${orgSlug}/${projectSlug}. Existing local credentials were preserved.`,
+    );
+  }
+  if (downloadApiKey !== undefined && typeof downloadApiKey !== 'string') {
+    throw new Error(
+      'Project credentials response contains an invalid download key. Existing local credentials were preserved.',
+    );
+  }
+  if (
+    downloadKeyHint !== undefined &&
+    downloadKeyHint !== null &&
+    typeof downloadKeyHint !== 'string'
+  ) {
+    throw new Error(
+      'Project credentials response contains an invalid download key hint. Existing local credentials were preserved.',
+    );
+  }
+
+  return {
+    projectId,
+    projectSlug,
+    orgId,
+    orgSlug,
+    runtimeDeliveryMode: runtimeDeliveryMode as LegacyRuntimeDeliveryMode | undefined,
+    downloadApiKey: typeof downloadApiKey === 'string' ? downloadApiKey : undefined,
+    downloadKeyHint:
+      typeof downloadKeyHint === 'string'
+        ? downloadKeyHint
+        : downloadKeyHint === null
+          ? null
+          : undefined,
+    runtimeDelivery: value.runtimeDelivery,
+  };
 }
 
 function createBundleDropConfig(values: BundleDropConfigValues): string {
@@ -78,20 +180,23 @@ ${projectTypeConfig}  serverUrl: ${JSON.stringify(values.serverUrl)},
 
 async function fetchProjectCredentials(params: {
   serverUrl: string;
+  orgSlug: string;
   projectSlug: string;
   authToken: string;
 }): Promise<ProjectCredentials | null> {
   const baseUrl = normalizeServerUrl(params.serverUrl);
-  const url = `${baseUrl}/projects/${encodeURIComponent(params.projectSlug)}/credentials`;
+  const url =
+    `${baseUrl}/projects/${encodeURIComponent(params.projectSlug)}/credentials` +
+    `?orgSlug=${encodeURIComponent(params.orgSlug)}`;
+  let response: { data?: unknown };
   try {
-    const res = await axios.get<ProjectCredentials>(url, {
+    response = await axios.get<ProjectCredentials>(url, {
       headers: {
         Accept: 'application/json',
         Authorization: `Bearer ${params.authToken}`,
       },
       timeout: 15000,
     });
-    return res.data || null;
   } catch (err) {
     console.log(
       chalk.yellow(
@@ -99,6 +204,111 @@ async function fetchProjectCredentials(params: {
           `If the project is not set up yet, see ${DOCS_PROJECT_CREATION_URL}`,
       ),
     );
+    return null;
+  }
+  return validateProjectCredentials(response.data, {
+    orgSlug: params.orgSlug,
+    projectSlug: params.projectSlug,
+  });
+}
+
+type RuntimeDeliveryBootstrapResult = {
+  bootstrapPath?: string;
+  bootstrapContent?: string;
+  bootstrap?: GeneratedRuntimeDeliveryBootstrap;
+  runtimeDeliveryAvailable?: boolean;
+  bootstrapRetired?: boolean;
+};
+
+function createBootstrapResult(params: {
+  projectRoot: string;
+  serverUrl: string;
+  orgSlug: string;
+  projectSlug: string;
+  credentials: ProjectCredentials | null;
+}): RuntimeDeliveryBootstrapResult {
+  if (!params.credentials) return {};
+  const legacyMode = params.credentials.runtimeDeliveryMode;
+  if (
+    params.credentials.runtimeDelivery === null ||
+    legacyMode === 'v1' ||
+    legacyMode === 'shadow'
+  ) {
+    return {
+      runtimeDeliveryAvailable: false,
+      bootstrapRetired: true,
+    };
+  }
+  const bootstrap = createGeneratedRuntimeDeliveryBootstrap({
+    identity: {
+      serverUrl: params.serverUrl,
+      orgSlug: params.orgSlug,
+      projectSlug: params.projectSlug,
+      projectId: params.credentials.projectId,
+      orgId: params.credentials.orgId,
+    },
+    runtimeDelivery: params.credentials.runtimeDelivery,
+  });
+  if (!bootstrap) {
+    return legacyMode === 'v2' || params.credentials.runtimeDelivery !== undefined
+      ? { runtimeDeliveryAvailable: true }
+      : {};
+  }
+  return {
+    bootstrap,
+    bootstrapPath: runtimeDeliveryBootstrapPath(params.projectRoot),
+    bootstrapContent: serializeGeneratedRuntimeDeliveryBootstrap(bootstrap),
+    runtimeDeliveryAvailable: true,
+  };
+}
+
+async function persistBootstrap(
+  projectRoot: string,
+  result: RuntimeDeliveryBootstrapResult,
+): Promise<void> {
+  if (result.bootstrap) {
+    const bootstrapPath = await writeGeneratedRuntimeDeliveryBootstrap({
+      projectRoot,
+      bootstrap: result.bootstrap,
+    });
+    await ensureRuntimeDeliveryBootstrapGitignore(projectRoot);
+    console.log(chalk.green(`✅ Synced Bundle Drop runtime delivery bootstrap at ${bootstrapPath}`));
+    return;
+  }
+  if (result.bootstrapRetired) {
+    const bootstrapPath = await removeGeneratedRuntimeDeliveryBootstrap(projectRoot);
+    console.log(
+      chalk.green(
+        bootstrapPath
+          ? `✅ Removed the runtime delivery bootstrap because delivery is disabled for this project: ${bootstrapPath}`
+          : '✅ Runtime delivery is disabled for this project; no bootstrap is present.',
+      ),
+    );
+  }
+}
+
+function loadExistingConfig(configPath: string, content: string): BundleDropConfigValues | null {
+  try {
+    const moduleLike = { exports: {} as Record<string, unknown> };
+    const localRequire = createRequire(configPath);
+    const load = new Function('module', 'exports', 'require', '__dirname', '__filename', content);
+    load(moduleLike, moduleLike.exports, localRequire, path.dirname(configPath), configPath);
+    const config = moduleLike.exports as {
+      projectType?: ProjectType;
+      serverUrl?: string;
+      org?: { slug?: string };
+      project?: { name?: string; slug?: string; apiKey?: string };
+    };
+    if (!config.serverUrl || !config.org?.slug || !config.project?.slug) return null;
+    return {
+      projectType: config.projectType,
+      serverUrl: normalizeServerUrl(config.serverUrl),
+      orgSlug: config.org.slug,
+      projectName: config.project.name || '',
+      projectSlug: config.project.slug,
+      apiKey: config.project.apiKey || '',
+    };
+  } catch {
     return null;
   }
 }
@@ -134,18 +344,46 @@ export async function initConfig(params: {
   projectType?: ProjectType;
 }) {
   const configPath = getBundleDropConfigPath();
+  const projectRoot = path.dirname(configPath);
+  const existingConfigFile = inspectProjectFile(projectRoot, 'bundle.drop.config.js');
 
-  if (fs.existsSync(configPath)) {
+  if (existingConfigFile.exists) {
+    const existing = loadExistingConfig(configPath, existingConfigFile.content);
+    let bootstrapResult: RuntimeDeliveryBootstrapResult = {};
+    if (existing && params.authToken) {
+      const credentials = await fetchProjectCredentials({
+        serverUrl: existing.serverUrl,
+        orgSlug: existing.orgSlug,
+        projectSlug: existing.projectSlug,
+        authToken: params.authToken,
+      });
+      bootstrapResult = createBootstrapResult({
+        projectRoot,
+        serverUrl: existing.serverUrl,
+        orgSlug: existing.orgSlug,
+        projectSlug: existing.projectSlug,
+        credentials,
+      });
+      if (!params.dryRun) await persistBootstrap(projectRoot, bootstrapResult);
+    }
     console.log(
       chalk.yellow(
-        `ℹ️ bundle.drop.config.js already exists at ${configPath}. If this is accidental, delete it and rerun the init/login.\n` +
-          `See ${DOCS_INSTALLATION_URL}`,
+        `ℹ️ Preserving existing bundle.drop.config.js at ${configPath}.` +
+          (bootstrapResult.bootstrap
+            ? ' Runtime delivery bootstrap is ready to sync.'
+            : bootstrapResult.bootstrapRetired
+              ? ' Runtime delivery setup is synchronized.'
+              : ` No valid runtime delivery bootstrap was returned; see ${DOCS_INSTALLATION_URL}`),
       ),
     );
     return {
       configPath,
-      content: fs.readFileSync(configPath, 'utf8'),
+      content: existingConfigFile.content,
       created: false,
+      serverUrl: existing?.serverUrl,
+      orgSlug: existing?.orgSlug,
+      projectSlug: existing?.projectSlug,
+      ...bootstrapResult,
     };
   }
 
@@ -222,10 +460,12 @@ export async function initConfig(params: {
   }
 
   let resolvedServerUrl = normalizeServerUrl(params.serverUrl);
-  let apiKey = params.downloadApiKey || '';
+  let apiKey = params.authToken ? '' : params.downloadApiKey || '';
+  let credentials: ProjectCredentials | null = null;
   if (projectSlug && params.authToken) {
-    const credentials = await fetchProjectCredentials({
+    credentials = await fetchProjectCredentials({
       serverUrl: resolvedServerUrl,
+      orgSlug,
       projectSlug,
       authToken: params.authToken,
     });
@@ -263,9 +503,17 @@ export async function initConfig(params: {
     });
     console.log(chalk.cyan(`Dry-run bundle.drop.config.js preview:\n${previewContent}`));
   } else {
-    await fs.writeFile(configPath, content, 'utf8');
+    writeProjectFileAtomically(projectRoot, 'bundle.drop.config.js', content);
     console.log(chalk.green(`✅ Created bundle.drop.config.js at ${configPath}`));
   }
+  const bootstrapResult = createBootstrapResult({
+    projectRoot,
+    serverUrl: resolvedServerUrl,
+    orgSlug,
+    projectSlug,
+    credentials,
+  });
+  if (!params.dryRun) await persistBootstrap(projectRoot, bootstrapResult);
   return {
     configPath,
     content,
@@ -273,6 +521,7 @@ export async function initConfig(params: {
     serverUrl: resolvedServerUrl,
     orgSlug,
     projectSlug,
+    ...bootstrapResult,
   };
 }
 

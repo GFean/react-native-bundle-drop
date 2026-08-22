@@ -3,7 +3,7 @@ import RNFS from '../native/fs';
 import { BUNDLE_DROP_ROOT, platform as devicePlatform } from '../context';
 import { ensureDir } from '../fs/fsUtils';
 import { readCurrentBundlePointer } from '../fs/bundlePointer';
-import { InstallPhaseError } from '../errors';
+import { InstallPhaseError, isInstallPhaseError } from '../errors';
 import {
   BUNDLE_MANIFEST,
   BundleManifestFile,
@@ -38,6 +38,8 @@ type InstallFromPatchSetParams = {
   algorithm: SupportedPatchAlgorithm;
   platform?: 'ios' | 'android';
   statusCb?: (status: string) => void;
+  expectedManifestHash?: string;
+  expectedJsBundleHash?: string;
 };
 
 const reconstructPatchTarget = async (
@@ -82,6 +84,8 @@ export async function installFromPatchSet(params: InstallFromPatchSetParams): Pr
     algorithm,
     statusCb,
     platform = devicePlatform,
+    expectedManifestHash,
+    expectedJsBundleHash,
   } = params;
   assertCanonicalBundleHash(baseHash, 'base hash');
   assertCanonicalBundleHash(targetHash, 'target hash');
@@ -141,13 +145,17 @@ export async function installFromPatchSet(params: InstallFromPatchSetParams): Pr
       }
       const assetsZipPath = `${BUNDLE_DROP_ROOT}/bundles/_patch_assets_${targetHash}.zip`;
       try {
-        await RNFS.downloadFile(missingAssetsUrl, assetsZipPath);
+        try {
+          await RNFS.downloadFile(missingAssetsUrl, assetsZipPath);
+        } catch (e) {
+          throw new InstallPhaseError('download', e);
+        }
         if ((await RNFS.sha256File(assetsZipPath)) !== missingAssetsHash) {
           throw new Error('Missing assets archive hash mismatch');
         }
         await RNFS.unzip(assetsZipPath, `${patchDir}/missing-assets`);
       } catch (e) {
-        throw new InstallPhaseError('install', e);
+        throw isInstallPhaseError(e) ? e : new InstallPhaseError('install', e);
       } finally {
         try { await RNFS.unlink(assetsZipPath); } catch { /* best-effort cleanup */ }
       }
@@ -156,6 +164,12 @@ export async function installFromPatchSet(params: InstallFromPatchSetParams): Pr
     try {
       targetManifest = await readJsonFile<BundleManifest>(`${patchDir}/${BUNDLE_MANIFEST}`);
       assertValidBundleManifest(targetManifest, targetHash, platform);
+      if (expectedManifestHash && targetManifest.manifestHash !== expectedManifestHash) {
+        throw new Error('Signed manifest hash does not match patch target manifest');
+      }
+      if (expectedJsBundleHash && targetManifest.jsBundleHash !== expectedJsBundleHash) {
+        throw new Error('Signed JavaScript bundle hash does not match patch target manifest');
+      }
       await reconstructPatchTarget(baseDir, baseHash, platform, patchDir, targetTempDir, targetManifest, algorithm);
       await RNFS.writeFile(
         `${targetTempDir}/${BUNDLE_MANIFEST}`,

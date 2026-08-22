@@ -1,6 +1,7 @@
 import chalk from 'chalk';
 import fs from 'fs';
 import path from 'path';
+import { spawnSync } from 'child_process';
 import {
   hasBareAndroidStartupIntegration,
   hasBareIosStartupIntegration,
@@ -19,12 +20,19 @@ import {
   resolveExpoUploadIdentity,
 } from './expo/build-receipt';
 import { findProjectRoot } from './aipowered/scanner';
+import { readGeneratedRuntimeDeliveryBootstrap } from '../../runtime-delivery/bootstrapConfig';
+import { findNativeEntrypointAuthorityIssue } from './native-entrypoint-authority';
+import {
+  findSingleMetroConfig,
+  hasAuthoritativeMetroWrapper,
+  hasExecutableMetroModuleReference,
+} from './metro-config-authority';
+import { inspectProjectFile } from './safe-file-transaction';
 
 const PACKAGE_NAME = '@gfean/react-native-bundle-drop';
 const ANDROID_MARKER = 'com.bundledrop.EXPO_ENABLED';
 const IOS_MARKER = 'BundleDropExpoEnabled';
 const IOS_RECEIPT_PHASE = 'Bundle Drop: Write iOS build identity';
-const METRO_CONFIG_EXTENSIONS = ['js', 'ts', 'cjs', 'mjs'];
 
 export type DoctorCheck = {
   name: string;
@@ -65,23 +73,135 @@ const checkExpoUpdates = (projectRoot: string, exp: Record<string, any>): Doctor
   };
 };
 
-const findFiles = (directory: string, suffix: string): string[] => {
+const findFiles = (
+  directory: string,
+  suffix: string,
+  budget = { visitedEntries: 0 },
+): string[] => {
   const files: string[] = [];
   if (fs.existsSync(directory)) {
     for (const entry of fs.readdirSync(directory, { withFileTypes: true })) {
+      budget.visitedEntries += 1;
+      if (budget.visitedEntries > 5000) {
+        throw new Error('Native doctor source scan exceeded 5000 filesystem entries.');
+      }
       if (entry.name === 'Pods' || entry.name === 'build') continue;
       const entryPath = path.join(directory, entry.name);
-      if (entry.isDirectory()) files.push(...findFiles(entryPath, suffix));
+      if (entry.isDirectory()) files.push(...findFiles(entryPath, suffix, budget));
       else if (entry.name.endsWith(suffix)) files.push(entryPath);
     }
   }
   return files;
 };
 
-const findMetroConfig = (projectRoot: string): string | undefined =>
-  METRO_CONFIG_EXTENSIONS
-    .map(extension => path.join(projectRoot, `metro.config.${extension}`))
-    .find(fs.existsSync);
+const inspectMetroConfig = (projectRoot: string) => {
+  try {
+    const file = findSingleMetroConfig(projectRoot);
+    return file
+      ? { file, content: inspectProjectFile(projectRoot, file).content, issue: null }
+      : { file: undefined, content: '', issue: 'No Metro config file was found.' };
+  } catch (error) {
+    return { file: undefined, content: '', issue: (error as Error).message };
+  }
+};
+
+const runtimeDeliveryBootstrapGitState = (
+  projectRoot: string,
+): 'ignored' | 'tracked' | 'untracked' | null => {
+  const relativePath = path.join('.bundle-drop', 'runtime-delivery.generated.json');
+  const runGit = (args: string[]) => spawnSync('git', args, {
+    cwd: projectRoot,
+    stdio: 'ignore',
+  });
+  const repository = runGit(['rev-parse', '--is-inside-work-tree']);
+  if (repository.error || repository.status !== 0) return null;
+  if (runGit(['check-ignore', '--no-index', '-q', '--', relativePath]).status === 0) {
+    return 'ignored';
+  }
+  return runGit(['ls-files', '--error-unmatch', '--', relativePath]).status === 0
+    ? 'tracked'
+    : 'untracked';
+};
+
+const checkRuntimeDeliveryBootstrap = (projectRoot: string): DoctorCheck => {
+  const configPath = path.join(projectRoot, 'bundle.drop.config.js');
+  if (!fs.existsSync(configPath)) {
+    return {
+      name: 'Runtime delivery bootstrap',
+      status: 'error',
+      message: 'bundle.drop.config.js is required before runtime delivery can be validated.',
+    };
+  }
+  try {
+    delete require.cache[require.resolve(configPath)];
+    // eslint-disable-next-line @typescript-eslint/no-var-requires
+    const config = require(configPath) as {
+      serverUrl?: string;
+      org?: { slug?: string };
+      project?: { slug?: string };
+      runtimeDelivery?: unknown;
+    };
+    if (!config.serverUrl || !config.org?.slug || !config.project?.slug) {
+      throw new Error('bundle.drop.config.js is missing serverUrl, org.slug, or project.slug.');
+    }
+    const bootstrap = readGeneratedRuntimeDeliveryBootstrap({
+      projectRoot,
+      expectedIdentity: {
+        serverUrl: config.serverUrl,
+        orgSlug: config.org.slug,
+        projectSlug: config.project.slug,
+      },
+    });
+    if (bootstrap) {
+      const gitState = runtimeDeliveryBootstrapGitState(projectRoot);
+      if (gitState === 'ignored') {
+        return {
+          name: 'Runtime delivery bootstrap',
+          status: 'error',
+          message:
+            'The runtime delivery bootstrap is ignored by Git and will be missing from clean builds. ' +
+            'Run `bundle-drop sync` to repair .gitignore.',
+        };
+      }
+      if (gitState === 'untracked') {
+        return {
+          name: 'Runtime delivery bootstrap',
+          status: 'warning',
+          message:
+            `Runtime delivery bootstrap is valid with ` +
+            `${Object.keys(bootstrap.runtimeDelivery.publicKeys).length} public key(s), ` +
+            'but it is not committed yet.',
+        };
+      }
+      return {
+        name: 'Runtime delivery bootstrap',
+        status: 'pass',
+        message: `Runtime delivery bootstrap is pinned with ${Object.keys(bootstrap.runtimeDelivery.publicKeys).length} public key(s).`,
+      };
+    }
+    if (config.runtimeDelivery) {
+      return {
+        name: 'Runtime delivery bootstrap',
+        status: 'warning',
+        message:
+          'Stale inline runtime delivery config is ignored. Remove runtimeDelivery from ' +
+          'bundle.drop.config.js, migrate Metro with `bundle-drop init`, and use `bundle-drop sync` ' +
+          'for package-managed trust.',
+      };
+    }
+    return {
+      name: 'Runtime delivery bootstrap',
+      status: 'warning',
+      message: 'No runtime delivery bootstrap is pinned. Run `bundle-drop sync` to create or repair it.',
+    };
+  } catch (error) {
+    return {
+      name: 'Runtime delivery bootstrap',
+      status: 'error',
+      message: `${(error as Error).message} Run \`bundle-drop sync\` to repair it.`,
+    };
+  }
+};
 
 const checkCommittedNativeIntegration = (
   projectRoot: string,
@@ -129,6 +249,7 @@ async function inspectExpoProject(
   platforms: MobilePlatform[],
 ): Promise<DoctorCheck[]> {
   const checks: DoctorCheck[] = [];
+  checks.push(checkRuntimeDeliveryBootstrap(projectRoot));
   const { exp } = evaluateExpoConfig(projectRoot);
   const plugins = (exp.plugins || []).map(pluginName);
   const bundleDropPluginCount = plugins.filter(name => name === PACKAGE_NAME).length;
@@ -171,14 +292,16 @@ async function inspectExpoProject(
     if (nativeCheck) checks.push(nativeCheck);
   }
 
-  const metroFile = findMetroConfig(projectRoot);
-  const metroContent = metroFile ? fs.readFileSync(metroFile, 'utf8') : '';
+  const metro = inspectMetroConfig(projectRoot);
+  const hasExpoMetroWrapper = !metro.issue &&
+    hasAuthoritativeMetroWrapper(metro.content, 'withBundleDropExpo') &&
+    hasExecutableMetroModuleReference(metro.content, 'expo/metro-config');
   checks.push({
     name: 'Expo Metro wrapper',
-    status: metroContent.includes('withBundleDropExpo') ? 'pass' : 'error',
-    message: metroContent.includes('withBundleDropExpo')
+    status: hasExpoMetroWrapper ? 'pass' : 'error',
+    message: hasExpoMetroWrapper
       ? 'Existing Expo Metro configuration is preserved through withBundleDropExpo.'
-      : 'Metro must use withBundleDropExpo and preserve expo/metro-config.',
+      : metro.issue || 'Metro must export withBundleDropExpo(...) and preserve expo/metro-config.',
   });
 
   const runtimeAuthorities = new Map(
@@ -349,18 +472,35 @@ const checkBareStartupIntegration = (
     ? ['MainApplication.kt', 'MainApplication.java']
     : ['AppDelegate.swift', 'AppDelegate.mm', 'AppDelegate.m'];
   const entrypoints = entrypointNames.flatMap(name => findFiles(nativeRoot, name));
-  const hasIntegration = entrypoints.some(filePath => {
+  const relativeEntrypoints = entrypoints.map(filePath =>
+    path.relative(projectRoot, filePath).split(path.sep).join('/')
+  );
+  let authorityIssue: string | null = null;
+  try {
+    authorityIssue = findNativeEntrypointAuthorityIssue(
+      projectRoot,
+      platform,
+      relativeEntrypoints,
+    );
+  } catch (error) {
+    authorityIssue = (error as Error).message;
+  }
+  const hasIntegration = entrypoints.length === 1 && entrypoints.every(filePath => {
     const content = fs.readFileSync(filePath, 'utf8');
     return platform === 'android'
       ? hasBareAndroidStartupIntegration(content)
       : hasBareIosStartupIntegration(filePath, content);
-  });
+  }) && !authorityIssue;
   return {
     name: `${platform} OTA startup ownership`,
     status: hasIntegration ? 'pass' : 'error',
-    message: hasIntegration
-      ? `The ${platform} application entrypoint asks Bundle Drop for the cold-start bundle.`
-      : `The ${platform} application entrypoint does not hand cold-start bundle resolution to Bundle Drop.`,
+    message: entrypoints.length > 1
+      ? `Multiple ${platform} application entrypoints were found; resolve startup ownership manually.`
+      : authorityIssue
+        ? `Native application entrypoint authority is ambiguous: ${authorityIssue}`
+        : hasIntegration
+        ? `The ${platform} application entrypoint asks Bundle Drop for the cold-start bundle.`
+        : `The ${platform} application entrypoint does not hand cold-start bundle resolution to Bundle Drop.`,
   };
 };
 
@@ -445,8 +585,9 @@ function inspectBareProject(
   platforms: MobilePlatform[],
 ): DoctorCheck[] {
   const configPath = path.join(projectRoot, 'bundle.drop.config.js');
-  const metroPath = findMetroConfig(projectRoot);
-  const metroContent = metroPath ? fs.readFileSync(metroPath, 'utf8') : '';
+  const metro = inspectMetroConfig(projectRoot);
+  const hasBareMetroWrapper = !metro.issue &&
+    hasAuthoritativeMetroWrapper(metro.content, 'withBundleDrop');
   const checks: DoctorCheck[] = [
     {
       name: 'Bundle Drop config',
@@ -457,11 +598,12 @@ function inspectBareProject(
     },
     {
       name: 'Bare Metro alias',
-      status: metroContent.includes('bundle-drop-config') ? 'pass' : 'error',
-      message: metroContent.includes('bundle-drop-config')
-        ? 'Metro resolves bundle-drop-config.'
-        : 'Metro does not contain the bundle-drop-config alias.',
+      status: hasBareMetroWrapper ? 'pass' : 'error',
+      message: hasBareMetroWrapper
+        ? 'Metro uses the package-managed Bundle Drop wrapper.'
+        : metro.issue || 'Metro must export withBundleDrop(...) so generated trust data is bundled.',
     },
+    checkRuntimeDeliveryBootstrap(projectRoot),
     checkBarePackageMetadata(projectRoot),
   ];
   for (const platform of platforms) {

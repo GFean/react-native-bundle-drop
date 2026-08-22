@@ -264,6 +264,10 @@ ${chalk.gray('CI/CD docs →')} ${chalk.underline.gray(DOCS_CI_CD_URL)}
     .option('--token <token>', 'Personal Access Token (alternative to `bundle-drop login`)')
     .option('--project-type <type>', 'Force project type: expo or bare')
     .option('--dry-run', 'Preview setup and AI context without changing files')
+    .option(
+      '--migrate-code-push',
+      'Explicitly remove react-native-code-push after reviewing its native migration',
+    )
     .option('--migrate-expo-updates', 'Explicitly remove active expo-updates configuration and dependency')
     .option('--prebuild', 'Run a layered Expo prebuild for committed native directories')
     .option('--yes', 'Approve ordinary setup changes noninteractively')
@@ -272,6 +276,7 @@ ${chalk.gray('CI/CD docs →')} ${chalk.underline.gray(DOCS_CI_CD_URL)}
       token?: string;
       projectType?: ProjectType;
       dryRun?: boolean;
+      migrateCodePush?: boolean;
       migrateExpoUpdates?: boolean;
       prebuild?: boolean;
       yes?: boolean;
@@ -306,6 +311,9 @@ ${chalk.gray('CI/CD docs →')} ${chalk.underline.gray(DOCS_CI_CD_URL)}
           options: {
             ...options,
             projectType,
+            ...(configResult?.bootstrapContent
+              ? { runtimeDeliveryBootstrap: { content: configResult.bootstrapContent } }
+              : {}),
             ...(
               !hadConfig && configResult
                 ? {
@@ -381,6 +389,9 @@ ${chalk.gray('CI/CD docs →')} ${chalk.underline.gray(DOCS_CI_CD_URL)}
         options: {
           ...options,
           projectType,
+          ...(configResult?.bootstrapContent
+            ? { runtimeDeliveryBootstrap: { content: configResult.bootstrapContent } }
+            : {}),
           ...(
             !hadConfig && configResult
               ? {
@@ -398,6 +409,50 @@ ${chalk.gray('CI/CD docs →')} ${chalk.underline.gray(DOCS_CI_CD_URL)}
         pendingConfig: configResult || undefined,
         preservePendingConfig: !hadConfig && !options.dryRun,
       });
+    });
+
+  program
+    .command('sync')
+    .option('--token <token>', 'Personal Access Token (alternative to `bundle-drop login`)')
+    .option('--dry-run', 'Validate and preview bootstrap synchronization without writing')
+    .description('Refresh the package-managed runtime delivery bootstrap')
+    .action(async (options: { token?: string; dryRun?: boolean }) => {
+      const initConfigModule = require('../CLI/scripts/init-config');
+      if (!initConfigModule.hasExistingBundleDropConfig()) {
+        throw new Error('bundle-drop sync requires bundle.drop.config.js. Run `bundle-drop init` first.');
+      }
+
+      const authState = options.token ? null : readStoredAuthData();
+      const token = options.token || authState?.data?.token;
+      if (!token) {
+        throw new Error('Not authenticated. Run `bundle-drop login` or pass --token.');
+      }
+      const serverUrl = normalizeServerUrl(
+        authState?.data?.serverUrl || authState?.data?.baseUrl || process.env.BUNDLE_DROP_SERVER_URL,
+      );
+      const result = await initConfigModule.initConfig({
+        serverUrl,
+        projects: [],
+        organizations: [],
+        authToken: token,
+        dryRun: Boolean(options.dryRun),
+      });
+      const deliveryDisabled = result?.bootstrapRetired === true;
+      if (!result?.bootstrapContent && !deliveryDisabled) {
+        throw new Error(
+          'The backend did not return a valid runtime delivery bootstrap for this project. ' +
+            'The existing bootstrap was preserved.',
+        );
+      }
+      if (options.dryRun) {
+        console.log(
+          chalk.gray(
+            deliveryDisabled
+              ? 'Runtime delivery is disabled; the stale bootstrap would be removed. No files changed.'
+              : 'Runtime delivery bootstrap is valid. No files changed.',
+          ),
+        );
+      }
     });
 
   program
@@ -477,6 +532,16 @@ ${chalk.bold('Examples:')}
   return program;
 };
 
+export const runCli = async (argv: string[] = process.argv): Promise<void> => {
+  try {
+    await buildProgram().parseAsync(argv);
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    console.error(chalk.red(`❌ ${message}`));
+    process.exitCode = 1;
+  }
+};
+
 if (require.main === module) {
-  buildProgram().parse();
+  void runCli();
 }

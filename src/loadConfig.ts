@@ -1,6 +1,33 @@
 /**
  * Shape of `bundle.drop.config.js` after it is loaded through Metro.
  */
+export type RuntimeDeliveryConfig = {
+  manifestBaseUrl: string;
+  manifestAccessId: string;
+  publicKeys: Record<string, {
+    kty: 'EC';
+    crv: 'P-256';
+    x: string;
+    y: string;
+  }>;
+};
+
+/** Returns true only for a complete package-managed trust configuration. */
+export function isRuntimeDeliveryConfigured(value: unknown): value is RuntimeDeliveryConfig {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return false;
+  const candidate = value as Partial<RuntimeDeliveryConfig> & { mode?: unknown };
+  if (candidate.mode === 'v1' || candidate.mode === 'shadow') return false;
+  return (
+    typeof candidate.manifestBaseUrl === 'string' &&
+    Boolean(candidate.manifestBaseUrl) &&
+    typeof candidate.manifestAccessId === 'string' &&
+    Boolean(candidate.manifestAccessId) &&
+    Boolean(candidate.publicKeys) &&
+    typeof candidate.publicKeys === 'object' &&
+    !Array.isArray(candidate.publicKeys)
+  );
+}
+
 export type BundleDropProjectConfig = {
   /** Persisted project shape used to keep Expo and bare runtime behavior distinct. */
   projectType?: 'expo' | 'bare';
@@ -50,7 +77,12 @@ export type BundleDropProjectConfig = {
   };
 };
 
-export function loadConfig(): BundleDropProjectConfig {
+/** Internal Metro-resolved config. Generated trust data is deliberately absent from the public type. */
+export type ResolvedBundleDropProjectConfig = BundleDropProjectConfig & {
+  runtimeDelivery?: RuntimeDeliveryConfig;
+};
+
+export function loadConfig(): ResolvedBundleDropProjectConfig {
   try {
     // ✅ Resolved via Metro alias in the host app (extraNodeModules)
     // eslint-disable-next-line @typescript-eslint/no-var-requires

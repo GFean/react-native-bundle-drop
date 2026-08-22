@@ -14,7 +14,34 @@ export type OtaResolveRequest = {
     manifestVersion: 1;
     patchAlgorithms: string[];
     supportsContentAddressedAssets: boolean;
+    /** Present only when this runtime sends the dedicated active-install heartbeat. */
+    activeInstallHeartbeatVersion?: 1;
   };
+};
+
+export type OtaArtifactAuthorizationRequest = {
+  channelName: string;
+  platform: string;
+  runtimeVersion: string;
+  generation: number;
+  targetReleaseRef: string;
+  targetHash: string;
+  mode: 'full' | 'patch';
+  patchArtifactRef: string | null;
+  currentHash: string | null;
+  rejectedHashes: string[];
+  installId: string;
+  transport: OtaResolveRequest['transport'];
+};
+
+export type OtaActiveInstallHeartbeat = {
+  channelName: string;
+  platform: string;
+  runtimeVersion: string;
+  installId: string;
+  currentHash: string | null;
+  environment?: string;
+  userProperties?: UserProperties;
 };
 
 export type OtaInstallTarget = {
@@ -117,6 +144,20 @@ export type UpdateCheckResponse = {
   requestedRuntimeVersion?: string;
   /** Latest runtime version available on the channel when the current runtime is incompatible. */
   latestRuntimeVersionOnChannel?: string;
+  /** Internal runtime-delivery authorization context. */
+  runtimeDelivery?: {
+    generation: number;
+    targetReleaseRef: string;
+    selectedMode: 'full' | 'patch';
+    baseHash?: string;
+    patchAlgorithm?: string;
+    patchSetHash?: string;
+    patchArtifactRef?: string;
+    missingAssetsHash?: string | null;
+    manifestHash?: string;
+    jsBundleHash?: string;
+    fullBundleHash?: string;
+  };
 };
 
 export type ReportPatchApplyFailurePayload = {

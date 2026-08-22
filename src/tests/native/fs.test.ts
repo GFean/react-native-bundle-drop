@@ -31,6 +31,8 @@ describe('native/fs', () => {
     await module.moveFile('/tmp/a', '/tmp/b');
     await module.copyFile('/tmp/c', '/tmp/d');
     await expect(module.sha256File('/tmp/file')).resolves.toBe('hash');
+    await expect(module.sha256String('install-id')).resolves.toBe('0'.repeat(64));
+    await expect(module.verifyEs256Signature('input', 'signature', 'x', 'y')).resolves.toBe(true);
     await expect(module.fileSize('/tmp/file')).resolves.toBe(0);
     await module.applyXdelta('/tmp/base', '/tmp/patch', '/tmp/out');
     await expect(module.verifyBundleFiles('/tmp/bundle', '/tmp/bundle/bundle-manifest.json')).resolves.toEqual({ verified: true });
@@ -46,6 +48,10 @@ describe('native/fs', () => {
     expect(reactNative.NativeModules.BundleDrop.fsMoveFile).toHaveBeenCalledWith('/tmp/a', '/tmp/b');
     expect(reactNative.NativeModules.BundleDrop.fsCopyFile).toHaveBeenCalledWith('/tmp/c', '/tmp/d');
     expect(reactNative.NativeModules.BundleDrop.fsSha256File).toHaveBeenCalledWith('/tmp/file');
+    expect(reactNative.NativeModules.BundleDrop.fsSha256String).toHaveBeenCalledWith('install-id');
+    expect(reactNative.NativeModules.BundleDrop.fsVerifyEs256Signature).toHaveBeenCalledWith(
+      'input', 'signature', 'x', 'y',
+    );
     expect(reactNative.NativeModules.BundleDrop.fsFileSize).toHaveBeenCalledWith('/tmp/file');
     expect(reactNative.NativeModules.BundleDrop.fsApplyXdelta).toHaveBeenCalledWith('/tmp/base', '/tmp/patch', '/tmp/out');
     expect(reactNative.NativeModules.BundleDrop.fsVerifyBundleFiles).toHaveBeenCalledWith(
@@ -62,6 +68,19 @@ describe('native/fs', () => {
     expect(reactNative.NativeModules.BundleDrop.fsDownloadFile).toHaveBeenCalledWith(
       'https://example.com/file.zip',
       '/tmp/file.zip',
+    );
+    reactNative.NativeModules.BundleDrop.fsDownloadFileBounded.mockResolvedValue(undefined);
+    await expect(module.downloadFileBounded(
+      'https://example.com/manifest',
+      '/tmp/manifest',
+      1024 * 1024,
+      5000,
+    )).resolves.toBeUndefined();
+    expect(reactNative.NativeModules.BundleDrop.fsDownloadFileBounded).toHaveBeenCalledWith(
+      'https://example.com/manifest',
+      '/tmp/manifest',
+      1024 * 1024,
+      5000,
     );
 
     reactNative.NativeModules.BundleDrop.fsReadDir.mockResolvedValue(['a.txt', 'b']);
@@ -109,6 +128,31 @@ describe('native/fs', () => {
     expect(reactNative.NativeModules.BundleDrop.fsVerifyBundleFiles).toBeUndefined();
   });
 
+  it('throws clear outdated-native errors when v2 crypto methods are unavailable', async () => {
+    const { reactNative, module } = loadNativeFsModule(({ NativeModules }) => {
+      delete (NativeModules.BundleDrop as any).fsSha256String;
+      delete (NativeModules.BundleDrop as any).fsVerifyEs256Signature;
+    });
+    await expect(module.sha256String('install-id')).rejects.toThrow('native module is outdated');
+    await expect(module.verifyEs256Signature('input', 'signature', 'x', 'y'))
+      .rejects.toThrow('native module is outdated');
+    expect(reactNative.NativeModules.BundleDrop.fsSha256String).toBeUndefined();
+    expect(reactNative.NativeModules.BundleDrop.fsVerifyEs256Signature).toBeUndefined();
+  });
+
+  it('throws a clear outdated-native error when bounded downloads are unavailable', async () => {
+    const { module } = loadNativeFsModule(({ NativeModules }) => {
+      delete (NativeModules.BundleDrop as any).fsDownloadFileBounded;
+    });
+
+    await expect(module.downloadFileBounded(
+      'https://example.com/manifest',
+      '/tmp/manifest',
+      1024 * 1024,
+      5000,
+    )).rejects.toThrow('bounded manifest downloads');
+  });
+
   it('throws a clear error when the native module is not linked', async () => {
     const { module } = loadNativeFsModule(({ NativeModules }) => {
       NativeModules.BundleDrop = undefined as any;
@@ -123,11 +167,15 @@ describe('native/fs', () => {
     await expect(module.moveFile('/a', '/b')).rejects.toThrow('native module is not linked');
     await expect(module.copyFile('/a', '/b')).rejects.toThrow('native module is not linked');
     await expect(module.sha256File('/a')).rejects.toThrow('native module is not linked');
+    await expect(module.sha256String('a')).rejects.toThrow('native module is not linked');
+    await expect(module.verifyEs256Signature('a', 'b', 'c', 'd')).rejects.toThrow('native module is not linked');
     await expect(module.fileSize('/a')).rejects.toThrow('native module is not linked');
     await expect(module.applyXdelta('/a', '/b', '/c')).rejects.toThrow('native module is not linked');
     await expect(module.verifyBundleFiles('/a', '/a/bundle-manifest.json')).rejects.toThrow('native module is not linked');
     await expect(module.supportsXdelta()).rejects.toThrow('native module is not linked');
     await expect(module.unzip('/a.zip', '/b')).rejects.toThrow('native module is not linked');
     await expect(module.downloadFile('https://x.com/f', '/b')).rejects.toThrow('native module is not linked');
+    await expect(module.downloadFileBounded('https://x.com/f', '/b', 10, 10))
+      .rejects.toThrow('native module is not linked');
   });
 });

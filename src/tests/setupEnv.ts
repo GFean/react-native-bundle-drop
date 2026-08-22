@@ -23,6 +23,12 @@ type BundleDropConfigModule = {
     healthCheckMode?: 'auto' | 'manual';
     healthyAfterSec?: number;
   };
+  runtimeDelivery?: {
+    mode: 'v1' | 'shadow' | 'v2';
+    manifestBaseUrl: string;
+    manifestAccessId: string;
+    publicKeys: Record<string, { kty: 'EC'; crv: 'P-256'; x: string; y: string }>;
+  };
 };
 
 const bundleDropConfig = require('bundle-drop-config') as BundleDropConfigModule;
@@ -72,12 +78,15 @@ const resetReactNativeModule = () => {
   NativeModules.BundleDrop.fsMoveFile.mockReset().mockResolvedValue(undefined);
   NativeModules.BundleDrop.fsCopyFile.mockReset().mockResolvedValue(undefined);
   NativeModules.BundleDrop.fsSha256File.mockReset().mockResolvedValue('hash');
+  NativeModules.BundleDrop.fsSha256String.mockReset().mockResolvedValue('0'.repeat(64));
+  NativeModules.BundleDrop.fsVerifyEs256Signature.mockReset().mockResolvedValue(true);
   NativeModules.BundleDrop.fsFileSize.mockReset().mockResolvedValue(0);
   NativeModules.BundleDrop.fsApplyXdelta.mockReset().mockResolvedValue(undefined);
   NativeModules.BundleDrop.fsVerifyBundleFiles.mockReset().mockResolvedValue({ verified: true });
   NativeModules.BundleDrop.fsSupportsXdelta.mockReset().mockResolvedValue(true);
   NativeModules.BundleDrop.fsUnzip.mockReset().mockResolvedValue([]);
   NativeModules.BundleDrop.fsDownloadFile.mockReset().mockResolvedValue(undefined);
+  NativeModules.BundleDrop.fsDownloadFileBounded.mockReset().mockResolvedValue(undefined);
   NativeModules.BundleDrop.getDownloadedBundlePath.mockReset().mockResolvedValue(null);
   NativeModules.BundleDrop.getImageManifestSync.mockReset().mockReturnValue(null);
   NativeModules.BundleDrop.getImageManifest.mockReset().mockResolvedValue(null);

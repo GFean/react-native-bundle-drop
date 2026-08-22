@@ -96,7 +96,8 @@ npx bundle-drop login
 npx bundle-drop doctor
 ```
 
-`login` signs you in, creates `bundle.drop.config.js` when needed, detects Expo or
+`login` signs you in, creates `bundle.drop.config.js` when needed, pins the
+authenticated runtime-delivery bootstrap under `.bundle-drop/`, detects Expo or
 bare React Native, previews the integration changes, and completes setup. `doctor`
 then validates configuration, runtime identity, native integration, and startup
 ownership.
@@ -112,6 +113,86 @@ npx bundle-drop init --project-type bare
 
 Run `npx bundle-drop doctor` again after changing native integration, Metro, Expo
 configuration, or runtime versions.
+
+When Bundle Drop rotates manifest verification keys or changes the public manifest
+route, refresh the pinned client-visible bootstrap explicitly:
+
+```bash
+npx bundle-drop sync
+npx bundle-drop doctor
+```
+
+Apps upgrading from an inline `runtimeDelivery` block or a direct Metro alias should
+remove that stale block and run `npx bundle-drop init` once to install the
+package-managed Metro wrapper. Inline delivery data is ignored: the validated
+generated bootstrap is the sole trust source. After that one-time migration, `sync`
+is the narrow command for refreshing trust data.
+
+The generated bootstrap is not a secret and should be committed. Setup keeps the
+generated Metro wrapper, build receipts, and other transient `.bundle-drop` files
+ignored while allowing `.bundle-drop/runtime-delivery.generated.json` into source
+control.
+
+### Manual setup without AI planning
+
+You can configure Bundle Drop without sending project files to the AI setup planner.
+Create `bundle.drop.config.js` with the project identity and public project API key
+shown in the developer dashboard:
+
+```js
+module.exports = {
+  serverUrl: 'https://api.bundledrop.app',
+  defaultChannel: 'develop',
+  runtimeVersion: { ios: '1.0.0', android: '1.0.0' },
+  org: { slug: 'your-org' },
+  project: {
+    name: 'Your App',
+    slug: 'your-app',
+    apiKey: 'your-public-project-key',
+  },
+};
+```
+
+Wrap the final exported Metro config. For bare React Native:
+
+```js
+const { getDefaultConfig, mergeConfig } = require('@react-native/metro-config');
+const { withBundleDrop } = require('@gfean/react-native-bundle-drop/metro');
+
+const config = mergeConfig(getDefaultConfig(__dirname), {});
+module.exports = withBundleDrop(config, { projectRoot: __dirname });
+```
+
+For Expo:
+
+```js
+const { getDefaultConfig } = require('expo/metro-config');
+const { withBundleDropExpo } = require('@gfean/react-native-bundle-drop/metro');
+
+module.exports = withBundleDropExpo(getDefaultConfig(__dirname), {
+  projectRoot: __dirname,
+});
+```
+
+Expo projects must also add `@gfean/react-native-bundle-drop` to the app config's
+`plugins` array. Bare projects must connect Bundle Drop to the Release bundle URL in
+their Android and iOS entrypoints. Follow the
+[manual native setup guide](https://bundledrop.app/docs/manual-setup) because the
+entrypoint shape varies across React Native versions.
+
+Finish every manual setup by authenticating, generating the public trust bootstrap,
+and validating the complete integration:
+
+```bash
+npx bundle-drop login
+npx bundle-drop sync
+npx bundle-drop doctor
+```
+
+`sync` creates `.bundle-drop/runtime-delivery.generated.json`, recreates it if it or
+the entire `.bundle-drop` directory was deleted, and repairs the corresponding
+`.gitignore` rules. The bootstrap contains public identity and verification material,
+not secrets, so commit it with the application.
 
 ## Initialize the Runtime
 
@@ -238,6 +319,85 @@ literal and build a new binary before uploading updates for that runtime. For
 example, an iOS-only native change should bump `runtimeVersion.ios`; Android can keep
 its existing value. This makes the compatibility boundary explicit and prevents an
 update from reaching a binary that cannot run it.
+
+## Managed Runtime Delivery
+
+Runtime delivery is package-managed. `bundle.drop.config.js` stays focused on
+application-owned values such as project identity, channel, runtime versions, and
+rollback policy; it does not contain manifest hosts, access routes, public keys, or
+a delivery-mode switch.
+
+`bundle-drop login` and `bundle-drop init` synchronize the trust bootstrap during
+setup. `bundle-drop sync` performs the same narrow operation later for repair or key
+rotation. Each command validates authenticated project credentials and writes the
+identity-bound `.bundle-drop/runtime-delivery.generated.json`. Metro confirms that
+the bootstrap belongs to the same server, organization, and project before merging
+it into the runtime module. Malformed, copied, unsupported, or private-key-bearing
+data is rejected.
+
+Older apps with an inline `runtimeDelivery` block keep their ordinary project
+configuration, but the inline block is ignored and should be removed during
+migration. Only the identity-bound generated bootstrap can enable managed delivery.
+If the server explicitly disables delivery for a project, synchronization removes a
+stale bootstrap and the SDK continues through the compatible `/ota/resolve` path.
+
+The SDK resolves a complete public lane locally. Invalid, expired, incomplete,
+dynamic, unavailable, or network-failed manifests safely fall back to `/ota/resolve`.
+Artifact download authorization remains API-key authenticated and uses opaque
+release and artifact references rather than URLs embedded in the manifest.
+
+Lane manifests are signed state and are not themselves the revocation clock. Every
+local check also fetches a small environment-wide signed publisher lease. The SDK
+verifies its key, exact manifest origin, issue time, and short absolute expiry before
+it verifies or persists lane generation state. A missing, invalid, expired, or
+operator-disabled lease therefore falls back to `/ota/resolve`, even when cached
+manifest bytes remain cryptographically valid.
+
+Artifact download capabilities are intentionally short-lived. If an artifact URL is
+rejected with HTTP 401 or 403 during download, the SDK reauthorizes the original
+signed selection once and retries only when its generation, target, transport,
+artifact references, and signed hashes are unchanged. Verification, reconstruction,
+and installation failures are never retried this way.
+
+With managed delivery, install through `downloadUpdate`, or use the React hook's
+`fetchBundles` and `installBundle(bundle)` list-item flow. Direct named
+`installBundle(hash, url, ...)` calls are rejected because they bypass the fresh
+resolve and artifact-authorization decision.
+
+Unchanged install state is reported at most once every seven days. A current bundle
+hash, app environment, or user-property change is reported immediately; successful
+installs continue to use the separate idempotent installed receipt.
+
+The manifest URL is derived from `manifestBaseUrl`, `manifestAccessId`, channel,
+platform, and runtime version. `manifestAccessId` is an opaque URL-routing value,
+not a signing secret. `publicKeys` contains public P-256 JWK coordinates keyed by
+the manifest JWS `kid`, which permits signing-key rotation.
+
+Pass `onRuntimeDeliveryDiagnostic` to `BundleDrop.init` to export the fast-path
+signals to your metrics system. Events contain a bounded counter name, cumulative
+process count, timestamp, and optional channel/reason/status metadata; they never
+contain access IDs, install IDs, JWS bodies, user properties, or artifact URLs.
+`getRuntimeDeliveryDiagnosticCounters()` returns a process-local snapshot. The
+counter names are `manifest_hit`, `dynamic_manifest`, `origin_fallback`,
+`invalid_signature`, `unknown_key`, `lane_mismatch`,
+`generation_regression`, `generation_equivocation`,
+`manifest_http_error`, `manifest_network_error`, `manifest_timeout`,
+`manifest_too_large`, `manifest_invalid`, `manifest_stream_unavailable`,
+`authority_lease_http_error`, `authority_lease_network_error`,
+`authority_lease_timeout`, `authority_lease_too_large`,
+`authority_lease_invalid`, `authority_lease_invalid_signature`,
+`authority_lease_unknown_key`, `authority_lease_expired`,
+`authority_lease_origin_mismatch`, and `authority_lease_disabled`.
+
+Manifest responses are read incrementally and cancelled as soon as they exceed
+1 MiB. A runtime without a readable response stream fails closed to `/ota/resolve`
+instead of buffering an unbounded body.
+
+Managed runtime delivery uses native SHA-256 and ES256 verification. After upgrading to
+an SDK release whose `nativeVersion` includes this support (`0.5.0` or newer), run
+Pods/prebuild as appropriate and ship a new native binary before enabling runtime
+delivery for the project. Bundle Drop's native-version validation will reject a JavaScript/native
+adapter mismatch.
 
 ## Upload an Update
 
@@ -381,6 +541,7 @@ Import the runtime API from `@gfean/react-native-bundle-drop`.
 | `policy` | `'manual' \| 'immediate' \| 'on-next-launch'` | `'manual'` | Startup behavior after hydration. |
 | `checkOnly` | `boolean` | `false` | Startup resolves updates without downloading or applying them. |
 | `onStatusUpdate` | `(status: string) => void` | — | Listener for human-readable status messages. |
+| `onRuntimeDeliveryDiagnostic` | `(event: RuntimeDeliveryDiagnosticEvent) => void` | — | Listener for bounded runtime-delivery counter events suitable for metrics export. |
 
 **Update actions** — `checkForUpdate`, `downloadUpdate`, `installBundle`,
 `applyUpdate`, `getUpdateState`, `getInstalledBundleInfo`, `getAvailableBundles`,
@@ -395,10 +556,13 @@ plus update actions.
 
 **Errors** — `BundleDropError`, `isBundleDropError`.
 
-**Metro** — import `withBundleDropExpo` from
-`@gfean/react-native-bundle-drop/metro` when configuring Expo Metro manually.
+**Runtime delivery diagnostics** — `getRuntimeDeliveryDiagnosticCounters` returns
+the current process-local counter snapshot.
 
-**CLI** (`npx bundle-drop <command>`) — `login`, `logout`, `whoami`, `init`,
+**Metro** — import `withBundleDropExpo` for Expo or `withBundleDrop` for bare React
+Native from `@gfean/react-native-bundle-drop/metro` when configuring Metro manually.
+
+**CLI** (`npx bundle-drop <command>`) — `login`, `logout`, `whoami`, `init`, `sync`,
 `doctor`, `eas-receipt <ios|android>`, and `upload <ios|android>`.
 
 ## Good to Know

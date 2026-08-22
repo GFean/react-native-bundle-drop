@@ -3,7 +3,10 @@ import * as bundleInfoModule from '../../bundleInfo';
 import { downloadUpdate, installBundle } from '../../manager/downloadAndInstall';
 import { resetContextMocks } from '../mocks/context';
 import { mockInstallFromPatchSet, mockInstallFromZip } from '../mocks/install/installFromZip';
-import { mockCheckForUpdate } from '../mocks/manager/updateCheck';
+import {
+  mockAuthorizeRuntimeDeliveryUpdate,
+  mockCheckForUpdate,
+} from '../mocks/manager/updateCheck';
 import { getMockFile, readMockJson, resetNativeFsMocks, setMockFile } from '../mocks/native/fs';
 import { mockReportPatchApplyFailure } from '../mocks/api/clientApi';
 import { mockGetDownloadedBundlePathNative, resetBundleDropNativeMocks } from '../mocks/native/bundleDropNative';
@@ -178,6 +181,217 @@ describe('manager/downloadAndInstall', () => {
         candidateCommitted: false,
       })
     );
+  });
+
+  it('forwards signed v2 archive, manifest, and JavaScript hashes into installation', async () => {
+    const hash = '3'.repeat(64);
+    mockCheckForUpdate.mockResolvedValue({
+      action: 'INSTALL',
+      channelName: 'General',
+      hash,
+      runtimeVersion: '1.0.0',
+      mode: 'full',
+      runtimeDelivery: {
+        generation: 7,
+        targetReleaseRef: 'release-7',
+        selectedMode: 'full',
+        manifestHash: 'a'.repeat(64),
+        jsBundleHash: 'b'.repeat(64),
+        fullBundleHash: 'c'.repeat(64),
+      },
+    });
+    mockAuthorizeRuntimeDeliveryUpdate.mockResolvedValue({
+      action: 'INSTALL',
+      channelName: 'General',
+      hash,
+      runtimeVersion: '1.0.0',
+      mode: 'full',
+      downloadUrl: 'https://cdn.example.com/v2-full.zip',
+      manifestUrl: 'https://cdn.example.com/v2-manifest.json',
+      runtimeDelivery: {
+        generation: 7,
+        targetReleaseRef: 'release-7',
+        selectedMode: 'full',
+        manifestHash: 'a'.repeat(64),
+        jsBundleHash: 'b'.repeat(64),
+        fullBundleHash: 'c'.repeat(64),
+      },
+    });
+    mockInstallFromZip.mockResolvedValue({
+      bundlePath: `/mock/doc/bundle-drop/bundles/${hash}/main.jsbundle`,
+      metadataFromZip: { runtimeVersion: '1.0.0' },
+    });
+
+    await expect(downloadUpdate()).resolves.toEqual(expect.objectContaining({ status: 'staged', hash }));
+    expect(mockInstallFromZip).toHaveBeenCalledWith(expect.objectContaining({
+      expectedArchiveHash: 'c'.repeat(64),
+      expectedManifestHash: 'a'.repeat(64),
+      expectedJsBundleHash: 'b'.repeat(64),
+    }));
+  });
+
+  it('refreshes a rejected v2 artifact capability exactly once and retries the same target', async () => {
+    const hash = '4'.repeat(64);
+    const selection = {
+      action: 'INSTALL' as const,
+      channelName: 'General',
+      hash,
+      runtimeVersion: '1.0.0',
+      mode: 'full' as const,
+      runtimeDelivery: {
+        generation: 8,
+        targetReleaseRef: 'release-8',
+        selectedMode: 'full' as const,
+        manifestHash: 'a'.repeat(64),
+        jsBundleHash: 'b'.repeat(64),
+        fullBundleHash: 'c'.repeat(64),
+      },
+    };
+    mockCheckForUpdate.mockResolvedValue(selection);
+    mockAuthorizeRuntimeDeliveryUpdate
+      .mockResolvedValueOnce({ ...selection, downloadUrl: 'https://cdn.example.com/expired.zip' })
+      .mockResolvedValueOnce({ ...selection, downloadUrl: 'https://cdn.example.com/refreshed.zip' });
+    mockInstallFromZip
+      .mockRejectedValueOnce(new InstallPhaseError('download', new Error('HTTP 403: expired')))
+      .mockResolvedValueOnce({
+        bundlePath: `/mock/doc/bundle-drop/bundles/${hash}/main.jsbundle`,
+        metadataFromZip: { runtimeVersion: '1.0.0' },
+      });
+    const statusSpy = jest.fn();
+
+    await expect(downloadUpdate(undefined, statusSpy)).resolves.toMatchObject({
+      status: 'staged', hash,
+    });
+    expect(mockAuthorizeRuntimeDeliveryUpdate).toHaveBeenCalledTimes(2);
+    expect(mockInstallFromZip).toHaveBeenNthCalledWith(1, expect.objectContaining({
+      downloadUrl: 'https://cdn.example.com/expired.zip',
+    }));
+    expect(mockInstallFromZip).toHaveBeenNthCalledWith(2, expect.objectContaining({
+      downloadUrl: 'https://cdn.example.com/refreshed.zip',
+    }));
+    expect(statusSpy).toHaveBeenCalledWith(
+      '🔐 Download authorization expired; refreshing once...',
+    );
+  });
+
+  it('does not retry when reauthorization changes the signed target identity', async () => {
+    const hash = '5'.repeat(64);
+    const selection = {
+      action: 'INSTALL' as const,
+      channelName: 'General',
+      hash,
+      runtimeVersion: '1.0.0',
+      mode: 'full' as const,
+      runtimeDelivery: {
+        generation: 9,
+        targetReleaseRef: 'release-9',
+        selectedMode: 'full' as const,
+      },
+    };
+    mockCheckForUpdate.mockResolvedValue(selection);
+    mockAuthorizeRuntimeDeliveryUpdate
+      .mockResolvedValueOnce({ ...selection, downloadUrl: 'https://cdn.example.com/expired.zip' })
+      .mockResolvedValueOnce({
+        ...selection,
+        hash: '6'.repeat(64),
+        downloadUrl: 'https://cdn.example.com/different.zip',
+      });
+    mockInstallFromZip.mockRejectedValueOnce(
+      new InstallPhaseError('download', { statusCode: 401 }),
+    );
+    const consoleSpy = jest.spyOn(console, 'error').mockImplementation(() => undefined);
+    try {
+      await expect(downloadUpdate()).rejects.toMatchObject({
+        code: 'DOWNLOAD_FAILED', step: 'download',
+      });
+      expect(mockInstallFromZip).toHaveBeenCalledTimes(1);
+      expect(mockAuthorizeRuntimeDeliveryUpdate).toHaveBeenCalledTimes(2);
+    } finally {
+      consoleSpy.mockRestore();
+    }
+  });
+
+  it('refreshes a full fallback without retrying a patch that already failed locally', async () => {
+    const baseHash = '7'.repeat(64);
+    const hash = '8'.repeat(64);
+    const selection = {
+      action: 'INSTALL' as const,
+      channelName: 'General',
+      hash,
+      runtimeVersion: '1.0.0',
+      mode: 'patch' as const,
+      baseHash,
+      patchSet: {
+        algorithm: 'xdelta3-vcdiff' as const,
+        patchSetHash: 'patch-set-hash',
+        patchesUrl: 'https://cdn.example.com/patch.zip',
+      },
+      fallback: {
+        mode: 'full' as const,
+        downloadUrl: 'https://cdn.example.com/expired-full.zip',
+      },
+      runtimeDelivery: {
+        generation: 10,
+        targetReleaseRef: 'release-10',
+        selectedMode: 'patch' as const,
+        baseHash,
+        patchAlgorithm: 'xdelta3-vcdiff',
+        patchSetHash: 'patch-set-hash',
+        patchArtifactRef: 'patch-ref',
+        missingAssetsHash: undefined,
+      },
+    };
+    setMockFile(CURRENT_POINTER_PATH, JSON.stringify({
+      hash: baseHash,
+      bundlePath: `/mock/doc/bundle-drop/bundles/${baseHash}/main.jsbundle`,
+    }));
+    mockCheckForUpdate.mockResolvedValue(selection);
+    mockAuthorizeRuntimeDeliveryUpdate
+      .mockResolvedValueOnce(selection)
+      .mockResolvedValueOnce({
+        ...selection,
+        fallback: {
+          mode: 'full',
+          downloadUrl: 'https://cdn.example.com/refreshed-full.zip',
+        },
+      });
+    mockInstallFromPatchSet.mockRejectedValueOnce(new Error('local patch apply failed'));
+    mockInstallFromZip
+      .mockRejectedValueOnce(new InstallPhaseError('download', { status: 403 }))
+      .mockResolvedValueOnce({
+        bundlePath: `/mock/doc/bundle-drop/bundles/${hash}/main.jsbundle`,
+        metadataFromZip: { runtimeVersion: '1.0.0' },
+      });
+    const warnSpy = jest.spyOn(console, 'warn').mockImplementation(() => undefined);
+    try {
+      await expect(downloadUpdate()).resolves.toMatchObject({ status: 'staged', hash });
+      expect(mockInstallFromPatchSet).toHaveBeenCalledTimes(1);
+      expect(mockInstallFromZip).toHaveBeenCalledTimes(2);
+      expect(mockInstallFromZip).toHaveBeenLastCalledWith(expect.objectContaining({
+        downloadUrl: 'https://cdn.example.com/refreshed-full.zip',
+      }));
+      expect(mockAuthorizeRuntimeDeliveryUpdate).toHaveBeenCalledTimes(2);
+    } finally {
+      warnSpy.mockRestore();
+    }
+  });
+
+  it('does not reauthorize v1 downloads or non-capability failures', async () => {
+    mockCheckForUpdate.mockResolvedValue({
+      action: 'INSTALL', channelName: 'General', hash: 'hash-v1',
+      downloadUrl: 'https://cdn.example.com/v1.zip', mode: 'full',
+    });
+    mockInstallFromZip.mockRejectedValueOnce(
+      new InstallPhaseError('download', new Error('HTTP 403: denied')),
+    );
+    const consoleSpy = jest.spyOn(console, 'error').mockImplementation(() => undefined);
+    try {
+      await expect(downloadUpdate()).rejects.toMatchObject({ code: 'DOWNLOAD_FAILED' });
+      expect(mockAuthorizeRuntimeDeliveryUpdate).toHaveBeenCalledTimes(1);
+      expect(mockInstallFromZip).toHaveBeenCalledTimes(1);
+    } finally {
+      consoleSpy.mockRestore();
+    }
   });
 
   it('clears the candidate pointer before throwing when native rejects without a previous pointer', async () => {

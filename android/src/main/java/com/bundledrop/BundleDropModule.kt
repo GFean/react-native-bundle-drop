@@ -4,6 +4,7 @@ import android.content.Context
 import android.content.Intent
 import android.util.Log
 import com.facebook.react.bridge.*
+import com.facebook.react.modules.network.OkHttpClientProvider
 import java.io.File
 
 class BundleDropModule(reactContext: ReactApplicationContext) :
@@ -194,6 +195,37 @@ class BundleDropModule(reactContext: ReactApplicationContext) :
   }
 
   @ReactMethod
+  fun fsSha256String(value: String, promise: Promise) {
+    try {
+      promise.resolve(BundleDropRuntimeCrypto.sha256String(value))
+    } catch (e: Exception) {
+      promise.reject("ERR_SHA256", e.message, e)
+    }
+  }
+
+  @ReactMethod
+  fun fsVerifyEs256Signature(
+    signingInput: String,
+    signatureBase64Url: String,
+    xBase64Url: String,
+    yBase64Url: String,
+    promise: Promise,
+  ) {
+    try {
+      promise.resolve(
+        BundleDropRuntimeCrypto.verifyEs256Signature(
+          signingInput,
+          signatureBase64Url,
+          xBase64Url,
+          yBase64Url,
+        ),
+      )
+    } catch (e: Exception) {
+      promise.reject("ERR_ES256_VERIFY", e.message, e)
+    }
+  }
+
+  @ReactMethod
   fun fsFileSize(path: String, promise: Promise) {
     try {
       promise.resolve(BundleDropFileOps.fileSize(File(path)).toDouble())
@@ -257,6 +289,43 @@ class BundleDropModule(reactContext: ReactApplicationContext) :
       } catch (e: Exception) {
         try { File(destPath).delete() } catch (_: Exception) {}
         promise.reject("ERR_DOWNLOAD", e.message, e)
+      }
+    }.start()
+  }
+
+  @ReactMethod
+  fun fsDownloadFileBounded(
+    url: String,
+    destPath: String,
+    maxBytes: Double,
+    timeoutMs: Double,
+    promise: Promise,
+  ) {
+    Thread {
+      try {
+        require(maxBytes.isFinite() && maxBytes >= 1) { "maxBytes must be positive" }
+        require(timeoutMs.isFinite() && timeoutMs >= 1 && timeoutMs <= Int.MAX_VALUE) {
+          "timeoutMs is outside the supported range"
+        }
+        val parsedUrl = BundleDropFileOps.validateHttpUrl(url)
+        BundleDropBoundedDownloader.downloadToFile(
+          OkHttpClientProvider.getOkHttpClient(),
+          parsedUrl,
+          File(destPath),
+          maxBytes = maxBytes.toLong(),
+          timeoutMs = timeoutMs.toLong(),
+        )
+        promise.resolve(null)
+      } catch (e: Exception) {
+        try { File(destPath).delete() } catch (_: Exception) {}
+        val code = when {
+          e is BundleDropBoundedDownloadTimeoutException -> "ERR_DOWNLOAD_TIMEOUT"
+          e is BundleDropBoundedDownloadTooLargeException -> "ERR_DOWNLOAD_TOO_LARGE"
+          e is BundleDropBoundedDownloadHttpException -> "ERR_DOWNLOAD_HTTP"
+          else -> "ERR_DOWNLOAD_NETWORK"
+        }
+        val message = e.message.orEmpty()
+        promise.reject(code, message.ifEmpty { "Manifest download failed" }, e)
       }
     }.start()
   }
