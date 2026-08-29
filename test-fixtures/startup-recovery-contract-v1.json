@@ -1,0 +1,32 @@
+{
+  "protocolVersion": 1,
+  "revision": 7,
+  "phase": "launching",
+  "candidateHash": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+  "stableHash": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+  "activeAttempt": {
+    "hash": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "attemptId": "attempt-contract-v1",
+    "status": "launching",
+    "unacknowledgedLaunchCount": 2
+  },
+  "quarantinedHashes": [
+    "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+  ],
+  "policy": {
+    "maxCrashCount": 3,
+    "healthCheckMode": "manual",
+    "healthyAfterSec": 4.5
+  },
+  "pendingRecoveryEvents": [
+    {
+      "id": "event-contract-v1",
+      "failedHash": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "recoveryTarget": "previous",
+      "recoveredHash": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+      "crashCount": 3,
+      "reason": "crash_loop",
+      "failedAt": 1700000000
+    }
+  ]
+}

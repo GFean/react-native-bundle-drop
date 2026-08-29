@@ -52,6 +52,28 @@ final class BundleDropLocatorTests: XCTestCase {
     )
   }
 
+  func testBundleURLRunsStartupSelectionWhenCompatibilityResolverReturnsNil() throws {
+    let docs = try makeDirectory("docs")
+    let root = try makeDirectory("library/bundle-drop")
+    let selected = tempRoot.appendingPathComponent("selected-by-recovery.jsbundle")
+    var selectionCalls = 0
+
+    let bundleURL = BundleDropLocatorCore.bundleURL(
+      bundleDropRoot: root,
+      documentsDirectory: docs,
+      currentBinaryVersion: "1.0.0-1",
+      userDefaults: userDefaults,
+      shouldLogBinaryUpdate: false,
+      startupSelection: {
+        selectionCalls += 1
+        return selected
+      }
+    )
+
+    XCTAssertEqual(selectionCalls, 1)
+    XCTAssertEqual(bundleURL, selected)
+  }
+
   func testBundleURLReturnsPointerWhenStoredBinaryVersionMatches() throws {
     let docs = try makeDirectory("docs")
     let root = try makeDirectory("library/bundle-drop")
@@ -84,11 +106,13 @@ final class BundleDropLocatorTests: XCTestCase {
     let current = root.appendingPathComponent("current.json")
     let previous = root.appendingPathComponent("previous.json")
     let state = root.appendingPathComponent("state.json")
+    let recoveryLedger = root.appendingPathComponent("recovery-ledger.json")
     let bundleInfo = docs.appendingPathComponent("bundle-info.json")
 
     try write("{\"hash\":\"\(validHash)\",\"bundlePath\":\"\(bundle.path)\"}", to: current)
     try write("{}", to: previous)
     try write("{}", to: state)
+    try write("{}", to: recoveryLedger)
     try write("{}", to: bundleInfo)
     userDefaults.set("1.0.0-1", forKey: BundleDropLocatorCore.binaryVersionKey)
     var logs: [String] = []
@@ -110,6 +134,7 @@ final class BundleDropLocatorTests: XCTestCase {
     XCTAssertFalse(FileManager.default.fileExists(atPath: current.path))
     XCTAssertFalse(FileManager.default.fileExists(atPath: previous.path))
     XCTAssertFalse(FileManager.default.fileExists(atPath: state.path))
+    XCTAssertFalse(FileManager.default.fileExists(atPath: recoveryLedger.path))
     XCTAssertFalse(FileManager.default.fileExists(atPath: bundleInfo.path))
     XCTAssertTrue(FileManager.default.fileExists(atPath: bundle.path))
     XCTAssertEqual(
@@ -162,6 +187,27 @@ final class BundleDropLocatorTests: XCTestCase {
     )
 
     XCTAssertEqual(BundleDropLocatorCore.getRuntimeVersion(bundle: bundle), "signed-runtime")
+  }
+
+  func testBareEmbeddedBuildIdentityUsesCocoaPodsCompatibleFilename() throws {
+    let bundle = try makeBundleFixture(
+      version: "3.4.5",
+      build: "67",
+      runtimeVersion: "legacy-runtime"
+    )
+    let candidate: [String: Any] = [
+      "schemaVersion": 1,
+      "platform": "ios",
+      "runtimeVersion": "bare-runtime",
+    ]
+    let candidateData = try JSONSerialization.data(withJSONObject: candidate)
+    try candidateData.write(
+      to: bundle.bundleURL.appendingPathComponent(
+        BundleDropLocatorCore.bareEmbeddedBuildIdentityFilename
+      )
+    )
+
+    XCTAssertEqual(BundleDropLocatorCore.getRuntimeVersion(bundle: bundle), "bare-runtime")
   }
 
   func testEmbeddedRuntimeChangeChangesTheBinaryVersionKey() throws {

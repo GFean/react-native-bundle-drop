@@ -12,6 +12,8 @@ import org.junit.runner.RunWith
 import org.robolectric.RobolectricTestRunner
 import org.robolectric.annotation.Config
 import java.io.File
+import org.json.JSONArray
+import org.json.JSONObject
 
 @RunWith(RobolectricTestRunner::class)
 @Config(sdk = [28])
@@ -28,6 +30,13 @@ class BundleDropNativePathsTest {
   @Test
   fun `getDownloadedBundlePath returns null when OTA disabled even if current json points at bundle`() {
     val ctx = ApplicationProvider.getApplicationContext<Context>()
+    val selectedHash = "a".repeat(64)
+    BundleDropStartupRecovery.selectForStartup(ctx) {
+      BundleDropStartupRecoveryController.StartupSelection(
+        File(ctx.filesDir, "bundle-drop/bundles/$selectedHash/main.jsbundle").absolutePath,
+      )
+    }
+    assertEquals(selectedHash, BundleDropStartupRecovery.startupSelectedHash())
     BundleDropOtaPrefs.writeOtaEnabled(ctx, false)
 
     val root = File(ctx.filesDir, "bundle-drop")
@@ -43,6 +52,7 @@ class BundleDropNativePathsTest {
     )
 
     assertNull(BundleDropNativePaths.getDownloadedBundlePath(ctx))
+    assertNull(BundleDropStartupRecovery.startupSelectedHash())
   }
 
   @Test
@@ -66,6 +76,8 @@ class BundleDropNativePathsTest {
     val ctx = ApplicationProvider.getApplicationContext<Context>()
     val root = File(ctx.filesDir, "bundle-drop").apply { mkdirs() }
     val currentPointer = File(root, "current.json").apply { writeText("stale OTA pointer") }
+    val recoveryLedger = File(root, BundleDropStartupRecoveryController.RECOVERY_LEDGER)
+      .apply { writeText("stale recovery identity") }
     BundleDropOtaPrefs.preferences(ctx).edit()
       .putString("binary_version", "runtime:runtime-1|binary:1.2.3-8")
       .commit()
@@ -73,8 +85,55 @@ class BundleDropNativePathsTest {
     assertNull(BundleDropNativePaths.getDownloadedBundlePath(ctx, "runtime-2"))
 
     assertFalse(currentPointer.exists())
+    assertTrue(recoveryLedger.exists())
+    val resetLedger = JSONObject(recoveryLedger.readText())
+    assertEquals("idle", resetLedger.getString("phase"))
+    assertEquals(BundleDropNativePaths.currentBinaryIdentity(ctx), resetLedger.getString("binaryIdentity"))
     val storedVersion = BundleDropOtaPrefs.preferences(ctx)
       .getString("binary_version", null)
     assertTrue(storedVersion?.startsWith("runtime:runtime-2|binary:") == true)
+  }
+
+  @Test
+  fun `startup controller completes pointerless rollback required after compatibility resolution`() {
+    val ctx = ApplicationProvider.getApplicationContext<Context>()
+    val root = File(ctx.filesDir, "bundle-drop").apply { mkdirs() }
+    val failedHash = "a".repeat(64)
+    val binaryIdentity = BundleDropNativePaths.currentBinaryIdentity(ctx)
+    File(root, BundleDropStartupRecoveryController.RECOVERY_LEDGER).writeText(
+      JSONObject()
+        .put("schemaVersion", BundleDropStartupRecoveryController.PROTOCOL_VERSION)
+        .put("revision", 4)
+        .put("binaryIdentity", binaryIdentity)
+        .put("phase", "rollback_required")
+        .put("quarantinedHashes", JSONArray())
+        .put("revokedHashes", JSONArray())
+        .put("pendingRecoveryEvents", JSONArray())
+        .put("legacyStateImported", true)
+        .put("rollbackFailedHash", failedHash)
+        .put("rollbackCrashCount", 2)
+        .put("rollbackReason", "crash_loop")
+        .toString(),
+    )
+    BundleDropOtaPrefs.writeOtaEnabled(ctx, true)
+    BundleDropOtaPrefs.preferences(ctx).edit()
+      .putString("binary_version", binaryIdentity)
+      .commit()
+
+    assertNull(BundleDropNativePaths.getDownloadedBundlePath(
+      ctx,
+      BundleDropNativePaths.readEmbeddedRuntimeVersion(ctx),
+    ))
+
+    val recovered = JSONObject(
+      File(root, BundleDropStartupRecoveryController.RECOVERY_LEDGER).readText(),
+    )
+    assertEquals("recovered", recovered.getString("phase"))
+    assertEquals(5, recovered.getLong("revision"))
+    assertEquals(failedHash, recovered.getJSONArray("quarantinedHashes").getString(0))
+    val event = recovered.getJSONArray("pendingRecoveryEvents").getJSONObject(0)
+    assertEquals(failedHash, event.getString("failedHash"))
+    assertEquals("embedded", event.getString("recoveryTarget"))
+    assertEquals(2, event.getInt("crashCount"))
   }
 }

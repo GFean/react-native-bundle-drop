@@ -39,9 +39,13 @@ export async function readBundleInfo(): Promise<BundleInfo | null> {
   }
 }
 
+export async function writeBundleInfoDurably(info: BundleInfo): Promise<void> {
+  await RNFS.writeFile(BUNDLE_INFO_PATH, JSON.stringify(info, null, 2), 'utf8');
+}
+
 export async function writeBundleInfo(info: BundleInfo): Promise<void> {
   try {
-    await RNFS.writeFile(BUNDLE_INFO_PATH, JSON.stringify(info, null, 2), 'utf8');
+    await writeBundleInfoDurably(info);
   } catch (e) {
     console.warn('⚠️ Failed to write bundle-info.json', e);
   }
@@ -50,4 +54,14 @@ export async function writeBundleInfo(info: BundleInfo): Promise<void> {
 export async function updateBundleInfo(partial: Partial<BundleInfo>): Promise<void> {
   const existing = (await readBundleInfo()) || {};
   await writeBundleInfo({ ...existing, ...partial });
+}
+
+export async function deleteBundleInfo(): Promise<void> {
+  try {
+    if (await RNFS.exists(BUNDLE_INFO_PATH)) {
+      await RNFS.unlink(BUNDLE_INFO_PATH);
+    }
+  } catch (e) {
+    console.warn('⚠️ Failed to delete bundle-info.json', e);
+  }
 }

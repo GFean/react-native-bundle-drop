@@ -46,7 +46,7 @@ test('adds the iOS receipt phase exactly once and leaves it last', () => {
   assert.equal(phases.BUNDLE_DROP_PHASE.name, `"${PHASE_NAME}"`);
   assert.equal(
     phases.BUNDLE_DROP_PHASE.shellScript,
-    `"${SHELL_SCRIPT.replace(/"/g, '\\"')}"`,
+    `"${SHELL_SCRIPT.replace(/\\/g, '\\\\').replace(/"/g, '\\"')}"`,
   );
 });
 
@@ -56,6 +56,7 @@ test('uses quoted Xcode paths and never patches generated application sources', 
   assert.match(SHELL_SCRIPT, /"\$TARGET_BUILD_DIR\/\$WRAPPER_NAME"/);
   assert.doesNotMatch(SHELL_SCRIPT, /MARKETING_VERSION|CURRENT_PROJECT_VERSION/);
   assert.doesNotMatch(SHELL_SCRIPT, /AppDelegate|MainApplication/);
+  assert.doesNotMatch(SHELL_SCRIPT, /write-runtime-identity|bundle-drop-build-identity/);
 });
 
 test('Expo Android target embeds identity before signing and proves the packaged artifact afterward', () => {

@@ -38,8 +38,8 @@ const loadRuntimeServiceModule = (overrides?: {
   bundlesError?: Error;
   installResult?: { status: 'staged' | 'upToDate' | 'disabled' | 'incompatible' | 'rollback'; reason?: string };
   waitForCheck?: Promise<void>;
-  rollbackPolicy?: { maxCrashCount: number; healthCheckMode: 'auto' | 'manual'; healthyAfterSec: number };
-  rollbackState?: { candidateHash?: string; candidateCommitted?: boolean } | null;
+  waitForRecoveryTelemetry?: Promise<void>;
+  recoveryTelemetryError?: Error;
   reportHealthyError?: Error;
   setOtaEnabledPromise?: Promise<void>;
   nativeModuleAvailable?: boolean;
@@ -114,38 +114,47 @@ const loadRuntimeServiceModule = (overrides?: {
   const getUpdateState = jest.fn(async () =>
     overrides?.pendingState ?? { hasBundle: false, info: null, pendingApply: false }
   );
-  const reconcileAppliedBundleOnLaunch = jest.fn(async () => undefined);
+  const reconcileAppliedBundleOnLaunch = jest.fn<Promise<any>, [any?]>(
+    async () => ({ hash: 'hash-1', pendingApply: false }),
+  );
   const reportActiveBundleHealthy = jest.fn(async () => {
     if (overrides?.reportHealthyError) {
       throw overrides.reportHealthyError;
     }
     return true;
   });
-  const getRollbackPolicy = jest.fn(() =>
-    overrides?.rollbackPolicy ?? { maxCrashCount: 3, healthCheckMode: 'auto', healthyAfterSec: 0 }
-  );
-  const readRollbackState = jest.fn(async () =>
-    overrides?.rollbackState === undefined
-      ? null
-      : overrides.rollbackState
-  );
-  const rollbackToPreviousIfNeeded = jest.fn(async () => overrides?.rollbackResult ?? { rolledBack: false });
-  const rollbackToPreviousOrNative = jest.fn(async () => ({ rolledBack: true, toNative: false }));
+  const readStartupRecoveryState = jest.fn(async () => ({
+    protocolVersion: 1,
+    revision: 0,
+    phase: 'idle' as const,
+    quarantinedHashes: [],
+    pendingRecoveryEvents: [],
+  }));
+  const reconcileStartupRecovery = jest.fn(async (state: unknown) => {
+    if (overrides?.recoveryTelemetryError) {
+      throw overrides.recoveryTelemetryError;
+    }
+    await overrides?.waitForRecoveryTelemetry;
+    return state;
+  });
+  const rollbackStartupBundle = jest.fn(async (forceEmbedded: boolean) => ({
+    rolledBack: overrides?.rollbackResult?.rolledBack ?? true,
+    toEmbedded: forceEmbedded,
+    ...(forceEmbedded ? {} : { hash: 'c'.repeat(64) }),
+  }));
   const readBundleInfo = jest.fn(async () => {
     if (overrides?.readBundleInfoError) {
       throw overrides.readBundleInfoError;
     }
     return { hash: 'hash-1', pendingApply: true };
   });
-  const readCurrentBundlePointer = jest.fn(async () => ({
-    hash: 'hash-1',
-    bundlePath: '/bundles/hash-1/main.jsbundle',
-  }));
+  const readCurrentBundleHash = jest.fn(async () => 'hash-1');
   const getDownloadedBundlePathNative = jest.fn(async () => '/bundles/hash-1/main.jsbundle');
   const restartReactNativeNative = jest.fn();
   const setOtaEnabledNative = jest.fn(async () => {
     await overrides?.setOtaEnabledPromise;
   });
+  const warnIfStartupRecoveryUnavailableNative = jest.fn();
 
   jest.doMock('../../manager/downloadAndInstall', () => ({
     downloadUpdate,
@@ -162,11 +171,10 @@ const loadRuntimeServiceModule = (overrides?: {
     reconcileAppliedBundleOnLaunch,
   }));
   jest.doMock('../../manager/rollbackState', () => ({
-    getRollbackPolicy,
-    readRollbackState,
+    readStartupRecoveryState,
+    reconcileStartupRecovery,
     reportActiveBundleHealthy,
-    rollbackToPreviousIfNeeded,
-    rollbackToPreviousOrNative,
+    rollbackStartupBundle,
   }));
   jest.doMock('../../bundleInfo', () => ({
     readBundleInfo,
@@ -188,7 +196,7 @@ const loadRuntimeServiceModule = (overrides?: {
     defaultChannel: 'General',
   }));
   jest.doMock('../../fs/bundlePointer', () => ({
-    readCurrentBundlePointer,
+    readCurrentBundleHash,
   }));
   jest.doMock('../../native/bundleDropNative', () => ({
     getDownloadedBundlePathNative,
@@ -196,6 +204,7 @@ const loadRuntimeServiceModule = (overrides?: {
     isExpoOtaStartupEnabledNative: () => overrides?.expoOtaStartupEnabled ?? true,
     restartReactNativeNative,
     setOtaEnabledNative,
+    warnIfStartupRecoveryUnavailableNative,
   }));
 
   const service = require('../../runtime/service') as RuntimeServiceModule & {
@@ -214,15 +223,15 @@ const loadRuntimeServiceModule = (overrides?: {
       getUpdateState,
       reconcileAppliedBundleOnLaunch,
       reportActiveBundleHealthy,
-      getRollbackPolicy,
-      readRollbackState,
-      rollbackToPreviousIfNeeded,
-      rollbackToPreviousOrNative,
+      readStartupRecoveryState,
+      reconcileStartupRecovery,
+      rollbackStartupBundle,
       readBundleInfo,
-      readCurrentBundlePointer,
+      readCurrentBundleHash,
       getDownloadedBundlePathNative,
       restartReactNativeNative,
       setOtaEnabledNative,
+      warnIfStartupRecoveryUnavailableNative,
     },
   };
 };
@@ -435,93 +444,65 @@ describe('runtime/service', () => {
     ).toThrow('different runtime config');
   });
 
-  it('marks pending candidates healthy on the configured timer or explicit reportHealthy call', async () => {
-    jest.useFakeTimers();
+  it('preserves explicit reportHealthy while native owns automatic health timing', async () => {
+    const { service, mocks } = loadRuntimeServiceModule();
+
+    service.initBundleDrop({ environment: 'production' });
+    await service.waitForBundleDropStartupForTests();
+    expect(mocks.reportActiveBundleHealthy).not.toHaveBeenCalled();
+
+    await service.reportHealthy();
+    expect(mocks.reportActiveBundleHealthy).toHaveBeenCalledWith();
+  });
+
+  it('reports healthy without waiting for startup network work to finish', async () => {
+    const unresolvedCheck = new Promise<void>(() => undefined);
+    const { service, mocks } = loadRuntimeServiceModule({
+      waitForCheck: unresolvedCheck,
+    });
+
+    service.initBundleDrop({ environment: 'production', policy: 'immediate' });
+    await service.reportHealthy();
+
+    expect(mocks.reportActiveBundleHealthy).toHaveBeenCalledWith();
+  });
+
+  it('does not block local startup on pending recovery telemetry delivery', async () => {
+    const pendingTelemetry = new Promise<void>(() => undefined);
+    const { service, mocks } = loadRuntimeServiceModule({
+      waitForRecoveryTelemetry: pendingTelemetry,
+    });
+
+    service.initBundleDrop({ environment: 'production' });
+    await service.waitForBundleDropStartupForTests();
+
+    expect(mocks.reconcileStartupRecovery).toHaveBeenCalledTimes(1);
+    expect(service.getBundleDropSnapshot().isBusy).toBe(false);
+  });
+
+  it('warns without failing startup when recovery telemetry reconciliation rejects', async () => {
+    const telemetryError = new Error('telemetry unavailable');
+    const warnSpy = jest.spyOn(console, 'warn').mockImplementation(() => undefined);
+    const { service } = loadRuntimeServiceModule({
+      recoveryTelemetryError: telemetryError,
+    });
+
     try {
-      const automatic = loadRuntimeServiceModule({
-        rollbackState: { candidateHash: 'hash-1', candidateCommitted: false },
-        rollbackPolicy: {
-          maxCrashCount: 3,
-          healthCheckMode: 'auto',
-          healthyAfterSec: 0,
-        },
-      });
-
-      automatic.service.initBundleDrop({ environment: 'production' });
-      await automatic.service.waitForBundleDropStartupForTests();
-      expect(automatic.mocks.reportActiveBundleHealthy).not.toHaveBeenCalled();
-
-      await automatic.service.reportHealthy();
-      expect(automatic.mocks.reportActiveBundleHealthy).toHaveBeenCalledWith(undefined, undefined);
-
-      jest.runOnlyPendingTimers();
+      service.initBundleDrop({ environment: 'production' });
+      await service.waitForBundleDropStartupForTests();
       await Promise.resolve();
 
-      expect(automatic.mocks.reportActiveBundleHealthy).toHaveBeenCalledTimes(1);
-
-      const failedTimer = loadRuntimeServiceModule({
-        rollbackState: { candidateHash: 'hash-1', candidateCommitted: false },
-        reportHealthyError: new Error('disk failed'),
-      });
-      const warnSpy = jest.spyOn(console, 'warn').mockImplementation(() => undefined);
-      failedTimer.service.initBundleDrop({ environment: 'production' });
-      await failedTimer.service.waitForBundleDropStartupForTests();
-      await jest.runOnlyPendingTimersAsync();
       expect(warnSpy).toHaveBeenCalledWith(
-        '⚠️ Failed to mark BundleDrop candidate healthy:',
-        expect.any(Error),
+        '⚠️ Failed to reconcile BundleDrop startup recovery telemetry:',
+        telemetryError,
       );
-      warnSpy.mockRestore();
-
-      const manual = loadRuntimeServiceModule({
-        rollbackState: { candidateHash: 'hash-1', candidateCommitted: false },
-        rollbackPolicy: {
-          maxCrashCount: 3,
-          healthCheckMode: 'manual',
-          healthyAfterSec: 0,
-        },
-      });
-
-      manual.service.initBundleDrop({ environment: 'production' });
-      await manual.service.waitForBundleDropStartupForTests();
-      jest.runOnlyPendingTimers();
-      await Promise.resolve();
-      expect(manual.mocks.reportActiveBundleHealthy).not.toHaveBeenCalled();
-
-      await manual.service.reportHealthy();
-      expect(manual.mocks.reportActiveBundleHealthy).toHaveBeenCalledTimes(1);
-
-      const staged = loadRuntimeServiceModule({
-        pendingState: {
-          hasBundle: true,
-          info: { hash: 'hash-1', pendingApply: true },
-          pendingApply: true,
-        },
-        rollbackState: { candidateHash: 'hash-1', candidateCommitted: false },
-        rollbackPolicy: {
-          maxCrashCount: 3,
-          healthCheckMode: 'manual',
-          healthyAfterSec: 0,
-        },
-      });
-
-      staged.service.initBundleDrop({ environment: 'production' });
-      await staged.service.waitForBundleDropStartupForTests();
-      await staged.service.reportHealthy();
-      expect(staged.mocks.reportActiveBundleHealthy).not.toHaveBeenCalled();
     } finally {
-      jest.useRealTimers();
+      warnSpy.mockRestore();
     }
   });
 
   it('does not report a candidate healthy after apply has requested a restart', async () => {
     const { service, mocks } = loadRuntimeServiceModule({
-      rollbackState: { candidateHash: 'hash-1', candidateCommitted: false },
-      rollbackPolicy: {
-        maxCrashCount: 3,
-        healthCheckMode: 'manual',
-        healthyAfterSec: 0,
-      },
     });
 
     service.initBundleDrop({ environment: 'production' });
@@ -537,46 +518,8 @@ describe('runtime/service', () => {
     expect(mocks.reportActiveBundleHealthy).not.toHaveBeenCalled();
   });
 
-  it('does not report healthy when apply requests restart during an in-flight health check', async () => {
-    const { service, mocks } = loadRuntimeServiceModule({
-      rollbackState: { candidateHash: 'hash-1', candidateCommitted: false },
-      rollbackPolicy: {
-        maxCrashCount: 3,
-        healthCheckMode: 'manual',
-        healthyAfterSec: 0,
-      },
-    });
-    let resolveHealthState!: () => void;
-    const healthStateReady = new Promise<void>(resolve => {
-      resolveHealthState = resolve;
-    });
-
-    service.initBundleDrop({ environment: 'production' });
-    await service.waitForBundleDropStartupForTests();
-
-    mocks.getUpdateState.mockImplementationOnce(async () => {
-      await healthStateReady;
-      return { hasBundle: true, info: { hash: 'hash-1', pendingApply: false }, pendingApply: false };
-    });
-
-    const reportPromise = service.reportHealthy();
-    await Promise.resolve();
-    await service.applyDownloadedUpdate();
-    resolveHealthState();
-    await reportPromise;
-
-    expect(mocks.applyUpdate).toHaveBeenCalledWith(expect.any(Function), expect.any(Function));
-    expect(mocks.reportActiveBundleHealthy).not.toHaveBeenCalled();
-  });
-
   it('does not clear a pending restart guard on duplicate init', async () => {
     const { service, mocks } = loadRuntimeServiceModule({
-      rollbackState: { candidateHash: 'hash-1', candidateCommitted: false },
-      rollbackPolicy: {
-        maxCrashCount: 3,
-        healthCheckMode: 'manual',
-        healthyAfterSec: 0,
-      },
     });
 
     service.initBundleDrop({ environment: 'production' });
@@ -587,30 +530,6 @@ describe('runtime/service', () => {
     await service.reportHealthy();
 
     expect(mocks.reportActiveBundleHealthy).not.toHaveBeenCalled();
-  });
-
-  it('ignores scheduled auto health marks after apply has requested a restart', async () => {
-    jest.useFakeTimers();
-    try {
-      const { service, mocks } = loadRuntimeServiceModule({
-        rollbackState: { candidateHash: 'hash-1', candidateCommitted: false },
-        rollbackPolicy: {
-          maxCrashCount: 3,
-          healthCheckMode: 'auto',
-          healthyAfterSec: 5,
-        },
-      });
-
-      service.initBundleDrop({ environment: 'production' });
-      await service.waitForBundleDropStartupForTests();
-      await service.applyDownloadedUpdate();
-      await jest.advanceTimersByTimeAsync(5000);
-
-      expect(mocks.applyUpdate).toHaveBeenCalledWith(expect.any(Function), expect.any(Function));
-      expect(mocks.reportActiveBundleHealthy).not.toHaveBeenCalled();
-    } finally {
-      jest.useRealTimers();
-    }
   });
 
   it('keeps a single active flow, exposes subscribers, and resets test state helpers', async () => {
@@ -673,19 +592,16 @@ describe('runtime/service', () => {
     });
   });
 
-  it('restarts immediately when rollback is required on launch', async () => {
-    const { service, mocks } = loadRuntimeServiceModule({
-      rollbackResult: { rolledBack: true, reason: 'crash_loop' },
-    });
-    const statusSpy = jest.fn();
+  it('reconciles native startup recovery without making a JS rollback decision', async () => {
+    const { service, mocks } = loadRuntimeServiceModule();
 
-    service.initBundleDrop({ environment: 'production', onStatusUpdate: statusSpy });
+    service.initBundleDrop({ environment: 'production' });
     await service.waitForBundleDropStartupForTests();
 
-    expect(mocks.rollbackToPreviousIfNeeded).toHaveBeenCalled();
-    expect(mocks.restartReactNativeNative).toHaveBeenCalledTimes(1);
-    expect(statusSpy).toHaveBeenCalledWith('↩️ Rolled back to previous bundle');
-    expect(mocks.reportActiveBundleHealthy).not.toHaveBeenCalled();
+    expect(mocks.readStartupRecoveryState).toHaveBeenCalledTimes(1);
+    expect(mocks.reconcileStartupRecovery).toHaveBeenCalledTimes(1);
+    expect(mocks.rollbackStartupBundle).not.toHaveBeenCalled();
+    expect(mocks.restartReactNativeNative).not.toHaveBeenCalled();
     expect(mocks.checkForUpdate).not.toHaveBeenCalled();
   });
 
@@ -799,8 +715,8 @@ describe('runtime/service', () => {
     });
     await rollback.service.waitForBundleDropStartupForTests();
     expect(rollbackStatus).toHaveBeenCalledWith('↩️ Server requested rollback...');
-    expect(rollback.mocks.rollbackToPreviousOrNative).toHaveBeenCalledTimes(1);
-    expect(rollback.mocks.rollbackToPreviousOrNative).toHaveBeenCalledWith({ forceNative: true });
+    expect(rollback.mocks.rollbackStartupBundle).toHaveBeenCalledTimes(1);
+    expect(rollback.mocks.rollbackStartupBundle).toHaveBeenCalledWith(true);
     expect(rollback.mocks.restartReactNativeNative).toHaveBeenCalledTimes(1);
 
     const incompatible = loadRuntimeServiceModule({
@@ -858,7 +774,7 @@ describe('runtime/service', () => {
     service.initBundleDrop({ environment: 'production', checkOnly: true });
     await service.waitForBundleDropStartupForTests();
 
-    expect(mocks.rollbackToPreviousOrNative).toHaveBeenCalledWith({ forceNative: true });
+    expect(mocks.rollbackStartupBundle).toHaveBeenCalledWith(true);
   });
 
   it('preserves previous-or-native behavior for non-revocation rollback reasons', async () => {
@@ -869,7 +785,7 @@ describe('runtime/service', () => {
     service.initBundleDrop({ environment: 'production', checkOnly: true });
     await service.waitForBundleDropStartupForTests();
 
-    expect(mocks.rollbackToPreviousOrNative).toHaveBeenCalledWith();
+    expect(mocks.rollbackStartupBundle).toHaveBeenCalledWith(false);
   });
 
   it.each(['immediate', 'on-next-launch'] as const)(
@@ -896,7 +812,7 @@ describe('runtime/service', () => {
       await service.waitForBundleDropStartupForTests();
 
       expect(mocks.downloadUpdate).toHaveBeenCalledTimes(1);
-      expect(mocks.rollbackToPreviousOrNative).toHaveBeenCalledWith({ forceNative: true });
+      expect(mocks.rollbackStartupBundle).toHaveBeenCalledWith(true);
       expect(mocks.restartReactNativeNative).toHaveBeenCalledTimes(1);
       expect(mocks.applyUpdate).not.toHaveBeenCalled();
     },
@@ -918,7 +834,7 @@ describe('runtime/service', () => {
     service.initBundleDrop({ environment: 'production', policy: 'immediate' });
     await service.waitForBundleDropStartupForTests();
 
-    expect(mocks.rollbackToPreviousOrNative).toHaveBeenCalledWith();
+    expect(mocks.rollbackStartupBundle).toHaveBeenCalledWith(false);
     expect(mocks.restartReactNativeNative).toHaveBeenCalledTimes(1);
     expect(mocks.applyUpdate).not.toHaveBeenCalled();
   });
@@ -1316,16 +1232,14 @@ describe('runtime/service', () => {
       },
       status: '↩️ Rollback requested: CURRENT_REVOKED_NO_SAFE_TARGET',
     });
-    expect(rollbackDownload.mocks.rollbackToPreviousOrNative).not.toHaveBeenCalled();
+    expect(rollbackDownload.mocks.rollbackStartupBundle).not.toHaveBeenCalled();
     expect(rollbackDownload.mocks.restartReactNativeNative).not.toHaveBeenCalled();
 
     await expect(rollbackDownload.service.downloadAndStage()).resolves.toEqual({
       result: { status: 'rollback', reason: 'CURRENT_REVOKED_NO_SAFE_TARGET' },
       status: '↩️ Rollback requested: CURRENT_REVOKED_NO_SAFE_TARGET',
     });
-    expect(rollbackDownload.mocks.rollbackToPreviousOrNative).toHaveBeenCalledWith({
-      forceNative: true,
-    });
+    expect(rollbackDownload.mocks.rollbackStartupBundle).toHaveBeenCalledWith(true);
     expect(rollbackDownload.mocks.restartReactNativeNative).toHaveBeenCalledTimes(1);
 
     const noBundleApply = loadRuntimeServiceModule({
@@ -1418,14 +1332,14 @@ describe('runtime/service', () => {
       response: { action: 'ROLLBACK' },
       status: '↩️ Rollback requested',
     });
-    expect(mocks.rollbackToPreviousOrNative).not.toHaveBeenCalled();
+    expect(mocks.rollbackStartupBundle).not.toHaveBeenCalled();
     expect(mocks.restartReactNativeNative).not.toHaveBeenCalled();
 
     await expect(service.downloadAndStage()).resolves.toEqual({
       result: { status: 'rollback' },
       status: '↩️ Rollback requested',
     });
-    expect(mocks.rollbackToPreviousOrNative).toHaveBeenCalledWith();
+    expect(mocks.rollbackStartupBundle).toHaveBeenCalledWith(false);
     expect(mocks.restartReactNativeNative).toHaveBeenCalledTimes(1);
   });
 
@@ -1535,7 +1449,7 @@ describe('runtime/service', () => {
       status: '↩️ Rollback requested: CURRENT_REVOKED_NO_SAFE_TARGET',
     });
 
-    expect(mocks.rollbackToPreviousOrNative).toHaveBeenCalledWith({ forceNative: true });
+    expect(mocks.rollbackStartupBundle).toHaveBeenCalledWith(true);
     expect(mocks.restartReactNativeNative).toHaveBeenCalledTimes(1);
     expect(mocks.downloadUpdate).not.toHaveBeenCalled();
     expect(mocks.installBundle).not.toHaveBeenCalled();
@@ -1570,7 +1484,7 @@ describe('runtime/service', () => {
     });
 
     expect(mocks.downloadUpdate).toHaveBeenCalledTimes(1);
-    expect(mocks.rollbackToPreviousOrNative).toHaveBeenCalledWith({ forceNative: true });
+    expect(mocks.rollbackStartupBundle).toHaveBeenCalledWith(true);
     expect(mocks.restartReactNativeNative).toHaveBeenCalledTimes(1);
     expect(mocks.installBundle).not.toHaveBeenCalled();
   });
@@ -2140,7 +2054,7 @@ describe('runtime/service', () => {
     service.initBundleDrop({ environment: 'production', checkOnly: true });
     await service.waitForBundleDropStartupForTests();
 
-    expect(mocks.rollbackToPreviousOrNative).toHaveBeenCalledTimes(1);
+    expect(mocks.rollbackStartupBundle).toHaveBeenCalledTimes(1);
 
     await expect(service.getObservabilityContext()).resolves.toEqual({
       source: 'ota',

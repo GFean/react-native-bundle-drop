@@ -1,5 +1,14 @@
 import { getDownloadedBundlePathNative, restartReactNativeNative } from '../native/bundleDropNative';
-import { BundleInfo, readBundleInfo, updateBundleInfo } from '../bundleInfo';
+import {
+  BundleInfo,
+  deleteBundleInfo,
+  readBundleInfo,
+  updateBundleInfo,
+  writeBundleInfoDurably,
+} from '../bundleInfo';
+import RNFS from '../native/fs';
+import { platform } from '../context';
+import { readJsonFile, verifyBundleDir } from '../install/bundleVerification';
 import { reportInstalledIfReady } from './reporting';
 import { BundleDropError } from '../errors';
 import { isBundleHashFailed } from './rollbackState';
@@ -25,24 +34,86 @@ export const getUpdateState = async (cached?: {
   };
 };
 
+async function readRecoveredBundleInfo(
+  bundlePath: string,
+  hash: string,
+  previousInfo: BundleInfo | null,
+): Promise<BundleInfo> {
+  const bundleDir = bundlePath.slice(0, bundlePath.lastIndexOf('/'));
+  const manifest = await verifyBundleDir(bundleDir, hash, platform);
+  const metadataPath = `${bundleDir}/${
+    platform === 'android' ? 'metadata-android.json' : 'metadata-ios.json'
+  }`;
+  const metadata = await RNFS.exists(metadataPath)
+    ? await readJsonFile<Record<string, unknown>>(metadataPath)
+    : null;
+  const bundleVersion = typeof metadata?.bundleVersion === 'number'
+    ? metadata.bundleVersion
+    : undefined;
+  const metadataVersion = typeof metadata?.version === 'string' ? metadata.version : undefined;
+  const metadataRuntimeVersion = typeof metadata?.runtimeVersion === 'string'
+    ? metadata.runtimeVersion
+    : undefined;
+  const alreadyReported = previousInfo?.installedReportedHashes?.includes(hash) === true;
+
+  return {
+    hash,
+    bundleVersion,
+    version: manifest?.version ?? metadataVersion,
+    runtimeVersion: manifest?.runtimeVersion ?? metadataRuntimeVersion,
+    platform,
+    installedAt: new Date().toISOString(),
+    pendingApply: false,
+    lastInstalledReportedHash: alreadyReported ? hash : undefined,
+    installedReportedHashes: previousInfo?.installedReportedHashes,
+  };
+}
+
 export const reconcileAppliedBundleOnLaunch = async (cached?: {
   bundleInfo?: BundleInfo | null;
   bundlePath?: string | null;
-}) => {
-  const state = await getUpdateState(cached);
-  if (!state.hasBundle) return;
+  currentHash?: string | null;
+}): Promise<BundleInfo | null> => {
+  const bundlePath = cached?.bundlePath !== undefined
+    ? cached.bundlePath
+    : await getDownloadedBundlePathNative();
+  const state = await getUpdateState({ ...cached, bundlePath });
+  if (!state.hasBundle) {
+    if (state.info) {
+      await deleteBundleInfo();
+    }
+    return null;
+  }
+
+  const currentHash = cached?.currentHash;
+  if (currentHash && state.info?.hash !== currentHash) {
+    const recoveredInfo = await readRecoveredBundleInfo(
+      bundlePath as string,
+      currentHash,
+      state.info,
+    );
+    await writeBundleInfoDurably(recoveredInfo);
+    reportInstalledIfReady({ hasBundle: true, info: recoveredInfo }).catch(() => {});
+    return recoveredInfo;
+  }
 
   if (!state.info?.pendingApply) {
     reportInstalledIfReady(state).catch(() => {});
-    return;
+    return state.info || null;
   }
 
-  await updateBundleInfo({ pendingApply: false, installedAt: new Date().toISOString() });
+  const appliedInfo = {
+    ...state.info,
+    pendingApply: false,
+    installedAt: new Date().toISOString(),
+  };
+  await updateBundleInfo(appliedInfo);
   // Fire-and-forget: don't block the startup path for server reporting
   reportInstalledIfReady({
     hasBundle: true,
-    info: state.info ? { ...state.info, pendingApply: false } : state.info,
+    info: appliedInfo,
   }).catch(() => {});
+  return appliedInfo;
 };
 
 export const applyUpdate = async (

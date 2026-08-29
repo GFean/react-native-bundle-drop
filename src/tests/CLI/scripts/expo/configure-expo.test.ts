@@ -114,7 +114,7 @@ describe('CLI/scripts/expo/configure-expo', () => {
       'node_modules\n\n' +
         '# Bundle Drop: commit the public trust bootstrap; ignore generated runtime artifacts.\n' +
         '!.bundle-drop/\n.bundle-drop/*\n' +
-        '!.bundle-drop/runtime-delivery.generated.json\n',
+        '!.bundle-drop/runtime-delivery.lock.json\n',
     );
     expect(fs.existsSync(path.join(projectRoot, '.fingerprintignore'))).toBe(false);
     expect(planExpoProjectConfiguration({ projectRoot, migrateExpoUpdates: true })).toEqual([]);
@@ -263,7 +263,7 @@ describe('CLI/scripts/expo/configure-expo', () => {
     }));
     expect(gitignore).toEqual(expect.objectContaining({
       original: null,
-      updated: expect.stringContaining('!.bundle-drop/runtime-delivery.generated.json'),
+      updated: expect.stringContaining('!.bundle-drop/runtime-delivery.lock.json'),
     }));
   });
 
@@ -524,7 +524,7 @@ describe('CLI/scripts/expo/configure-expo', () => {
 
     expect(() => applyExpoConfigurationChanges({ projectRoot, changes })).not.toThrow();
     expect(fs.readFileSync(path.join(projectRoot, '.gitignore'), 'utf8')).toContain(
-      '!.bundle-drop/runtime-delivery.generated.json',
+      '!.bundle-drop/runtime-delivery.lock.json',
     );
   });
 

@@ -5,6 +5,33 @@
 RCT_EXTERN_METHOD(getDownloadedBundlePath:(RCTPromiseResolveBlock)resolve
                   rejecter:(RCTPromiseRejectBlock)reject)
 
+RCT_EXTERN_METHOD(activateStartupCandidate:(NSString *)hash
+                  maxCrashCount:(nonnull NSNumber *)maxCrashCount
+                  healthCheckMode:(NSString *)healthCheckMode
+                  healthyAfterSec:(nonnull NSNumber *)healthyAfterSec
+                  resolve:(RCTPromiseResolveBlock)resolve
+                  reject:(RCTPromiseRejectBlock)reject)
+
+RCT_EXTERN_METHOD(markStartupHealthy:(NSString *)hash
+                  attemptId:(NSString *)attemptId
+                  resolve:(RCTPromiseResolveBlock)resolve
+                  reject:(RCTPromiseRejectBlock)reject)
+
+RCT_EXTERN_METHOD(getStartupRecoveryState:(RCTPromiseResolveBlock)resolve
+                  reject:(RCTPromiseRejectBlock)reject)
+
+RCT_EXTERN_METHOD(setStartupRecoveryRevokedHashes:(NSArray<NSString *> *)hashes
+                  resolve:(RCTPromiseResolveBlock)resolve
+                  reject:(RCTPromiseRejectBlock)reject)
+
+RCT_EXTERN_METHOD(acknowledgeStartupRecovery:(NSString *)eventId
+                  resolve:(RCTPromiseResolveBlock)resolve
+                  reject:(RCTPromiseRejectBlock)reject)
+
+RCT_EXTERN_METHOD(rollbackStartupBundle:(BOOL)forceEmbedded
+                  resolve:(RCTPromiseResolveBlock)resolve
+                  reject:(RCTPromiseRejectBlock)reject)
+
 RCT_EXTERN_METHOD(restartReactNative)
 
 RCT_EXTERN_METHOD(setOtaEnabled:(BOOL)enabled

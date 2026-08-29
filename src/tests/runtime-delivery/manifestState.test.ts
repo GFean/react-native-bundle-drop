@@ -3,6 +3,7 @@ jest.mock('../../native/fs', () => require('../mocks/native/fs'));
 
 import {
   readVerifiedLaneState,
+  readVerifiedRuntimeRevokedHashes,
   recordVerifiedLaneManifest,
 } from '../../runtime-delivery/manifestState';
 import type { RuntimeDeliveryLaneManifest } from '../../runtime-delivery/types';
@@ -125,5 +126,106 @@ describe('runtime-delivery/manifestState', () => {
     await expect(recordVerifiedLaneManifest(manifest(2), '3'.repeat(64)))
       .rejects.toThrow('equivocation');
     await expect(recordVerifiedLaneManifest(manifest(3), '4'.repeat(64))).resolves.toBeUndefined();
+  });
+
+  it('unions revocations across channels for the same project, platform, and runtime', async () => {
+    const otherChannelManifest = {
+      ...manifest(1),
+      channelName: 'Production',
+      revokedHashes: ['b'.repeat(64)],
+    };
+    const otherRuntimeManifest = {
+      ...manifest(1),
+      runtimeVersion: '2.0.0',
+      revokedHashes: ['c'.repeat(64)],
+    };
+
+    await recordVerifiedLaneManifest(manifest(1), '1'.repeat(64));
+    await recordVerifiedLaneManifest(otherChannelManifest, '2'.repeat(64));
+    await recordVerifiedLaneManifest(otherRuntimeManifest, '3'.repeat(64));
+
+    await expect(readVerifiedRuntimeRevokedHashes(identity)).resolves.toEqual([
+      'a'.repeat(64),
+      'b'.repeat(64),
+    ]);
+  });
+
+  it('persists the prospective runtime revocation set before committing lane state', async () => {
+    let laneVisibleDuringNativePersistence: unknown = 'not-checked';
+    const persistRuntimeRevocations = jest.fn(async (hashes: string[]) => {
+      laneVisibleDuringNativePersistence = await readVerifiedLaneState(identity);
+      expect(hashes).toEqual(['a'.repeat(64)]);
+    });
+
+    await recordVerifiedLaneManifest(
+      manifest(1),
+      '1'.repeat(64),
+      persistRuntimeRevocations,
+    );
+
+    expect(laneVisibleDuringNativePersistence).toBeNull();
+    await expect(readVerifiedLaneState(identity)).resolves.toEqual(expect.objectContaining({
+      highestGeneration: 1,
+    }));
+  });
+
+  it('does not commit a lane generation when native revocation persistence fails', async () => {
+    const persistRuntimeRevocations = jest.fn(async () => {
+      throw new Error('interrupted native persistence');
+    });
+
+    await expect(recordVerifiedLaneManifest(
+      manifest(1),
+      '1'.repeat(64),
+      persistRuntimeRevocations,
+    )).rejects.toThrow('interrupted native persistence');
+    await expect(readVerifiedLaneState(identity)).resolves.toBeNull();
+
+    await expect(recordVerifiedLaneManifest(manifest(1), '1'.repeat(64)))
+      .resolves.toBeUndefined();
+  });
+
+  it('serializes native revocation persistence and supplies the full prospective union', async () => {
+    let releaseFirst!: () => void;
+    let markFirstStarted!: () => void;
+    const firstStarted = new Promise<void>(resolve => {
+      markFirstStarted = resolve;
+    });
+    const firstRelease = new Promise<void>(resolve => {
+      releaseFirst = resolve;
+    });
+    const calls: string[][] = [];
+    const otherChannel = {
+      ...manifest(1),
+      channelName: 'Production',
+      revokedHashes: ['b'.repeat(64)],
+    };
+
+    const first = recordVerifiedLaneManifest(
+      manifest(1),
+      '1'.repeat(64),
+      async hashes => {
+        calls.push(hashes);
+        markFirstStarted();
+        await firstRelease;
+      },
+    );
+    const second = recordVerifiedLaneManifest(
+      otherChannel,
+      '2'.repeat(64),
+      async hashes => {
+        calls.push(hashes);
+      },
+    );
+
+    await firstStarted;
+    expect(calls).toEqual([['a'.repeat(64)]]);
+    releaseFirst();
+    await Promise.all([first, second]);
+
+    expect(calls).toEqual([
+      ['a'.repeat(64)],
+      ['a'.repeat(64), 'b'.repeat(64)],
+    ]);
   });
 });

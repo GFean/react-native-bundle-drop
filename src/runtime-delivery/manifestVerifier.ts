@@ -1,6 +1,10 @@
 import RNFS from '../native/fs';
+import { syncVerifiedRevokedHashes } from '../manager/rollbackState';
 import { decodeBase64UrlBytes, decodeBase64UrlUtf8, utf8ByteLength } from './encoding';
-import { readVerifiedLaneState, recordVerifiedLaneManifest } from './manifestState';
+import {
+  readVerifiedLaneState,
+  recordVerifiedLaneManifest,
+} from './manifestState';
 import {
   RUNTIME_DELIVERY_ROLLOUT_ALGORITHM,
   RUNTIME_DELIVERY_MANIFEST_JWS_TYPE,
@@ -377,7 +381,16 @@ export async function verifyRuntimeDeliveryManifest(
       'Runtime manifest generation equivocation detected',
     );
   }
-  await recordVerifiedLaneManifest(manifest, payloadSha256);
+  await recordVerifiedLaneManifest(
+    manifest,
+    payloadSha256,
+    async runtimeRevokedHashes => {
+      const persisted = await syncVerifiedRevokedHashes(runtimeRevokedHashes);
+      if (!persisted) {
+        throw new Error('Native startup recovery rejected the verified revocation set');
+      }
+    },
+  );
   return manifest;
 }
 

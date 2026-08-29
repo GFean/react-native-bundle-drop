@@ -5,7 +5,7 @@ import { resolveExpoMetroRuntimeVersion } from './expo';
 import type { ExpoMetroRuntimeVersion } from './expo';
 import type { ExpoBuildIdentityReceipt } from './expo/buildReceipt';
 import {
-  readGeneratedRuntimeDeliveryBootstrap,
+  readRuntimeDeliveryBootstrap,
   type RuntimeDeliveryConfig,
 } from './runtime-delivery/bootstrapConfig';
 
@@ -51,7 +51,7 @@ const resolveRuntimeDelivery = (
   projectRoot: string,
   baseConfig: BaseBundleDropConfig,
 ): RuntimeDeliveryConfig | undefined => {
-  const generated = readGeneratedRuntimeDeliveryBootstrap({
+  const bootstrap = readRuntimeDeliveryBootstrap({
     projectRoot,
     expectedIdentity: {
       serverUrl: baseConfig.serverUrl!,
@@ -59,7 +59,7 @@ const resolveRuntimeDelivery = (
       projectSlug: baseConfig.project!.slug!,
     },
   });
-  return generated?.runtimeDelivery;
+  return bootstrap?.runtimeDelivery;
 };
 
 const writeGeneratedRuntimeConfig = (params: {
@@ -81,6 +81,7 @@ const writeGeneratedRuntimeConfig = (params: {
     generatedFields.push(`  runtimeDelivery: ${JSON.stringify(params.runtimeDelivery)},`);
   }
   const content = [
+    '/* eslint-disable */',
     "'use strict';",
     '',
     "const baseConfig = require('../../bundle.drop.config.js');",
@@ -112,7 +113,7 @@ const mergeMetroAlias = <T extends BundleDropMetroConfig>(
 
 /**
  * Preserves a bare React Native Metro config and resolves Bundle Drop through
- * the project-owned, package-validated generated bootstrap.
+ * the project-owned, package-validated runtime-delivery lockfile.
  */
 export function withBundleDrop<T extends BundleDropMetroConfig>(
   config: T,

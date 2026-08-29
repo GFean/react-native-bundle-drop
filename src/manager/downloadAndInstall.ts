@@ -1,31 +1,16 @@
 import { config, defaultChannel, platform as devicePlatform } from '../context';
-import { BundleInfo, readBundleInfo, writeBundleInfo } from '../bundleInfo';
-import {
-  deleteCurrentBundlePointer,
-  readCurrentBundlePointer,
-  readPreviousBundlePointer,
-  restorePreviousBundlePointer,
-  setCurrentBundlePointer,
-  writeCurrentBundlePointer,
-  type BundlePointer,
-} from '../fs/bundlePointer';
+import { BundleInfo, readBundleInfo, writeBundleInfoDurably } from '../bundleInfo';
 import { installFromZip } from '../install/installFromZip';
 import { tryInstallPatchTransport } from '../patch-engine/patchTransport';
-import { getDownloadedBundlePathNative } from '../native/bundleDropNative';
 import { authorizeRuntimeDeliveryUpdate, checkForUpdate } from './updateCheck';
 import { BundleDropError, isInstallPhaseError } from '../errors';
-import { isBundleHashFailed, markCandidateActivated } from './rollbackState';
+import {
+  activateStartupCandidate,
+  isBundleHashFailed,
+  rollbackStartupBundle,
+} from './rollbackState';
 import type { OtaPatchSet, UpdateCheckResponse } from '../api/types';
 import { isArtifactCapabilityRejected } from '../runtime-delivery/artifactCapability';
-
-async function restoreCurrentPointer(pointer: BundlePointer | null): Promise<void> {
-  if (pointer) {
-    await writeCurrentBundlePointer({ ...pointer, updatedAt: new Date().toISOString() });
-    return;
-  }
-
-  await deleteCurrentBundlePointer();
-}
 
 export type DownloadUpdateResult =
   | { status: 'staged'; bundlePath: string; hash: string }
@@ -275,11 +260,7 @@ async function downloadAndStageUpdate(
     statusCb?.('✅ Update downloaded. Will apply on next launch or when you call applyUpdate().');
 
     // Persist installed metadata for future skip logic.
-    const [previousInfo, previousCurrentPointer, previousRollbackPointer] = await Promise.all([
-      readBundleInfo(),
-      readCurrentBundlePointer(),
-      readPreviousBundlePointer(),
-    ]);
+    const previousInfo = await readBundleInfo();
     const installedInfo: BundleInfo = {
       bundleVersion: serverBundleVersion ?? metadataFromZip.bundleVersion,
       version: serverVersion ?? metadataFromZip.version,
@@ -292,20 +273,38 @@ async function downloadAndStageUpdate(
       lastInstalledReportedHash: previousInfo?.lastInstalledReportedHash,
       installedReportedHashes: previousInfo?.installedReportedHashes,
     };
-    await setCurrentBundlePointer(bundlePath, installedHash);
+    let candidateActivated = false;
     try {
-      const resolvedBundlePath = await getDownloadedBundlePathNative();
-      if (resolvedBundlePath !== bundlePath) {
+      const activation = await activateStartupCandidate(installedHash);
+      candidateActivated = activation !== null;
+      if (!activation) {
+        throw new BundleDropError({
+          message: 'Installed bundle requires native startup recovery support',
+          code: 'INSTALL_FAILED',
+          step: 'install',
+          context: { channelName, platform, hash },
+        });
+      }
+      if (activation.hash !== installedHash || activation.bundlePath !== bundlePath) {
         throw new BundleDropError({
           message: 'Installed bundle was not accepted by the native resolver',
           code: 'INSTALL_FAILED',
           step: 'install',
-          context: { channelName, platform, hash, expectedBundlePath: bundlePath, resolvedBundlePath },
+          context: {
+            channelName,
+            platform,
+            hash,
+            expectedBundlePath: bundlePath,
+            resolvedBundlePath: activation.bundlePath,
+            resolvedHash: activation.hash,
+          },
         });
       }
+      await writeBundleInfoDurably(installedInfo);
     } catch (nativeError) {
-      await restoreCurrentPointer(previousCurrentPointer);
-      await restorePreviousBundlePointer(previousRollbackPointer);
+      if (candidateActivated) {
+        await rollbackStartupBundle(false).catch(() => false);
+      }
       if (nativeError instanceof BundleDropError) {
         throw nativeError;
       }
@@ -317,9 +316,6 @@ async function downloadAndStageUpdate(
         cause: nativeError,
       });
     }
-    await writeBundleInfo(installedInfo);
-    await markCandidateActivated(installedHash);
-
     return { status: 'staged', bundlePath, hash: installedHash };
   } catch (err) {
     const wrapped =

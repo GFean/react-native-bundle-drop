@@ -20,7 +20,11 @@ import {
   resolveExpoUploadIdentity,
 } from './expo/build-receipt';
 import { findProjectRoot } from './aipowered/scanner';
-import { readGeneratedRuntimeDeliveryBootstrap } from '../../runtime-delivery/bootstrapConfig';
+import {
+  inspectRuntimeDeliveryBootstrap,
+  LEGACY_RUNTIME_DELIVERY_BOOTSTRAP_PATH,
+  RUNTIME_DELIVERY_BOOTSTRAP_PATH,
+} from '../../runtime-delivery/bootstrapConfig';
 import { findNativeEntrypointAuthorityIssue } from './native-entrypoint-authority';
 import {
   findSingleMetroConfig,
@@ -107,8 +111,8 @@ const inspectMetroConfig = (projectRoot: string) => {
 
 const runtimeDeliveryBootstrapGitState = (
   projectRoot: string,
+  relativePath: string,
 ): 'ignored' | 'tracked' | 'untracked' | null => {
-  const relativePath = path.join('.bundle-drop', 'runtime-delivery.generated.json');
   const runGit = (args: string[]) => spawnSync('git', args, {
     cwd: projectRoot,
     stdio: 'ignore',
@@ -144,7 +148,7 @@ const checkRuntimeDeliveryBootstrap = (projectRoot: string): DoctorCheck => {
     if (!config.serverUrl || !config.org?.slug || !config.project?.slug) {
       throw new Error('bundle.drop.config.js is missing serverUrl, org.slug, or project.slug.');
     }
-    const bootstrap = readGeneratedRuntimeDeliveryBootstrap({
+    const inspected = inspectRuntimeDeliveryBootstrap({
       projectRoot,
       expectedIdentity: {
         serverUrl: config.serverUrl,
@@ -152,14 +156,18 @@ const checkRuntimeDeliveryBootstrap = (projectRoot: string): DoctorCheck => {
         projectSlug: config.project.slug,
       },
     });
-    if (bootstrap) {
-      const gitState = runtimeDeliveryBootstrapGitState(projectRoot);
+    if (inspected) {
+      const { bootstrap, source } = inspected;
+      const activePath = source === 'legacy'
+        ? LEGACY_RUNTIME_DELIVERY_BOOTSTRAP_PATH
+        : RUNTIME_DELIVERY_BOOTSTRAP_PATH;
+      const gitState = runtimeDeliveryBootstrapGitState(projectRoot, activePath);
       if (gitState === 'ignored') {
         return {
           name: 'Runtime delivery bootstrap',
           status: 'error',
           message:
-            'The runtime delivery bootstrap is ignored by Git and will be missing from clean builds. ' +
+            'The runtime delivery lockfile is ignored by Git and will be missing from clean builds. ' +
             'Run `bundle-drop sync` to repair .gitignore.',
         };
       }
@@ -168,15 +176,33 @@ const checkRuntimeDeliveryBootstrap = (projectRoot: string): DoctorCheck => {
           name: 'Runtime delivery bootstrap',
           status: 'warning',
           message:
-            `Runtime delivery bootstrap is valid with ` +
+            `Runtime delivery lockfile is valid with ` +
             `${Object.keys(bootstrap.runtimeDelivery.publicKeys).length} public key(s), ` +
             'but it is not committed yet.',
+        };
+      }
+      if (source === 'legacy') {
+        return {
+          name: 'Runtime delivery bootstrap',
+          status: 'warning',
+          message:
+            'The legacy runtime-delivery.generated.json bootstrap is valid. ' +
+            'Run `bundle-drop sync` to migrate it to runtime-delivery.lock.json.',
+        };
+      }
+      if (source === 'matching-dual') {
+        return {
+          name: 'Runtime delivery bootstrap',
+          status: 'warning',
+          message:
+            'The runtime delivery lockfile matches the legacy bootstrap. ' +
+            'Run `bundle-drop sync` to remove the legacy file.',
         };
       }
       return {
         name: 'Runtime delivery bootstrap',
         status: 'pass',
-        message: `Runtime delivery bootstrap is pinned with ${Object.keys(bootstrap.runtimeDelivery.publicKeys).length} public key(s).`,
+        message: `Runtime delivery lockfile is pinned with ${Object.keys(bootstrap.runtimeDelivery.publicKeys).length} public key(s).`,
       };
     }
     if (config.runtimeDelivery) {
@@ -192,7 +218,7 @@ const checkRuntimeDeliveryBootstrap = (projectRoot: string): DoctorCheck => {
     return {
       name: 'Runtime delivery bootstrap',
       status: 'warning',
-      message: 'No runtime delivery bootstrap is pinned. Run `bundle-drop sync` to create or repair it.',
+      message: 'No runtime delivery lockfile is pinned. Run `bundle-drop sync` to create or repair it.',
     };
   } catch (error) {
     return {

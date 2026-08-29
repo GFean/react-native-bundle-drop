@@ -1,3 +1,19 @@
+import javax.inject.Inject
+import org.gradle.process.ExecOperations
+
+abstract class BundleDropNativeIdentityCommandExecutor {
+  @Inject
+  abstract ExecOperations getExecOperations()
+
+  void execute(File workingDirectory, String executable, List<?> arguments) {
+    execOperations.exec { spec ->
+      spec.workingDir workingDirectory
+      spec.executable executable
+      spec.args arguments
+    }.assertNormalExitValue()
+  }
+}
+
 buildscript {
   ext.getExtOrDefault = {name ->
     return rootProject.ext.has(name) ? rootProject.ext.get(name) : project.properties['BundleDrop_' + name]
@@ -84,6 +100,49 @@ android {
     cmake {
       path "src/main/cpp/CMakeLists.txt"
       version "3.22.1"
+    }
+  }
+}
+
+if (!project.hasProperty("standalone") && rootProject.findProject(":bundledrop-expo") == null) {
+  def bundleDropProjectRoot = rootProject.projectDir.parentFile.canonicalFile
+  def bundleDropConfigFile = new File(bundleDropProjectRoot, "bundle.drop.config.js")
+  if (bundleDropConfigFile.isFile()) {
+    def bundleDropIdentityWriter = file(
+      "../lib/CLI/scripts/native/write-runtime-identity.js"
+    ).canonicalFile
+    if (!bundleDropIdentityWriter.isFile()) {
+      throw new GradleException(
+        "Bundle Drop native runtime identity writer is missing: ${bundleDropIdentityWriter}"
+      )
+    }
+    def bundleDropGeneratedAssets = file("${buildDir}/generated/bundleDropIdentity/assets")
+    def bundleDropIdentityOutput = new File(
+      bundleDropGeneratedAssets,
+      "bundle-drop/build-identity.json"
+    )
+    android.sourceSets.main.assets.srcDir(bundleDropGeneratedAssets)
+    def bundleDropCommandExecutor = objects.newInstance(
+      BundleDropNativeIdentityCommandExecutor
+    )
+    def generateBundleDropNativeRuntimeIdentity = tasks.register(
+      "generateBundleDropNativeRuntimeIdentity"
+    ) { task ->
+      task.inputs.file(bundleDropConfigFile)
+      task.inputs.file(bundleDropIdentityWriter)
+      task.outputs.file(bundleDropIdentityOutput)
+      task.doLast {
+        def nodeBinary = System.getenv("NODE_BINARY") ?: "node"
+        bundleDropCommandExecutor.execute(bundleDropProjectRoot, nodeBinary, [
+          bundleDropIdentityWriter.path,
+          "--project-root", bundleDropProjectRoot.path,
+          "--platform", "android",
+          "--output", bundleDropIdentityOutput.path
+        ])
+      }
+    }
+    tasks.named("preBuild").configure { task ->
+      task.dependsOn(generateBundleDropNativeRuntimeIdentity)
     }
   }
 }
@@ -199,6 +258,12 @@ if (project.hasProperty("standalone")) {
         includes = ["com.bundledrop.BundleDropOtaResolver"]
         limit { counter = "LINE";   minimum = 0.90 }
         limit { counter = "BRANCH"; minimum = 0.85 }
+      }
+      rule {
+        element = "CLASS"
+        includes = ["com.bundledrop.BundleDropStartupRecoveryController"]
+        limit { counter = "LINE";   minimum = 0.90 }
+        limit { counter = "BRANCH"; minimum = 0.70 }
       }
       rule {
         element = "CLASS"

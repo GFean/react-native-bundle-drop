@@ -1,18 +1,21 @@
-import RNFS from '../native/fs';
-
-import { BUNDLE_DROP_ROOT, bundleDropConfig, platform } from '../context';
+import type { BundleInfo } from '../bundleInfo';
+import { BUNDLE_DROP_ROOT, bundleDropConfig } from '../context';
 import { atomicWriteJson, ensureDir } from '../fs/fsUtils';
+import RNFS from '../native/fs';
 import {
-  deleteCurrentBundlePointer,
-  deletePreviousBundlePointer,
-  readCurrentBundlePointer,
-  readPreviousBundlePointer,
-  writeCurrentBundlePointer,
-  type BundlePointer,
-} from '../fs/bundlePointer';
-import { readBundleInfo, updateBundleInfo } from '../bundleInfo';
-import { reportLocalRollback } from './reporting';
-import { BUNDLE_MANIFEST, type BundleManifest } from '../manifest/bundleManifest';
+  acknowledgeStartupRecoveryNative,
+  activateStartupCandidateNative,
+  getStartupRecoveryAttemptNative,
+  getStartupRecoveryStateNative,
+  markStartupHealthyNative,
+  rollbackStartupBundleNative,
+  setStartupRecoveryRevokedHashesNative,
+  type StartupRecoveryEvent,
+  type StartupRecoveryState,
+  type StartupCandidateActivation,
+  type StartupRollbackResult,
+} from '../native/bundleDropNative';
+import { reportLocalRollback, type FailedBundleRecord } from './reporting';
 
 export type RollbackPolicy = {
   maxCrashCount?: number;
@@ -20,310 +23,188 @@ export type RollbackPolicy = {
   healthyAfterSec?: number;
 };
 
-export type FailedBundleReason = 'crash_loop';
+export type { FailedBundleRecord } from './reporting';
+export type { StartupRecoveryState } from '../native/bundleDropNative';
 
-export type FailedBundleRecord = {
-  reason: FailedBundleReason;
-  failedAt: number;
-  crashCount?: number;
+type RecoveryTelemetryContext = {
+  failedHash: string;
   channelName?: string;
   runtimeVersion?: string;
-  previousHash?: string;
 };
 
-export type RollbackState = {
-  activeHash?: string;
-  lastGoodHash?: string;
-  candidateHash?: string;
-  candidateActivatedAt?: number;
-  candidateCommitted?: boolean;
-  crashCount?: number;
-  lastLaunchAt?: number;
-  failedBundles?: Record<string, FailedBundleRecord>;
+type RecoveryTelemetryContextState = {
+  schemaVersion: 1;
+  events: Record<string, RecoveryTelemetryContext>;
 };
 
-type RollbackDecision =
-  | { shouldRollback: false }
-  | { shouldRollback: true; reason: FailedBundleReason };
+export const STARTUP_RECOVERY_TELEMETRY_CONTEXT_PATH =
+  `${BUNDLE_DROP_ROOT}/recovery-telemetry-context.json`;
 
-const STATE_PATH = `${BUNDLE_DROP_ROOT}/state.json`;
-const MAX_FAILED_BUNDLES = 20;
+let telemetryContextMutation: Promise<void> = Promise.resolve();
 
-function nowSec() {
-  return Math.floor(Date.now() / 1000);
-}
-
-async function readState(): Promise<RollbackState | null> {
+async function readRecoveryTelemetryContexts(): Promise<RecoveryTelemetryContextState> {
   try {
-    if (!(await RNFS.exists(STATE_PATH))) return null;
-    const raw = await RNFS.readFile(STATE_PATH, 'utf8');
-    return JSON.parse(raw) as RollbackState;
-  } catch {
-    return null;
-  }
-}
-
-export { readState as readRollbackState };
-
-async function writeState(state: RollbackState): Promise<void> {
-  await ensureDir(BUNDLE_DROP_ROOT);
-  await atomicWriteJson(STATE_PATH, state);
-}
-
-async function updateState(partial: Partial<RollbackState>): Promise<RollbackState> {
-  const existing = (await readState()) || {};
-  const next = { ...existing, ...partial };
-  await writeState(next);
-  return next;
-}
-
-function pruneFailedBundles(
-  failedBundles: Record<string, FailedBundleRecord>,
-): Record<string, FailedBundleRecord> {
-  return Object.fromEntries(
-    Object.entries(failedBundles)
-      .sort(([, left], [, right]) => right.failedAt - left.failedAt)
-      .slice(0, MAX_FAILED_BUNDLES),
-  );
-}
-
-export async function markCandidateActivated(hash: string): Promise<void> {
-  const previous = await readPreviousBundlePointer();
-  const previousHash = previous?.hash;
-  const now = nowSec();
-  await updateState({
-    activeHash: hash,
-    candidateHash: hash,
-    candidateActivatedAt: now,
-    candidateCommitted: false,
-    crashCount: 0,
-    lastLaunchAt: now,
-    lastGoodHash: previousHash ?? undefined,
-  });
-}
-
-export async function reportActiveBundleHealthy(
-  cached?: { currentPointer?: BundlePointer | null },
-  expectedHash?: string,
-): Promise<boolean> {
-  const current = cached?.currentPointer !== undefined ? cached.currentPointer : await readCurrentBundlePointer();
-  const hash = current?.hash;
-  if (!hash) return false;
-  if (expectedHash && hash !== expectedHash) return false;
-
-  const state = (await readState()) || {};
-  const isCandidate = state.candidateHash === hash && state.candidateCommitted !== true;
-  if (!isCandidate) return false;
-
-  await updateState({
-    activeHash: hash,
-    candidateHash: hash,
-    candidateCommitted: true,
-    crashCount: 0,
-    lastGoodHash: hash,
-  });
-  return true;
-}
-
-export async function commitActiveBundle(
-  cached?: { currentPointer?: BundlePointer | null },
-): Promise<void> {
-  await reportActiveBundleHealthy(cached);
-}
-
-export async function isBundleHashFailed(hash?: string | null): Promise<boolean> {
-  if (!hash) return false;
-  const state = await readState();
-  return !!state?.failedBundles?.[hash];
-}
-
-export async function getFailedBundleHashes(): Promise<string[]> {
-  const state = await readState();
-  return Object.entries(state?.failedBundles || {})
-    .sort(([, left], [, right]) => right.failedAt - left.failedAt)
-    .slice(0, MAX_FAILED_BUNDLES)
-    .map(([hash]) => hash);
-}
-
-async function buildFailedBundleRecord(
-  hash: string,
-  reason: FailedBundleReason,
-  state: RollbackState,
-): Promise<FailedBundleRecord> {
-  const [bundleInfo, previous] = await Promise.all([
-    readBundleInfo(),
-    readPreviousBundlePointer(),
-  ]);
-  const record: FailedBundleRecord = {
-    reason,
-    failedAt: nowSec(),
-    crashCount: state.crashCount,
-    channelName: bundleInfo?.channelName,
-    runtimeVersion: bundleInfo?.runtimeVersion,
-    previousHash: previous?.hash,
-  };
-  return record;
-}
-
-async function recordFailedBundle(
-  hash: string,
-  record: FailedBundleRecord,
-): Promise<void> {
-  const state = (await readState()) || {};
-  const failedBundles = pruneFailedBundles({
-    ...(state.failedBundles || {}),
-    [hash]: record,
-  });
-  await updateState({ failedBundles });
-}
-
-export async function evaluateRollbackOnLaunch(
-  policy: Required<RollbackPolicy>,
-  cached?: { currentPointer?: BundlePointer | null; rollbackState?: RollbackState | null },
-): Promise<RollbackDecision> {
-  const current = cached?.currentPointer !== undefined ? cached.currentPointer : await readCurrentBundlePointer();
-  const activeHash = current?.hash;
-  if (!activeHash) return { shouldRollback: false };
-
-  const now = nowSec();
-  const persistedState = (await readState()) || {};
-  const state =
-    cached?.rollbackState !== undefined
-      ? {
-          ...persistedState,
-          ...cached.rollbackState,
-          failedBundles: persistedState.failedBundles ?? cached.rollbackState?.failedBundles,
-        }
-      : persistedState;
-  const next: RollbackState = {
-    ...state,
-    activeHash,
-    lastLaunchAt: now,
-  };
-
-  const isCandidate = state.candidateHash === activeHash && state.candidateCommitted !== true;
-  if (isCandidate) {
-    const crashCount = (state.crashCount ?? 0) + 1;
-    next.crashCount = crashCount;
-
-    if (
-      policy.maxCrashCount > 0 &&
-      crashCount >= policy.maxCrashCount
-    ) {
-      await writeState(next);
-      return { shouldRollback: true, reason: 'crash_loop' };
+    if (!await RNFS.exists(STARTUP_RECOVERY_TELEMETRY_CONTEXT_PATH)) {
+      return { schemaVersion: 1, events: {} };
     }
-
+    const parsed = JSON.parse(
+      await RNFS.readFile(STARTUP_RECOVERY_TELEMETRY_CONTEXT_PATH, 'utf8'),
+    ) as RecoveryTelemetryContextState;
+    if (parsed?.schemaVersion !== 1 || !parsed.events || typeof parsed.events !== 'object') {
+      throw new Error('unsupported recovery telemetry context');
+    }
+    return parsed;
+  } catch (error) {
+    console.warn('⚠️ Ignoring malformed BundleDrop recovery telemetry context:', error);
+    return { schemaVersion: 1, events: {} };
   }
-
-  await writeState(next);
-  return { shouldRollback: false };
 }
 
-export async function rollbackToPreviousIfNeeded(
-  policy: Required<RollbackPolicy>,
-  cached?: { currentPointer?: BundlePointer | null; rollbackState?: RollbackState | null },
-): Promise<{ rolledBack: boolean; reason?: FailedBundleReason }> {
-  const decision = await evaluateRollbackOnLaunch(policy, cached);
-  if (!decision.shouldRollback) return { rolledBack: false };
+async function mutateRecoveryTelemetryContexts(
+  mutate: (state: RecoveryTelemetryContextState) => boolean,
+): Promise<RecoveryTelemetryContextState> {
+  let result: RecoveryTelemetryContextState = { schemaVersion: 1, events: {} };
+  const mutation = telemetryContextMutation.then(async () => {
+    result = await readRecoveryTelemetryContexts();
+    if (!mutate(result)) return;
+    await ensureDir(BUNDLE_DROP_ROOT);
+    await atomicWriteJson(STARTUP_RECOVERY_TELEMETRY_CONTEXT_PATH, result);
+  });
+  telemetryContextMutation = mutation.then(() => undefined, () => undefined);
+  await mutation;
+  return result;
+}
 
-  const current = cached?.currentPointer !== undefined ? cached.currentPointer : await readCurrentBundlePointer();
-  const failedHash = current?.hash;
-  const state = (await readState()) || {};
-  if (!failedHash) return { rolledBack: false };
+async function prepareRecoveryTelemetryContexts(
+  events: StartupRecoveryEvent[],
+  failedBundleInfo?: BundleInfo | null,
+): Promise<RecoveryTelemetryContextState> {
+  const pendingEventIds = new Set(events.map(event => event.id));
+  return mutateRecoveryTelemetryContexts(state => {
+    let changed = false;
+    for (const eventId of Object.keys(state.events)) {
+      if (!pendingEventIds.has(eventId)) {
+        delete state.events[eventId];
+        changed = true;
+      }
+    }
+    for (const event of events) {
+      if (
+        !state.events[event.id] &&
+        failedBundleInfo?.hash === event.failedHash
+      ) {
+        state.events[event.id] = {
+          failedHash: event.failedHash,
+          channelName: failedBundleInfo.channelName,
+          runtimeVersion: failedBundleInfo.runtimeVersion,
+        };
+        changed = true;
+      }
+    }
+    return changed;
+  });
+}
 
-  const failedRecord = await buildFailedBundleRecord(failedHash, decision.reason, state);
-  await rollbackToPreviousOrNative();
-  await recordFailedBundle(failedHash, failedRecord);
-  await reportLocalRollback(failedHash, failedRecord).catch(() => undefined);
-  return { rolledBack: true, reason: decision.reason };
+async function removeRecoveryTelemetryContext(eventId: string): Promise<void> {
+  await mutateRecoveryTelemetryContexts(state => {
+    if (!state.events[eventId]) return false;
+    delete state.events[eventId];
+    return true;
+  });
 }
 
 export function getRollbackPolicy(): Required<RollbackPolicy> {
   return bundleDropConfig.rollback;
 }
 
-export async function rollbackToPreviousOrNative(
-  options: { forceNative?: boolean } = {},
-): Promise<{ rolledBack: boolean; toNative?: boolean }> {
-  const [current, previous, state] = await Promise.all([
-    readCurrentBundlePointer(),
-    readPreviousBundlePointer(),
-    readState(),
-  ]);
-  const previousIsFailed = previous ? !!state?.failedBundles?.[previous.hash] : false;
-
-  if (!options.forceNative && previous && previous.hash !== current?.hash && !previousIsFailed) {
-    await writeCurrentBundlePointer({ ...previous, updatedAt: new Date().toISOString() });
-    const metadata = await readBundleMetadata(previous.bundlePath);
-    await updateBundleInfo({
-      hash: previous.hash,
-      bundleVersion: metadata?.bundleVersion,
-      version: metadata?.version,
-      runtimeVersion: metadata?.runtimeVersion,
-      pendingApply: false,
-      installedAt: new Date().toISOString(),
-      lastInstalledReportedHash: previous.hash,
-    });
-
-    await updateState({
-      activeHash: previous.hash,
-      candidateHash: previous.hash,
-      candidateCommitted: true,
-      crashCount: 0,
-      lastGoodHash: previous.hash,
-    });
-
-    return { rolledBack: true };
-  }
-
-  // No previous OTA bundle exists; fall back to native bundle by clearing the active pointer.
-  await deleteCurrentBundlePointer();
-  await deletePreviousBundlePointer();
-  await updateBundleInfo({
-    hash: undefined,
-    bundleVersion: undefined,
-    version: undefined,
-    runtimeVersion: undefined,
-    pendingApply: false,
-    installedAt: new Date().toISOString(),
-  });
-  await updateState({
-    activeHash: undefined,
-    candidateHash: undefined,
-    candidateCommitted: true,
-    crashCount: 0,
-  });
-
-  return { rolledBack: true, toNative: true };
+export async function activateStartupCandidate(
+  hash: string,
+): Promise<StartupCandidateActivation | null> {
+  return activateStartupCandidateNative(hash, getRollbackPolicy());
 }
 
-async function readJsonIfExists<T>(path: string): Promise<T | null> {
-  try {
-    if (!(await RNFS.exists(path))) return null;
-    const raw = await RNFS.readFile(path, 'utf8');
-    return JSON.parse(raw) as T;
-  } catch {
-    return null;
-  }
+export async function reportActiveBundleHealthy(): Promise<boolean> {
+  const attempt = getStartupRecoveryAttemptNative();
+  if (!attempt) return false;
+  return markStartupHealthyNative(attempt);
 }
 
-async function readBundleMetadata(bundlePath: string): Promise<{
-  bundleVersion?: number;
-  version?: string;
-  runtimeVersion?: string;
-} | null> {
-  const dir = bundlePath.substring(0, bundlePath.lastIndexOf('/'));
-  const manifest = await readJsonIfExists<BundleManifest>(`${dir}/${BUNDLE_MANIFEST}`);
-  const metadataFile = platform === 'android' ? 'metadata-android.json' : 'metadata-ios.json';
-  const parsed = await readJsonIfExists<Record<string, unknown>>(`${dir}/${metadataFile}`);
+export async function readStartupRecoveryState(): Promise<StartupRecoveryState | null> {
+  return getStartupRecoveryStateNative();
+}
 
-  if (!manifest && !parsed) {
-    return null;
-  }
+export async function getFailedBundleHashes(
+  cachedState?: StartupRecoveryState | null,
+): Promise<string[]> {
+  const state = cachedState === undefined ? await readStartupRecoveryState() : cachedState;
+  return [...(state?.quarantinedHashes || [])];
+}
+
+export async function isBundleHashFailed(hash?: string | null): Promise<boolean> {
+  if (!hash) return false;
+  return (await getFailedBundleHashes()).includes(hash);
+}
+
+export async function syncVerifiedRevokedHashes(hashes: string[]): Promise<boolean> {
+  return setStartupRecoveryRevokedHashesNative(hashes);
+}
+
+export async function rollbackStartupBundle(
+  forceEmbedded: boolean,
+): Promise<StartupRollbackResult | null> {
+  return rollbackStartupBundleNative(forceEmbedded);
+}
+
+function recoveryRecord(
+  event: StartupRecoveryEvent,
+  context?: RecoveryTelemetryContext,
+): FailedBundleRecord {
   return {
-    bundleVersion: parsed?.bundleVersion as number | undefined,
-    version: manifest?.version ?? parsed?.version as string | undefined,
-    runtimeVersion: manifest?.runtimeVersion ?? parsed?.runtimeVersion as string | undefined,
+    reason: event.reason,
+    failedAt: event.failedAt,
+    crashCount: event.crashCount,
+    channelName: context?.channelName,
+    runtimeVersion: context?.runtimeVersion,
+    previousHash: event.recoveredHash,
   };
+}
+
+/**
+ * Flush native recovery events without making JS part of the recovery decision.
+ * Native keeps each event durable until its backend report succeeds and JS
+ * acknowledges that exact event id.
+ */
+export async function reconcileStartupRecovery(
+  cachedState?: StartupRecoveryState | null,
+  failedBundleInfo?: BundleInfo | null,
+): Promise<StartupRecoveryState | null> {
+  const state = cachedState === undefined ? await readStartupRecoveryState() : cachedState;
+  if (!state) return null;
+  const telemetryContexts = await prepareRecoveryTelemetryContexts(
+    state.pendingRecoveryEvents,
+    failedBundleInfo,
+  );
+
+  for (const event of state.pendingRecoveryEvents) {
+    try {
+      const telemetryContext = telemetryContexts.events[event.id];
+      await reportLocalRollback(
+        event.failedHash,
+        recoveryRecord(
+          event,
+          telemetryContext?.failedHash === event.failedHash ? telemetryContext : undefined,
+        ),
+      );
+      if (await acknowledgeStartupRecoveryNative(event.id)) {
+        await removeRecoveryTelemetryContext(event.id);
+      }
+    } catch (error) {
+      console.warn(
+        `⚠️ Failed to report BundleDrop startup recovery event ${event.id}:`,
+        error?.toString?.() || error,
+      );
+    }
+  }
+
+  return state;
 }

@@ -39,6 +39,20 @@ class BundleDropOtaResolverTest {
   }
 
   @Test
+  fun `readBundleForHash verifies an installed bundle without trusting a pointer`() {
+    val root = tempFolder.newFolder("bundle-drop-by-hash")
+    val bundleFile = makeBundle(root)
+
+    assertEquals(bundleFile.absolutePath, BundleDropOtaResolver.readBundleForHash(root, validHash))
+    assertEquals("1.0.0", BundleDropOtaResolver.readBundleRuntimeVersion(root, validHash))
+    assertNull(BundleDropOtaResolver.readBundleForHash(root, "not-a-hash"))
+    assertNull(BundleDropOtaResolver.readBundleRuntimeVersion(root, "a".repeat(64)))
+
+    File(bundleFile.parentFile, "main.jsbundle").delete()
+    assertNull(BundleDropOtaResolver.readBundleForHash(root, validHash))
+  }
+
+  @Test
   fun `readCurrentPointer rejects old manifest version hash domain`() {
     val root = tempFolder.newFolder("bundle-drop")
     val oldHash = "95b6ea4efb34687b23a00ca183d892b22a036eae822956e73665935a3c33ac79"

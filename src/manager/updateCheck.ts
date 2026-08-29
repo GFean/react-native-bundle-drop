@@ -15,12 +15,15 @@ import type {
   OtaResolveResponse,
 } from '../api/types';
 import { defaultChannel } from '../context';
-import { readCurrentBundlePointer } from '../fs/bundlePointer';
+import { readCurrentBundleHash } from '../fs/bundlePointer';
 import { getOrCreateInstallId } from '../fs/installId';
 import { getCurrentUserProperties } from '../fs/userProperties';
 import { getBundleDropRuntimeConfig } from '../runtime/initState';
 import { getFailedBundleHashes, isBundleHashFailed } from './rollbackState';
-import { getDownloadedBundlePathNative } from '../native/bundleDropNative';
+import {
+  getDownloadedBundlePathNative,
+  getStartupRecoverySelectedHashNative,
+} from '../native/bundleDropNative';
 import { advertisedPatchAlgorithms } from '../patch-engine/patchOperations';
 import {
   fetchRuntimeDeliveryManifest,
@@ -99,8 +102,9 @@ export async function getAvailableChannels(): Promise<string[]> {
 }
 
 async function readResolveContext(channelName: string): Promise<RuntimeDeliveryResolveContext> {
-  const [currentPtr, nativeBundlePath, userProperties, installId, rejectedHashes] = await Promise.all([
-    readCurrentBundlePointer(),
+  const selectedHash = getStartupRecoverySelectedHashNative();
+  const [pointerHash, nativeBundlePath, userProperties, installId, rejectedHashes] = await Promise.all([
+    readCurrentBundleHash(),
     getDownloadedBundlePathNative(),
     getCurrentUserProperties(),
     getOrCreateInstallId(),
@@ -111,7 +115,12 @@ async function readResolveContext(channelName: string): Promise<RuntimeDeliveryR
     .catch(() => false);
   return {
     channelName,
-    currentHash: nativeBundlePath && currentPtr?.hash ? currentPtr.hash : null,
+    // Only adapters that predate startupRecoverySelectedHash infer the running
+    // identity from passive eligibility. New adapters distinguish embedded
+    // selection from an OTA that became ineligible after this runtime started.
+    currentHash: selectedHash === undefined
+      ? nativeBundlePath && pointerHash ? pointerHash : null
+      : selectedHash,
     rejectedHashes,
     installId,
     patchAlgorithms: advertisedPatchAlgorithms(supportsXdelta),

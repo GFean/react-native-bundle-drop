@@ -1,5 +1,6 @@
 import fs from 'fs-extra';
 import path from 'path';
+import { isDeepStrictEqual } from 'util';
 import {
   inspectProjectFile,
   removeProjectFile,
@@ -9,9 +10,15 @@ import {
 export const RUNTIME_DELIVERY_BOOTSTRAP_SCHEMA_VERSION = 1;
 export const RUNTIME_DELIVERY_BOOTSTRAP_PATH = path.join(
   '.bundle-drop',
+  'runtime-delivery.lock.json',
+);
+export const LEGACY_RUNTIME_DELIVERY_BOOTSTRAP_PATH = path.join(
+  '.bundle-drop',
   'runtime-delivery.generated.json',
 );
 export const RUNTIME_DELIVERY_BOOTSTRAP_GITIGNORE_MARKER =
+  '!.bundle-drop/runtime-delivery.lock.json';
+export const LEGACY_RUNTIME_DELIVERY_BOOTSTRAP_GITIGNORE_MARKER =
   '!.bundle-drop/runtime-delivery.generated.json';
 
 const RUNTIME_DELIVERY_BOOTSTRAP_GITIGNORE_BLOCK = [
@@ -42,10 +49,17 @@ export type RuntimeDeliveryProjectIdentity = {
   orgId?: string;
 };
 
-export type GeneratedRuntimeDeliveryBootstrap = {
+export type RuntimeDeliveryBootstrapLockfile = {
   schemaVersion: typeof RUNTIME_DELIVERY_BOOTSTRAP_SCHEMA_VERSION;
   project: RuntimeDeliveryProjectIdentity;
   runtimeDelivery: RuntimeDeliveryConfig;
+};
+
+export type RuntimeDeliveryBootstrapSource = 'lock' | 'legacy' | 'matching-dual';
+
+export type RuntimeDeliveryBootstrapReadResult = {
+  bootstrap: RuntimeDeliveryBootstrapLockfile;
+  source: RuntimeDeliveryBootstrapSource;
 };
 
 const isRecord = (value: unknown): value is Record<string, unknown> =>
@@ -127,10 +141,10 @@ export function normalizeRuntimeDeliveryBootstrap(
   };
 }
 
-export function createGeneratedRuntimeDeliveryBootstrap(params: {
+export function createRuntimeDeliveryBootstrapLockfile(params: {
   identity: RuntimeDeliveryProjectIdentity;
   runtimeDelivery: unknown;
-}): GeneratedRuntimeDeliveryBootstrap | undefined {
+}): RuntimeDeliveryBootstrapLockfile | undefined {
   const runtimeDelivery = normalizeRuntimeDeliveryBootstrap(params.runtimeDelivery);
   const serverUrl = normalizeHttpUrl(params.identity.serverUrl);
   const orgSlug = params.identity.orgSlug.trim();
@@ -152,10 +166,10 @@ export function createGeneratedRuntimeDeliveryBootstrap(params: {
   };
 }
 
-export function parseGeneratedRuntimeDeliveryBootstrap(
+export function parseRuntimeDeliveryBootstrapLockfile(
   value: unknown,
   expectedIdentity?: RuntimeDeliveryProjectIdentity,
-): GeneratedRuntimeDeliveryBootstrap {
+): RuntimeDeliveryBootstrapLockfile {
   if (!isRecord(value) || value.schemaVersion !== RUNTIME_DELIVERY_BOOTSTRAP_SCHEMA_VERSION) {
     throw new Error(
       `Runtime delivery bootstrap must use schemaVersion ${RUNTIME_DELIVERY_BOOTSTRAP_SCHEMA_VERSION}.`,
@@ -177,7 +191,7 @@ export function parseGeneratedRuntimeDeliveryBootstrap(
     throw new Error('Runtime delivery bootstrap contains an invalid stable project identity.');
   }
 
-  const bootstrap = createGeneratedRuntimeDeliveryBootstrap({
+  const bootstrap = createRuntimeDeliveryBootstrapLockfile({
     identity: {
       serverUrl: typeof value.project.serverUrl === 'string' ? value.project.serverUrl : '',
       orgSlug: typeof value.project.orgSlug === 'string' ? value.project.orgSlug : '',
@@ -219,17 +233,33 @@ export function runtimeDeliveryBootstrapPath(projectRoot: string): string {
   return path.join(projectRoot, RUNTIME_DELIVERY_BOOTSTRAP_PATH);
 }
 
+export function legacyRuntimeDeliveryBootstrapPath(projectRoot: string): string {
+  return path.join(projectRoot, LEGACY_RUNTIME_DELIVERY_BOOTSTRAP_PATH);
+}
+
+const RUNTIME_DELIVERY_MANAGED_GITIGNORE_LINES = new Set([
+  '# Bundle Drop: commit the public trust bootstrap; ignore generated runtime artifacts.',
+  '!.bundle-drop/',
+  '.bundle-drop/*',
+  RUNTIME_DELIVERY_BOOTSTRAP_GITIGNORE_MARKER,
+  LEGACY_RUNTIME_DELIVERY_BOOTSTRAP_GITIGNORE_MARKER,
+]);
+
 export function addRuntimeDeliveryBootstrapGitignoreRules(content: string): string {
-  if (content.includes(RUNTIME_DELIVERY_BOOTSTRAP_GITIGNORE_MARKER)) return content;
-  const prefix = content.trimEnd();
+  const prefix = content
+    .split('\n')
+    .filter(line => !RUNTIME_DELIVERY_MANAGED_GITIGNORE_LINES.has(line.trim()))
+    .join('\n')
+    .trimEnd();
   return `${prefix}${prefix ? '\n\n' : ''}${RUNTIME_DELIVERY_BOOTSTRAP_GITIGNORE_BLOCK}\n`;
 }
 
-export function readGeneratedRuntimeDeliveryBootstrap(params: {
+function readRuntimeDeliveryBootstrapFile(params: {
   projectRoot: string;
+  relativePath: string;
   expectedIdentity?: RuntimeDeliveryProjectIdentity;
-}): GeneratedRuntimeDeliveryBootstrap | null {
-  const bootstrapPath = runtimeDeliveryBootstrapPath(params.projectRoot);
+}): RuntimeDeliveryBootstrapLockfile | null {
+  const bootstrapPath = path.join(params.projectRoot, params.relativePath);
   if (!fs.existsSync(bootstrapPath)) return null;
 
   let value: unknown;
@@ -238,35 +268,94 @@ export function readGeneratedRuntimeDeliveryBootstrap(params: {
   } catch {
     throw new Error(`Runtime delivery bootstrap is not valid JSON: ${bootstrapPath}`);
   }
-  return parseGeneratedRuntimeDeliveryBootstrap(value, params.expectedIdentity);
+  return parseRuntimeDeliveryBootstrapLockfile(value, params.expectedIdentity);
 }
 
-export function serializeGeneratedRuntimeDeliveryBootstrap(
-  bootstrap: GeneratedRuntimeDeliveryBootstrap,
+export function readRuntimeDeliveryLockfile(params: {
+  projectRoot: string;
+  expectedIdentity?: RuntimeDeliveryProjectIdentity;
+}): RuntimeDeliveryBootstrapLockfile | null {
+  return readRuntimeDeliveryBootstrapFile({
+    ...params,
+    relativePath: RUNTIME_DELIVERY_BOOTSTRAP_PATH,
+  });
+}
+
+export function inspectRuntimeDeliveryBootstrap(params: {
+  projectRoot: string;
+  expectedIdentity?: RuntimeDeliveryProjectIdentity;
+}): RuntimeDeliveryBootstrapReadResult | null {
+  const current = readRuntimeDeliveryLockfile(params);
+  const legacy = readRuntimeDeliveryBootstrapFile({
+    ...params,
+    relativePath: LEGACY_RUNTIME_DELIVERY_BOOTSTRAP_PATH,
+  });
+
+  if (current && legacy) {
+    if (!isDeepStrictEqual(current, legacy)) {
+      throw new Error(
+        'Runtime delivery lockfile and legacy bootstrap differ. Run `bundle-drop sync` to repair them.',
+      );
+    }
+    return { bootstrap: current, source: 'matching-dual' };
+  }
+  if (current) return { bootstrap: current, source: 'lock' };
+  if (legacy) return { bootstrap: legacy, source: 'legacy' };
+  return null;
+}
+
+export function readRuntimeDeliveryBootstrap(params: {
+  projectRoot: string;
+  expectedIdentity?: RuntimeDeliveryProjectIdentity;
+}): RuntimeDeliveryBootstrapLockfile | null {
+  return inspectRuntimeDeliveryBootstrap(params)?.bootstrap ?? null;
+}
+
+export function serializeRuntimeDeliveryBootstrapLockfile(
+  bootstrap: RuntimeDeliveryBootstrapLockfile,
 ): string {
   return `${JSON.stringify(bootstrap, null, 2)}\n`;
 }
 
-export async function writeGeneratedRuntimeDeliveryBootstrap(params: {
+export async function writeRuntimeDeliveryBootstrapLockfile(params: {
   projectRoot: string;
-  bootstrap: GeneratedRuntimeDeliveryBootstrap;
+  bootstrap: RuntimeDeliveryBootstrapLockfile;
 }): Promise<string> {
   const bootstrapPath = runtimeDeliveryBootstrapPath(params.projectRoot);
   writeProjectFileAtomically(
     params.projectRoot,
     RUNTIME_DELIVERY_BOOTSTRAP_PATH,
-    serializeGeneratedRuntimeDeliveryBootstrap(params.bootstrap),
+    serializeRuntimeDeliveryBootstrapLockfile(params.bootstrap),
   );
   return bootstrapPath;
 }
 
-export async function removeGeneratedRuntimeDeliveryBootstrap(
+export async function removeRuntimeDeliveryBootstrapLockfile(
   projectRoot: string,
 ): Promise<string | null> {
   const bootstrapPath = runtimeDeliveryBootstrapPath(projectRoot);
   if (!inspectProjectFile(projectRoot, RUNTIME_DELIVERY_BOOTSTRAP_PATH).exists) return null;
   removeProjectFile(projectRoot, RUNTIME_DELIVERY_BOOTSTRAP_PATH);
   return bootstrapPath;
+}
+
+export async function removeLegacyRuntimeDeliveryBootstrap(
+  projectRoot: string,
+): Promise<string | null> {
+  const bootstrapPath = legacyRuntimeDeliveryBootstrapPath(projectRoot);
+  if (!inspectProjectFile(projectRoot, LEGACY_RUNTIME_DELIVERY_BOOTSTRAP_PATH).exists) return null;
+  removeProjectFile(projectRoot, LEGACY_RUNTIME_DELIVERY_BOOTSTRAP_PATH);
+  return bootstrapPath;
+}
+
+export async function removeAllRuntimeDeliveryBootstraps(
+  projectRoot: string,
+): Promise<string[]> {
+  const removed = await Promise.all([
+    removeRuntimeDeliveryBootstrapLockfile(projectRoot),
+    removeLegacyRuntimeDeliveryBootstrap(projectRoot),
+  ]);
+  return removed.filter((file): file is string => Boolean(file));
 }
 
 export async function ensureRuntimeDeliveryBootstrapGitignore(

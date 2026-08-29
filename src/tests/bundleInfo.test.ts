@@ -1,5 +1,11 @@
-import { readBundleInfo, updateBundleInfo, writeBundleInfo } from '../bundleInfo';
-import { getMockFile, mockWriteFile, resetNativeFsMocks, setMockFile } from './mocks/native/fs';
+import { deleteBundleInfo, readBundleInfo, updateBundleInfo, writeBundleInfo } from '../bundleInfo';
+import {
+  getMockFile,
+  mockUnlink,
+  mockWriteFile,
+  resetNativeFsMocks,
+  setMockFile,
+} from './mocks/native/fs';
 
 jest.mock('../native/fs', () => require('./mocks/native/fs'));
 
@@ -72,6 +78,27 @@ describe('bundleInfo', () => {
       );
     } finally {
       consoleSpy.mockRestore();
+    }
+  });
+
+  it('deletes persisted bundle info and tolerates missing files and delete failures', async () => {
+    setMockFile(BUNDLE_INFO_PATH, JSON.stringify({ hash: 'hash-1' }));
+    await deleteBundleInfo();
+    expect(getMockFile(BUNDLE_INFO_PATH)).toBeUndefined();
+
+    await expect(deleteBundleInfo()).resolves.toBeUndefined();
+
+    setMockFile(BUNDLE_INFO_PATH, JSON.stringify({ hash: 'hash-2' }));
+    mockUnlink.mockRejectedValueOnce(new Error('disk unavailable'));
+    const warnSpy = jest.spyOn(console, 'warn').mockImplementation(() => undefined);
+    try {
+      await expect(deleteBundleInfo()).resolves.toBeUndefined();
+      expect(warnSpy).toHaveBeenCalledWith(
+        '⚠️ Failed to delete bundle-info.json',
+        expect.any(Error),
+      );
+    } finally {
+      warnSpy.mockRestore();
     }
   });
 });

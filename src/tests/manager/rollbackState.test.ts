@@ -1,1081 +1,361 @@
-import {
-  commitActiveBundle,
-  evaluateRollbackOnLaunch,
-  getRollbackPolicy,
-  isBundleHashFailed,
-  markCandidateActivated,
-  readRollbackState,
-  reportActiveBundleHealthy,
-  rollbackToPreviousIfNeeded,
-  rollbackToPreviousOrNative,
-} from '../../manager/rollbackState';
-import { reportLocalRollback } from '../../manager/reporting';
-import { resetContextMocks, setMockConfig, setMockPlatform } from '../mocks/context';
-import {
-  getMockFile,
-  mockReadFile,
-  mockUnlink,
-  mockWriteFile,
-  readMockJson,
-  resetNativeFsMocks,
-  setMockFile,
-} from '../mocks/native/fs';
-
-jest.mock('../../context', () => require('../mocks/context'));
 jest.mock('../../native/fs', () => require('../mocks/native/fs'));
-jest.mock('../../manager/reporting', () => ({
-  reportLocalRollback: jest.fn(async () => undefined),
-}));
 
-const CURRENT_POINTER_PATH = '/mock/doc/bundle-drop/current.json';
-const PREVIOUS_POINTER_PATH = '/mock/doc/bundle-drop/previous.json';
-const STATE_PATH = '/mock/doc/bundle-drop/state.json';
-const BUNDLE_INFO_PATH = '/mock/doc/bundle-info.json';
+type RollbackStateModule = typeof import('../../manager/rollbackState');
 
-const DEFAULT_POLICY = { maxCrashCount: 3, healthCheckMode: 'auto' as const, healthyAfterSec: 0 };
+import { resetNativeFsMocks } from '../mocks/native/fs';
 
-describe('manager/rollbackState', () => {
-  beforeEach(() => {
-    resetContextMocks();
-    resetNativeFsMocks();
-    (reportLocalRollback as jest.Mock).mockReset();
-    (reportLocalRollback as jest.Mock).mockResolvedValue(undefined);
+const ACTIVE_HASH = 'a'.repeat(64);
+const FAILED_HASH = 'b'.repeat(64);
+const STABLE_HASH = 'c'.repeat(64);
+const CANDIDATE_HASH = 'd'.repeat(64);
+
+const RECOVERY_STATE = {
+  protocolVersion: 1 as const,
+  revision: 7,
+  phase: 'launching' as const,
+  activeAttempt: {
+    hash: ACTIVE_HASH,
+    attemptId: 'attempt-7',
+    status: 'launching' as const,
+    unacknowledgedLaunchCount: 1,
+  },
+  quarantinedHashes: [FAILED_HASH],
+  pendingRecoveryEvents: [
+    {
+      id: 'event-1',
+      failedHash: FAILED_HASH,
+      recoveryTarget: 'previous' as const,
+      recoveredHash: STABLE_HASH,
+      crashCount: 3,
+      reason: 'crash_loop' as const,
+      failedAt: 1_700_000_000,
+    },
+  ],
+};
+
+function loadRollbackState(options?: {
+  attempt?: { hash: string; attemptId: string } | null;
+  markHealthyResult?: boolean;
+  recoveryState?: typeof RECOVERY_STATE | null;
+  reportError?: unknown;
+}) {
+  jest.resetModules();
+
+  const activateStartupCandidateNative = jest.fn(async (hash: string) => ({
+    hash,
+    bundlePath: `/bundles/${hash}/main.jsbundle`,
+  }));
+  const getStartupRecoveryAttemptNative = jest.fn(() =>
+    options?.attempt === undefined
+      ? { hash: ACTIVE_HASH, attemptId: 'attempt-7' }
+      : options.attempt,
+  );
+  const markStartupHealthyNative = jest.fn(async () => options?.markHealthyResult ?? true);
+  const getStartupRecoveryStateNative = jest.fn(async () =>
+    options && 'recoveryState' in options ? options.recoveryState ?? null : RECOVERY_STATE,
+  );
+  const setStartupRecoveryRevokedHashesNative = jest.fn(async () => true);
+  const rollbackStartupBundleNative = jest.fn(async (forceEmbedded: boolean) => ({
+    rolledBack: true,
+    toEmbedded: forceEmbedded,
+    ...(forceEmbedded ? {} : { hash: STABLE_HASH }),
+  }));
+  const acknowledgeStartupRecoveryNative = jest.fn(async () => true);
+  const reportLocalRollback = jest.fn(async () => {
+    if (options && 'reportError' in options) throw options.reportError;
   });
 
-  it('marks a newly activated candidate and tracks the previous hash', async () => {
-    const nowSpy = jest.spyOn(Date, 'now').mockReturnValue(1_000_000);
-
-    setMockFile(
-      PREVIOUS_POINTER_PATH,
-      JSON.stringify({
-        hash: '1111111111111111111111111111111111111111111111111111111111111111',
-        bundlePath: '/mock/doc/bundle-drop/bundles/1111111111111111111111111111111111111111111111111111111111111111/main.jsbundle',
-        updatedAt: '2026-03-01T00:00:00.000Z',
-      })
-    );
-
-    await markCandidateActivated('2222222222222222222222222222222222222222222222222222222222222222');
-
-    expect(readMockJson(STATE_PATH)).toEqual({
-      activeHash: '2222222222222222222222222222222222222222222222222222222222222222',
-      candidateHash: '2222222222222222222222222222222222222222222222222222222222222222',
-      candidateActivatedAt: 1000,
-      candidateCommitted: false,
-      crashCount: 0,
-      lastLaunchAt: 1000,
-      lastGoodHash: '1111111111111111111111111111111111111111111111111111111111111111',
-    });
-
-    nowSpy.mockRestore();
-  });
-
-  it('returns null when rollback state is missing or malformed', async () => {
-    await expect(readRollbackState()).resolves.toBeNull();
-
-    setMockFile(STATE_PATH, '{invalid json');
-    await expect(readRollbackState()).resolves.toBeNull();
-  });
-
-  it('commits the active bundle as the last good hash', async () => {
-    const nowSpy = jest.spyOn(Date, 'now').mockReturnValue(2_000_000);
-
-    setMockFile(
-      CURRENT_POINTER_PATH,
-      JSON.stringify({
-        hash: '3333333333333333333333333333333333333333333333333333333333333333',
-        bundlePath: '/mock/doc/bundle-drop/bundles/3333333333333333333333333333333333333333333333333333333333333333/main.jsbundle',
-        updatedAt: '2026-03-01T00:00:00.000Z',
-      })
-    );
-    setMockFile(
-      STATE_PATH,
-      JSON.stringify({
-        candidateHash: '3333333333333333333333333333333333333333333333333333333333333333',
-        candidateCommitted: false,
-      }),
-    );
-
-    await commitActiveBundle();
-
-    expect(readMockJson(STATE_PATH)).toEqual(
-      expect.objectContaining({
-        activeHash: '3333333333333333333333333333333333333333333333333333333333333333',
-        candidateHash: '3333333333333333333333333333333333333333333333333333333333333333',
-        candidateCommitted: true,
-        crashCount: 0,
-        lastGoodHash: '3333333333333333333333333333333333333333333333333333333333333333',
-      })
-    );
-
-    nowSpy.mockRestore();
-  });
-
-  it('commits cached pointers and skips empty current pointers', async () => {
-    const nowSpy = jest.spyOn(Date, 'now').mockReturnValue(3_000_000);
-
-    await commitActiveBundle({ currentPointer: null });
-    expect(readMockJson(STATE_PATH)).toBeNull();
-
-    setMockFile(
-      STATE_PATH,
-      JSON.stringify({
-        candidateHash: '4444444444444444444444444444444444444444444444444444444444444444',
-        candidateCommitted: false,
-      }),
-    );
-    await commitActiveBundle({
-      currentPointer: {
-        hash: '4444444444444444444444444444444444444444444444444444444444444444',
-        bundlePath: '/mock/doc/bundle-drop/bundles/4444444444444444444444444444444444444444444444444444444444444444/main.jsbundle',
-        updatedAt: '2026-03-01T00:00:00.000Z',
-      },
-    });
-    expect(readMockJson(STATE_PATH)).toEqual(
-      expect.objectContaining({
-        activeHash: '4444444444444444444444444444444444444444444444444444444444444444',
-        candidateHash: '4444444444444444444444444444444444444444444444444444444444444444',
-        candidateCommitted: true,
-        lastGoodHash: '4444444444444444444444444444444444444444444444444444444444444444',
-      }),
-    );
-
-    nowSpy.mockRestore();
-  });
-
-  it('does not mark non-candidates healthy and ignores mismatched expected hashes', async () => {
-    await expect(reportActiveBundleHealthy({ currentPointer: null })).resolves.toBe(false);
-    await expect(isBundleHashFailed(null)).resolves.toBe(false);
-
-    setMockFile(
-      STATE_PATH,
-      JSON.stringify({
-        candidateHash: '3333333333333333333333333333333333333333333333333333333333333333',
-        candidateCommitted: false,
-      }),
-    );
-
-    await expect(
-      reportActiveBundleHealthy(
-        {
-          currentPointer: {
-            hash: '3333333333333333333333333333333333333333333333333333333333333333',
-            bundlePath: '/mock/doc/bundle-drop/bundles/3333333333333333333333333333333333333333333333333333333333333333/main.jsbundle',
-            updatedAt: '2026-03-01T00:00:00.000Z',
-          },
-        },
-        'other-hash',
-      ),
-    ).resolves.toBe(false);
-
-    setMockFile(
-      STATE_PATH,
-      JSON.stringify({
-        candidateHash: 'other-hash',
-        candidateCommitted: false,
-      }),
-    );
-    await expect(
-      reportActiveBundleHealthy({
-        currentPointer: {
-          hash: '3333333333333333333333333333333333333333333333333333333333333333',
-          bundlePath: '/mock/doc/bundle-drop/bundles/3333333333333333333333333333333333333333333333333333333333333333/main.jsbundle',
-          updatedAt: '2026-03-01T00:00:00.000Z',
-        },
-      }),
-    ).resolves.toBe(false);
-
-    resetNativeFsMocks();
-    setMockFile(
-      CURRENT_POINTER_PATH,
-      JSON.stringify({
-        hash: '3333333333333333333333333333333333333333333333333333333333333333',
-        bundlePath: '/mock/doc/bundle-drop/bundles/3333333333333333333333333333333333333333333333333333333333333333/main.jsbundle',
-        updatedAt: '2026-03-01T00:00:00.000Z',
-      }),
-    );
-    await expect(reportActiveBundleHealthy()).resolves.toBe(false);
-  });
-
-  it('requests rollback once failed candidate launches reach the crash limit', async () => {
-    const nowSpy = jest.spyOn(Date, 'now').mockReturnValue(10_000_000);
-
-    setMockFile(
-      CURRENT_POINTER_PATH,
-      JSON.stringify({
-        hash: '3333333333333333333333333333333333333333333333333333333333333333',
-        bundlePath: '/mock/doc/bundle-drop/bundles/3333333333333333333333333333333333333333333333333333333333333333/main.jsbundle',
-        updatedAt: '2026-03-01T00:00:00.000Z',
-      })
-    );
-    setMockFile(
-      STATE_PATH,
-      JSON.stringify({
-        candidateHash: '3333333333333333333333333333333333333333333333333333333333333333',
-        candidateCommitted: false,
-        crashCount: 1,
-        candidateActivatedAt: 10000,
-      })
-    );
-
-    await expect(
-      evaluateRollbackOnLaunch({
-        maxCrashCount: 2,
-        healthCheckMode: 'auto',
-        healthyAfterSec: 0,
-      })
-    ).resolves.toEqual({
-      shouldRollback: true,
-      reason: 'crash_loop',
-    });
-
-    setMockFile(
-      STATE_PATH,
-      JSON.stringify({
-        candidateHash: '3333333333333333333333333333333333333333333333333333333333333333',
-        candidateCommitted: false,
-        crashCount: 0,
-        candidateActivatedAt: 9500,
-      })
-    );
-
-    await expect(
-      evaluateRollbackOnLaunch({
-        maxCrashCount: 5,
-        healthCheckMode: 'auto',
-        healthyAfterSec: 0,
-      })
-    ).resolves.toEqual({ shouldRollback: false });
-
-    nowSpy.mockRestore();
-  });
-
-  it('returns no rollback when there is no active pointer or the crash limit is not reached', async () => {
-    const nowSpy = jest.spyOn(Date, 'now').mockReturnValue(40_000_000);
-
-    await expect(
-      evaluateRollbackOnLaunch(DEFAULT_POLICY, {
-        currentPointer: null,
-      }),
-    ).resolves.toEqual({ shouldRollback: false });
-    expect(readMockJson(STATE_PATH)).toBeNull();
-
-    await expect(
-      evaluateRollbackOnLaunch(DEFAULT_POLICY, {
-        currentPointer: {
-          hash: '3333333333333333333333333333333333333333333333333333333333333333',
-          bundlePath: '/mock/doc/bundle-drop/bundles/3333333333333333333333333333333333333333333333333333333333333333/main.jsbundle',
-          updatedAt: '2026-03-01T00:00:00.000Z',
-        },
-        rollbackState: {
-          candidateHash: '3333333333333333333333333333333333333333333333333333333333333333',
-          candidateCommitted: false,
-          crashCount: 1,
-        },
-      }),
-    ).resolves.toEqual({ shouldRollback: false });
-    expect(readMockJson(STATE_PATH)).toEqual(
-      expect.objectContaining({
-        activeHash: '3333333333333333333333333333333333333333333333333333333333333333',
-        crashCount: 2,
-        lastLaunchAt: 40000,
-      }),
-    );
-
-    nowSpy.mockRestore();
-  });
-
-  it('returns no rollback for safe launches and exposes the configured rollback policy', async () => {
-    const nowSpy = jest.spyOn(Date, 'now').mockReturnValue(50_000_000);
-
-    setMockConfig({
+  jest.doMock('../../context', () => ({
+    BUNDLE_DROP_ROOT: '/mock/doc/bundle-drop',
+    bundleDropConfig: {
       rollback: {
-        maxCrashCount: 7,
+        maxCrashCount: 2,
         healthCheckMode: 'manual',
-        healthyAfterSec: 12,
+        healthyAfterSec: 9,
       },
+    },
+  }));
+  jest.doMock('../../native/bundleDropNative', () => ({
+    acknowledgeStartupRecoveryNative,
+    activateStartupCandidateNative,
+    getStartupRecoveryAttemptNative,
+    getStartupRecoveryStateNative,
+    markStartupHealthyNative,
+    rollbackStartupBundleNative,
+    setStartupRecoveryRevokedHashesNative,
+  }));
+  jest.doMock('../../manager/reporting', () => ({
+    reportLocalRollback,
+  }));
+
+  return {
+    module: require('../../manager/rollbackState') as RollbackStateModule,
+    mocks: {
+      acknowledgeStartupRecoveryNative,
+      activateStartupCandidateNative,
+      getStartupRecoveryStateNative,
+      markStartupHealthyNative,
+      reportLocalRollback,
+      rollbackStartupBundleNative,
+      setStartupRecoveryRevokedHashesNative,
+    },
+  };
+}
+
+describe('manager/rollbackState native recovery coordination', () => {
+  beforeEach(resetNativeFsMocks);
+
+  afterEach(() => {
+    jest.resetModules();
+    jest.unmock('../../context');
+    jest.unmock('../../native/bundleDropNative');
+    jest.unmock('../../manager/reporting');
+    jest.restoreAllMocks();
+  });
+
+  it('activates candidates with the public rollback configuration', async () => {
+    const { module, mocks } = loadRollbackState();
+
+    await expect(module.activateStartupCandidate(CANDIDATE_HASH)).resolves.toEqual({
+      hash: CANDIDATE_HASH,
+      bundlePath: `/bundles/${CANDIDATE_HASH}/main.jsbundle`,
     });
-    expect(getRollbackPolicy()).toEqual({
-      maxCrashCount: 7,
+
+    expect(mocks.activateStartupCandidateNative).toHaveBeenCalledWith(CANDIDATE_HASH, {
+      maxCrashCount: 2,
       healthCheckMode: 'manual',
-      healthyAfterSec: 12,
+      healthyAfterSec: 9,
+    });
+  });
+
+  it('reports health only for the launch attempt captured by native', async () => {
+    const { module, mocks } = loadRollbackState({ markHealthyResult: false });
+
+    await expect(module.reportActiveBundleHealthy()).resolves.toBe(false);
+    expect(mocks.markStartupHealthyNative).toHaveBeenCalledWith({
+      hash: ACTIVE_HASH,
+      attemptId: 'attempt-7',
+    });
+  });
+
+  it('does not report health when native did not capture an OTA launch attempt', async () => {
+    const { module, mocks } = loadRollbackState({ attempt: null });
+
+    await expect(module.reportActiveBundleHealthy()).resolves.toBe(false);
+    expect(mocks.markStartupHealthyNative).not.toHaveBeenCalled();
+  });
+
+  it('uses native quarantine and native rollback/revocation commands', async () => {
+    const { module, mocks } = loadRollbackState();
+
+    await expect(module.getFailedBundleHashes()).resolves.toEqual([FAILED_HASH]);
+    await expect(module.isBundleHashFailed(FAILED_HASH)).resolves.toBe(true);
+    await expect(module.syncVerifiedRevokedHashes([CANDIDATE_HASH])).resolves.toBe(true);
+    await expect(module.rollbackStartupBundle(true)).resolves.toEqual({
+      rolledBack: true,
+      toEmbedded: true,
     });
 
-    await expect(
-      rollbackToPreviousIfNeeded(DEFAULT_POLICY, {
-        currentPointer: {
-          hash: '3333333333333333333333333333333333333333333333333333333333333333',
-          bundlePath: '/mock/doc/bundle-drop/bundles/3333333333333333333333333333333333333333333333333333333333333333/main.jsbundle',
-          updatedAt: '2026-03-01T00:00:00.000Z',
-        },
-        rollbackState: {
-          candidateHash: 'other-hash',
-          candidateCommitted: false,
-        },
-      }),
-    ).resolves.toEqual({ rolledBack: false });
-    expect(readMockJson(STATE_PATH)).toEqual(
-      expect.objectContaining({
-        activeHash: '3333333333333333333333333333333333333333333333333333333333333333',
-        lastLaunchAt: 50000,
-      }),
-    );
-
-    nowSpy.mockRestore();
+    expect(mocks.setStartupRecoveryRevokedHashesNative).toHaveBeenCalledWith([CANDIDATE_HASH]);
+    expect(mocks.rollbackStartupBundleNative).toHaveBeenCalledWith(true);
   });
 
-  it('reads persisted rollback state and increments the candidate launch count', async () => {
-    const nowSpy = jest.spyOn(Date, 'now').mockReturnValue(60_000_000);
+  it('accepts cached recovery state and handles missing hashes and snapshots', async () => {
+    const { module, mocks } = loadRollbackState({ recoveryState: null });
 
-    setMockFile(
-      STATE_PATH,
-      JSON.stringify({
-        candidateHash: '3333333333333333333333333333333333333333333333333333333333333333',
-        candidateCommitted: false,
-        candidateActivatedAt: 59990,
-      }),
-    );
+    await expect(module.getFailedBundleHashes(RECOVERY_STATE)).resolves.toEqual([FAILED_HASH]);
+    await expect(module.getFailedBundleHashes(null)).resolves.toEqual([]);
+    await expect(module.isBundleHashFailed()).resolves.toBe(false);
+    await expect(module.reconcileStartupRecovery()).resolves.toBeNull();
 
-    await expect(
-      evaluateRollbackOnLaunch(DEFAULT_POLICY, {
-        currentPointer: {
-          hash: '3333333333333333333333333333333333333333333333333333333333333333',
-          bundlePath: '/mock/doc/bundle-drop/bundles/3333333333333333333333333333333333333333333333333333333333333333/main.jsbundle',
-          updatedAt: '2026-03-01T00:00:00.000Z',
-        },
-      }),
-    ).resolves.toEqual({ shouldRollback: false });
-    expect(readMockJson(STATE_PATH)).toEqual(
-      expect.objectContaining({
-        activeHash: '3333333333333333333333333333333333333333333333333333333333333333',
-        crashCount: 1,
-        lastLaunchAt: 60000,
-      }),
-    );
-
-    nowSpy.mockRestore();
+    expect(mocks.getStartupRecoveryStateNative).toHaveBeenCalledTimes(1);
   });
 
-  it('rolls back to the previous OTA bundle and restores metadata', async () => {
-    const nowSpy = jest.spyOn(Date, 'now').mockReturnValue(20_000_000);
+  it('acknowledges a durable recovery event only after telemetry succeeds', async () => {
+    const { module, mocks } = loadRollbackState();
 
-    setMockFile(
-      BUNDLE_INFO_PATH,
-      JSON.stringify({
-        hash: '3333333333333333333333333333333333333333333333333333333333333333',
-        lastInstalledReportedHash: '3333333333333333333333333333333333333333333333333333333333333333',
-      }),
-    );
-    setMockFile(
-      PREVIOUS_POINTER_PATH,
-      JSON.stringify({
-        hash: '1111111111111111111111111111111111111111111111111111111111111111',
-        bundlePath: '/mock/doc/bundle-drop/bundles/1111111111111111111111111111111111111111111111111111111111111111/main.jsbundle',
-        updatedAt: '2026-03-01T00:00:00.000Z',
-      })
-    );
-    setMockFile(
-      '/mock/doc/bundle-drop/bundles/1111111111111111111111111111111111111111111111111111111111111111/metadata-android.json',
-      JSON.stringify({
-        bundleVersion: 3,
-        version: 'metadata-version',
-        runtimeVersion: 'metadata-runtime',
-      })
-    );
-    setMockFile(
-      '/mock/doc/bundle-drop/bundles/1111111111111111111111111111111111111111111111111111111111111111/bundle-manifest.json',
-      JSON.stringify({
-        manifestVersion: 1,
-        bundleHash: '1111111111111111111111111111111111111111111111111111111111111111',
-        version: '1.0.3',
-        runtimeVersion: '1.0.0',
-      }),
-    );
+    await module.reconcileStartupRecovery(RECOVERY_STATE, {
+      hash: FAILED_HASH,
+      channelName: 'General',
+      runtimeVersion: '1.0.0',
+    });
 
-    await expect(rollbackToPreviousOrNative()).resolves.toEqual({ rolledBack: true });
-
-    expect(readMockJson(CURRENT_POINTER_PATH)).toEqual(
-      expect.objectContaining({
-        hash: '1111111111111111111111111111111111111111111111111111111111111111',
-      })
-    );
-    expect(readMockJson(BUNDLE_INFO_PATH)).toEqual(
-      expect.objectContaining({
-        hash: '1111111111111111111111111111111111111111111111111111111111111111',
-        bundleVersion: 3,
-        version: '1.0.3',
-        runtimeVersion: '1.0.0',
-        pendingApply: false,
-        lastInstalledReportedHash: '1111111111111111111111111111111111111111111111111111111111111111',
-      })
-    );
-    expect(readMockJson(STATE_PATH)).toEqual(
-      expect.objectContaining({
-        activeHash: '1111111111111111111111111111111111111111111111111111111111111111',
-        candidateHash: '1111111111111111111111111111111111111111111111111111111111111111',
-        candidateCommitted: true,
-        lastGoodHash: '1111111111111111111111111111111111111111111111111111111111111111',
-      })
-    );
-
-    nowSpy.mockRestore();
+    expect(mocks.reportLocalRollback).toHaveBeenCalledWith(FAILED_HASH, {
+      reason: 'crash_loop',
+      failedAt: 1_700_000_000,
+      crashCount: 3,
+      channelName: 'General',
+      runtimeVersion: '1.0.0',
+      previousHash: STABLE_HASH,
+    });
+    expect(mocks.acknowledgeStartupRecoveryNative).toHaveBeenCalledWith('event-1');
   });
 
-  it('rolls back through the previous-pointer flow when launch evaluation demands it', async () => {
-    const nowSpy = jest.spyOn(Date, 'now').mockReturnValue(25_000_000);
+  it('acknowledges recovery even when no failed-bundle metadata was captured', async () => {
+    const { module, mocks } = loadRollbackState();
 
-    setMockFile(
-      PREVIOUS_POINTER_PATH,
-      JSON.stringify({
-        hash: '1111111111111111111111111111111111111111111111111111111111111111',
-        bundlePath: '/mock/doc/bundle-drop/bundles/1111111111111111111111111111111111111111111111111111111111111111/main.jsbundle',
-        updatedAt: '2026-03-01T00:00:00.000Z',
-      }),
-    );
-    setMockFile(
-      '/mock/doc/bundle-drop/bundles/1111111111111111111111111111111111111111111111111111111111111111/metadata-android.json',
-      JSON.stringify({
-        bundleVersion: 9,
-        version: '2.0.0',
-        runtimeVersion: '2.0.0',
-      }),
-    );
+    await module.reconcileStartupRecovery(RECOVERY_STATE);
 
-    await expect(
-      rollbackToPreviousIfNeeded(
-        {
-          maxCrashCount: 2,
-          healthCheckMode: 'auto',
-          healthyAfterSec: 0,
-        },
-        {
-          currentPointer: {
-            hash: '3333333333333333333333333333333333333333333333333333333333333333',
-            bundlePath: '/mock/doc/bundle-drop/bundles/3333333333333333333333333333333333333333333333333333333333333333/main.jsbundle',
-            updatedAt: '2026-03-01T00:00:00.000Z',
-          },
-          rollbackState: {
-            candidateHash: '3333333333333333333333333333333333333333333333333333333333333333',
-            candidateCommitted: false,
-            crashCount: 1,
-            candidateActivatedAt: 25000,
-          },
-        },
+    expect(mocks.reportLocalRollback).toHaveBeenCalledWith(FAILED_HASH, {
+      reason: 'crash_loop',
+      failedAt: 1_700_000_000,
+      crashCount: 3,
+      channelName: undefined,
+      runtimeVersion: undefined,
+      previousHash: STABLE_HASH,
+    });
+    expect(mocks.acknowledgeStartupRecoveryNative).toHaveBeenCalledWith('event-1');
+  });
+
+  it('leaves recovery telemetry pending when reporting fails', async () => {
+    const warnSpy = jest.spyOn(console, 'warn').mockImplementation(() => undefined);
+    const { module, mocks } = loadRollbackState({ reportError: new Error('offline') });
+
+    await expect(module.reconcileStartupRecovery(RECOVERY_STATE)).resolves.toEqual(RECOVERY_STATE);
+
+    expect(mocks.acknowledgeStartupRecoveryNative).not.toHaveBeenCalled();
+    expect(
+      require('../mocks/native/fs').readMockJson(
+        '/mock/doc/bundle-drop/recovery-telemetry-context.json',
       ),
-    ).resolves.toEqual({
-      rolledBack: true,
-      reason: 'crash_loop',
-    });
-    expect(await isBundleHashFailed('3333333333333333333333333333333333333333333333333333333333333333')).toBe(true);
-    expect(reportLocalRollback).toHaveBeenCalledWith(
-      '3333333333333333333333333333333333333333333333333333333333333333',
-      expect.objectContaining({
-        reason: 'crash_loop',
-        previousHash: '1111111111111111111111111111111111111111111111111111111111111111',
-      }),
+    ).toBeNull();
+    expect(warnSpy).toHaveBeenCalledWith(
+      '⚠️ Failed to report BundleDrop startup recovery event event-1:',
+      'Error: offline',
     );
-    expect(readMockJson(STATE_PATH)).toEqual(
-      expect.objectContaining({
-        activeHash: '1111111111111111111111111111111111111111111111111111111111111111',
-        candidateHash: '1111111111111111111111111111111111111111111111111111111111111111',
-        candidateCommitted: true,
-        lastGoodHash: '1111111111111111111111111111111111111111111111111111111111111111',
-        failedBundles: expect.objectContaining({
-          '3333333333333333333333333333333333333333333333333333333333333333': expect.objectContaining({
-            reason: 'crash_loop',
-            previousHash: '1111111111111111111111111111111111111111111111111111111111111111',
-          }),
-        }),
-      }),
-    );
-
-    nowSpy.mockRestore();
   });
 
-  it('waits for local rollback telemetry before resolving rollback', async () => {
-    const nowSpy = jest.spyOn(Date, 'now').mockReturnValue(26_000_000);
-    let finishReport!: () => void;
-    const reportPromise = new Promise<void>(resolve => {
-      finishReport = resolve;
+  it('reuses failed-bundle context after recovery metadata replaces bundle-info', async () => {
+    const warnSpy = jest.spyOn(console, 'warn').mockImplementation(() => undefined);
+    const { module, mocks } = loadRollbackState();
+    mocks.reportLocalRollback.mockRejectedValueOnce(new Error('offline'));
+
+    await module.reconcileStartupRecovery(RECOVERY_STATE, {
+      hash: FAILED_HASH,
+      channelName: 'Failed channel',
+      runtimeVersion: 'failed-runtime',
     });
-    (reportLocalRollback as jest.Mock).mockReturnValueOnce(reportPromise);
-
-    setMockFile(
-      PREVIOUS_POINTER_PATH,
-      JSON.stringify({
-        hash: '1111111111111111111111111111111111111111111111111111111111111111',
-        bundlePath: '/mock/doc/bundle-drop/bundles/1111111111111111111111111111111111111111111111111111111111111111/main.jsbundle',
-        updatedAt: '2026-03-01T00:00:00.000Z',
-      }),
-    );
-
-    const rollbackPromise = rollbackToPreviousIfNeeded(
-      {
-        maxCrashCount: 2,
-        healthCheckMode: 'auto',
-        healthyAfterSec: 0,
-      },
-      {
-        currentPointer: {
-          hash: '3333333333333333333333333333333333333333333333333333333333333333',
-          bundlePath: '/mock/doc/bundle-drop/bundles/3333333333333333333333333333333333333333333333333333333333333333/main.jsbundle',
-          updatedAt: '2026-03-01T00:00:00.000Z',
-        },
-        rollbackState: {
-          candidateHash: '3333333333333333333333333333333333333333333333333333333333333333',
-          candidateCommitted: false,
-          crashCount: 1,
-        },
-      },
-    );
-
-    await Promise.resolve();
-    let resolved = false;
-    rollbackPromise.then(() => {
-      resolved = true;
-    });
-    await Promise.resolve();
-    expect(resolved).toBe(false);
-
-    finishReport();
-    await expect(rollbackPromise).resolves.toEqual({
-      rolledBack: true,
-      reason: 'crash_loop',
-    });
-
-    nowSpy.mockRestore();
-  });
-
-  it('keeps only the newest failed bundle quarantine records', async () => {
-    const failedBundles = Object.fromEntries(
-      Array.from({ length: 20 }, (_, index) => [
-        `old-${index}`,
-        {
-          reason: 'crash_loop',
-          failedAt: index + 1,
-        },
-      ]),
-    );
-    setMockFile(
-      STATE_PATH,
-      JSON.stringify({
-        candidateHash: '3333333333333333333333333333333333333333333333333333333333333333',
-        candidateCommitted: false,
-        crashCount: 1,
-        failedBundles,
-      }),
-    );
-    setMockFile(
-      BUNDLE_INFO_PATH,
-      JSON.stringify({
-        hash: '3333333333333333333333333333333333333333333333333333333333333333',
-        channelName: 'General',
-        runtimeVersion: '1.0.0',
-      }),
-    );
-
-    const nowSpy = jest.spyOn(Date, 'now').mockReturnValue(70_000_000);
-    await rollbackToPreviousIfNeeded(
-      { maxCrashCount: 2, healthCheckMode: 'auto', healthyAfterSec: 0 },
-      {
-        currentPointer: {
-          hash: '3333333333333333333333333333333333333333333333333333333333333333',
-          bundlePath: '/mock/doc/bundle-drop/bundles/3333333333333333333333333333333333333333333333333333333333333333/main.jsbundle',
-          updatedAt: '2026-03-01T00:00:00.000Z',
-        },
-        rollbackState: {
-          candidateHash: '3333333333333333333333333333333333333333333333333333333333333333',
-          candidateCommitted: false,
-          crashCount: 1,
-        },
-      },
-    );
-
-    const state = readMockJson<{ failedBundles: Record<string, unknown> }>(STATE_PATH);
-    expect(Object.keys(state?.failedBundles || {})).toHaveLength(20);
-    expect(state?.failedBundles).toHaveProperty('3333333333333333333333333333333333333333333333333333333333333333');
-    expect(state?.failedBundles).not.toHaveProperty('old-0');
-    nowSpy.mockRestore();
-  });
-
-  it('records failed bundles when rollback evaluation reads the current pointer itself', async () => {
-    const nowSpy = jest.spyOn(Date, 'now').mockReturnValue(80_000_000);
-
-    setMockFile(
-      CURRENT_POINTER_PATH,
-      JSON.stringify({
-        hash: '3333333333333333333333333333333333333333333333333333333333333333',
-        bundlePath: '/mock/doc/bundle-drop/bundles/3333333333333333333333333333333333333333333333333333333333333333/main.jsbundle',
-        updatedAt: '2026-03-01T00:00:00.000Z',
-      }),
-    );
-    setMockFile(
-      STATE_PATH,
-      JSON.stringify({
-        candidateHash: '3333333333333333333333333333333333333333333333333333333333333333',
-        candidateCommitted: false,
-        crashCount: 1,
-      }),
-    );
-
-    await expect(
-      rollbackToPreviousIfNeeded({
-        maxCrashCount: 2,
-        healthCheckMode: 'auto',
-        healthyAfterSec: 0,
-      }),
-    ).resolves.toEqual({
-      rolledBack: true,
-      reason: 'crash_loop',
-    });
-
-    await expect(isBundleHashFailed('3333333333333333333333333333333333333333333333333333333333333333')).resolves.toBe(true);
-    nowSpy.mockRestore();
-  });
-
-  it('does not roll back when the active pointer disappears after launch evaluation', async () => {
-    const nowSpy = jest.spyOn(Date, 'now').mockReturnValue(90_000_000);
-    const readFileImplementation = mockReadFile.getMockImplementation();
-    let currentPointerReads = 0;
-
-    setMockFile(
-      CURRENT_POINTER_PATH,
-      JSON.stringify({
-        hash: '3333333333333333333333333333333333333333333333333333333333333333',
-        bundlePath: '/mock/doc/bundle-drop/bundles/3333333333333333333333333333333333333333333333333333333333333333/main.jsbundle',
-        updatedAt: '2026-03-01T00:00:00.000Z',
-      }),
-    );
-    setMockFile(
-      STATE_PATH,
-      JSON.stringify({
-        candidateHash: '3333333333333333333333333333333333333333333333333333333333333333',
-        candidateCommitted: false,
-        crashCount: 1,
-      }),
-    );
-    mockReadFile.mockImplementation(async (path: string) => {
-      if (path === CURRENT_POINTER_PATH) {
-        currentPointerReads += 1;
-        if (currentPointerReads > 1) {
-          throw new Error('ENOENT');
-        }
-      }
-      const content = getMockFile(path);
-      if (content === undefined) {
-        throw new Error(`ENOENT: ${path}`);
-      }
-      return content;
-    });
-
-    try {
-      await expect(
-        rollbackToPreviousIfNeeded({
-          maxCrashCount: 2,
-          healthCheckMode: 'auto',
-          healthyAfterSec: 0,
-        }),
-      ).resolves.toEqual({ rolledBack: false });
-      expect(reportLocalRollback).not.toHaveBeenCalled();
-    } finally {
-      if (readFileImplementation) {
-        mockReadFile.mockImplementation(readFileImplementation);
-      }
-      nowSpy.mockRestore();
-    }
-  });
-
-  it('does not quarantine the candidate when the local rollback write fails', async () => {
-    const nowSpy = jest.spyOn(Date, 'now').mockReturnValue(92_000_000);
-    const writeFileImplementation = mockWriteFile.getMockImplementation();
-
-    setMockFile(
-      PREVIOUS_POINTER_PATH,
-      JSON.stringify({
-        hash: '1111111111111111111111111111111111111111111111111111111111111111',
-        bundlePath: '/mock/doc/bundle-drop/bundles/1111111111111111111111111111111111111111111111111111111111111111/main.jsbundle',
-        updatedAt: '2026-03-01T00:00:00.000Z',
-      }),
-    );
-    setMockFile(
-      STATE_PATH,
-      JSON.stringify({
-        candidateHash: '3333333333333333333333333333333333333333333333333333333333333333',
-        candidateCommitted: false,
-        crashCount: 1,
-      }),
-    );
-    mockWriteFile.mockImplementation(async (path: string) => {
-      if (path.includes('current.json')) {
-        throw new Error('disk full');
-      }
-    });
-
-    try {
-      await expect(
-        rollbackToPreviousIfNeeded(
-          {
-            maxCrashCount: 2,
-            healthCheckMode: 'auto',
-            healthyAfterSec: 0,
-          },
-          {
-            currentPointer: {
-              hash: '3333333333333333333333333333333333333333333333333333333333333333',
-              bundlePath: '/mock/doc/bundle-drop/bundles/3333333333333333333333333333333333333333333333333333333333333333/main.jsbundle',
-              updatedAt: '2026-03-01T00:00:00.000Z',
-            },
-            rollbackState: {
-              candidateHash: '3333333333333333333333333333333333333333333333333333333333333333',
-              candidateCommitted: false,
-              crashCount: 1,
-            },
-          },
-        ),
-      ).rejects.toThrow('disk full');
-      await expect(isBundleHashFailed('3333333333333333333333333333333333333333333333333333333333333333')).resolves.toBe(false);
-      expect(reportLocalRollback).not.toHaveBeenCalled();
-    } finally {
-      if (writeFileImplementation) {
-        mockWriteFile.mockImplementation(writeFileImplementation);
-      }
-      nowSpy.mockRestore();
-    }
-  });
-
-  it('does not quarantine the candidate when native fallback pointer clearing fails', async () => {
-    const nowSpy = jest.spyOn(Date, 'now').mockReturnValue(93_000_000);
-    const unlinkImplementation = mockUnlink.getMockImplementation();
-
-    setMockFile(
-      CURRENT_POINTER_PATH,
-      JSON.stringify({
-        hash: '3333333333333333333333333333333333333333333333333333333333333333',
-        bundlePath: '/mock/doc/bundle-drop/bundles/3333333333333333333333333333333333333333333333333333333333333333/main.jsbundle',
-        updatedAt: '2026-03-01T00:00:00.000Z',
-      }),
-    );
-    setMockFile(
-      STATE_PATH,
-      JSON.stringify({
-        candidateHash: '3333333333333333333333333333333333333333333333333333333333333333',
-        candidateCommitted: false,
-        crashCount: 1,
-      }),
-    );
-    mockUnlink.mockImplementation(async (path: string) => {
-      if (path === CURRENT_POINTER_PATH) {
-        throw new Error('permission denied');
-      }
-      await unlinkImplementation?.(path);
-    });
-
-    try {
-      await expect(
-        rollbackToPreviousIfNeeded({
-          maxCrashCount: 2,
-          healthCheckMode: 'auto',
-          healthyAfterSec: 0,
-        }),
-      ).rejects.toThrow('permission denied');
-      await expect(isBundleHashFailed('3333333333333333333333333333333333333333333333333333333333333333')).resolves.toBe(false);
-      expect(reportLocalRollback).not.toHaveBeenCalled();
-      expect(getMockFile(CURRENT_POINTER_PATH)).toBeDefined();
-    } finally {
-      if (unlinkImplementation) {
-        mockUnlink.mockImplementation(unlinkImplementation);
-      }
-      nowSpy.mockRestore();
-    }
-  });
-
-  it('swallows local rollback telemetry failures', async () => {
-    const nowSpy = jest.spyOn(Date, 'now').mockReturnValue(95_000_000);
-    (reportLocalRollback as jest.Mock).mockRejectedValueOnce(new Error('network down'));
-
-    await expect(
-      rollbackToPreviousIfNeeded(
-        {
-          maxCrashCount: 2,
-          healthCheckMode: 'auto',
-          healthyAfterSec: 0,
-        },
-        {
-          currentPointer: {
-            hash: '3333333333333333333333333333333333333333333333333333333333333333',
-            bundlePath: '/mock/doc/bundle-drop/bundles/3333333333333333333333333333333333333333333333333333333333333333/main.jsbundle',
-            updatedAt: '2026-03-01T00:00:00.000Z',
-          },
-          rollbackState: {
-            candidateHash: '3333333333333333333333333333333333333333333333333333333333333333',
-            candidateCommitted: false,
-            crashCount: 1,
-          },
-        },
+    expect(
+      require('../mocks/native/fs').readMockJson(
+        '/mock/doc/bundle-drop/recovery-telemetry-context.json',
       ),
-    ).resolves.toEqual({
-      rolledBack: true,
+    ).toEqual({
+      schemaVersion: 1,
+      events: {
+        'event-1': {
+          failedHash: FAILED_HASH,
+          channelName: 'Failed channel',
+          runtimeVersion: 'failed-runtime',
+        },
+      },
+    });
+    await module.reconcileStartupRecovery(RECOVERY_STATE, {
+      hash: STABLE_HASH,
+      channelName: 'Recovered channel',
+      runtimeVersion: 'recovered-runtime',
+    });
+
+    expect(mocks.reportLocalRollback).toHaveBeenLastCalledWith(FAILED_HASH, {
       reason: 'crash_loop',
+      failedAt: 1_700_000_000,
+      crashCount: 3,
+      channelName: 'Failed channel',
+      runtimeVersion: 'failed-runtime',
+      previousHash: STABLE_HASH,
     });
-    await Promise.resolve();
-
-    nowSpy.mockRestore();
+    expect(mocks.acknowledgeStartupRecoveryNative).toHaveBeenCalledWith('event-1');
+    expect(
+      require('../mocks/native/fs').readMockJson(
+        '/mock/doc/bundle-drop/recovery-telemetry-context.json',
+      ),
+    ).toEqual({ schemaVersion: 1, events: {} });
+    warnSpy.mockRestore();
   });
 
-  it('falls back to the native bundle when there is no previous OTA pointer', async () => {
-    const nowSpy = jest.spyOn(Date, 'now').mockReturnValue(30_000_000);
-
-    setMockFile(
-      CURRENT_POINTER_PATH,
-      JSON.stringify({
-        hash: '5555555555555555555555555555555555555555555555555555555555555555',
-        bundlePath: '/mock/doc/bundle-drop/bundles/5555555555555555555555555555555555555555555555555555555555555555/main.jsbundle',
-        updatedAt: '2026-03-01T00:00:00.000Z',
-      })
-    );
-    setMockFile(
-      BUNDLE_INFO_PATH,
-      JSON.stringify({
-        hash: '5555555555555555555555555555555555555555555555555555555555555555',
-        bundleVersion: 5,
-        pendingApply: true,
-      })
+  it('repairs a malformed telemetry context before reporting recovery', async () => {
+    const warnSpy = jest.spyOn(console, 'warn').mockImplementation(() => undefined);
+    const { module, mocks } = loadRollbackState();
+    require('../mocks/native/fs').setMockFile(
+      '/mock/doc/bundle-drop/recovery-telemetry-context.json',
+      JSON.stringify({ schemaVersion: 2, events: {} }),
     );
 
-    await expect(rollbackToPreviousOrNative()).resolves.toEqual({
-      rolledBack: true,
-      toNative: true,
+    await module.reconcileStartupRecovery(RECOVERY_STATE, {
+      hash: FAILED_HASH,
+      channelName: 'General',
+      runtimeVersion: '1.0.0',
     });
 
-    expect(readMockJson(CURRENT_POINTER_PATH)).toBeNull();
-    expect(readMockJson(BUNDLE_INFO_PATH)).toEqual(
-      expect.objectContaining({
-        pendingApply: false,
-      })
+    expect(warnSpy).toHaveBeenCalledWith(
+      '⚠️ Ignoring malformed BundleDrop recovery telemetry context:',
+      expect.any(Error),
     );
-    expect(readMockJson(STATE_PATH)).toEqual(
-      expect.objectContaining({
-        candidateCommitted: true,
-        crashCount: 0,
-      })
+    expect(mocks.reportLocalRollback).toHaveBeenCalledWith(
+      FAILED_HASH,
+      expect.objectContaining({ channelName: 'General', runtimeVersion: '1.0.0' }),
     );
-
-    nowSpy.mockRestore();
   });
 
-  it('forces native rollback instead of activating a previous OTA bundle', async () => {
-    setMockFile(
-      CURRENT_POINTER_PATH,
-      JSON.stringify({
-        hash: 'bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb',
-        bundlePath: '/mock/doc/bundle-drop/bundles/bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb/main.jsbundle',
-        updatedAt: '2026-03-01T00:00:00.000Z',
-      }),
-    );
-    setMockFile(
-      PREVIOUS_POINTER_PATH,
-      JSON.stringify({
-        hash: 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',
-        bundlePath: '/mock/doc/bundle-drop/bundles/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa/main.jsbundle',
-        updatedAt: '2026-02-01T00:00:00.000Z',
-      }),
-    );
-
-    await expect(
-      rollbackToPreviousOrNative({ forceNative: true }),
-    ).resolves.toEqual({ rolledBack: true, toNative: true });
-
-    expect(readMockJson(CURRENT_POINTER_PATH)).toBeNull();
-    expect(readMockJson(PREVIOUS_POINTER_PATH)).toBeNull();
-    expect(readMockJson(STATE_PATH)).toEqual(
-      expect.objectContaining({ candidateCommitted: true, crashCount: 0 }),
-    );
-    expect(readMockJson(STATE_PATH)).not.toHaveProperty('activeHash');
-    expect(readMockJson(STATE_PATH)).not.toHaveProperty('candidateHash');
-  });
-
-  it('falls back to native when the previous pointer matches the active bundle', async () => {
-    const nowSpy = jest.spyOn(Date, 'now').mockReturnValue(32_000_000);
-
-    const activePointer = {
-      hash: '5555555555555555555555555555555555555555555555555555555555555555',
-      bundlePath: '/mock/doc/bundle-drop/bundles/5555555555555555555555555555555555555555555555555555555555555555/main.jsbundle',
-      updatedAt: '2026-03-01T00:00:00.000Z',
-    };
-    setMockFile(CURRENT_POINTER_PATH, JSON.stringify(activePointer));
-    setMockFile(PREVIOUS_POINTER_PATH, JSON.stringify(activePointer));
-    setMockFile(
-      BUNDLE_INFO_PATH,
-      JSON.stringify({
-        hash: '5555555555555555555555555555555555555555555555555555555555555555',
-        bundleVersion: 5,
-        pendingApply: false,
-      })
-    );
-
-    await expect(rollbackToPreviousOrNative()).resolves.toEqual({
-      rolledBack: true,
-      toNative: true,
+  it('prunes telemetry contexts whose native events were already acknowledged', async () => {
+    const { module } = loadRollbackState({
+      recoveryState: {
+        ...RECOVERY_STATE,
+        pendingRecoveryEvents: [],
+      },
     });
-
-    expect(readMockJson(CURRENT_POINTER_PATH)).toBeNull();
-    expect(readMockJson(BUNDLE_INFO_PATH)).toEqual(
-      expect.objectContaining({
-        pendingApply: false,
-      })
-    );
-    expect(readMockJson(BUNDLE_INFO_PATH)).not.toEqual(
-      expect.objectContaining({
-        hash: '5555555555555555555555555555555555555555555555555555555555555555',
-      })
-    );
-    expect(readMockJson(STATE_PATH)).toEqual(
-      expect.objectContaining({
-        candidateCommitted: true,
-        crashCount: 0,
-      })
-    );
-    expect(readMockJson(STATE_PATH)).not.toEqual(expect.objectContaining({ activeHash: '5555555555555555555555555555555555555555555555555555555555555555' }));
-    expect(readMockJson(STATE_PATH)).not.toEqual(expect.objectContaining({ candidateHash: '5555555555555555555555555555555555555555555555555555555555555555' }));
-
-    nowSpy.mockRestore();
-  });
-
-  it('falls back to native and clears previous when the previous bundle previously failed', async () => {
-    const nowSpy = jest.spyOn(Date, 'now').mockReturnValue(33_000_000);
-
-    setMockFile(
-      CURRENT_POINTER_PATH,
+    require('../mocks/native/fs').setMockFile(
+      '/mock/doc/bundle-drop/recovery-telemetry-context.json',
       JSON.stringify({
-        hash: '5555555555555555555555555555555555555555555555555555555555555555',
-        bundlePath: '/mock/doc/bundle-drop/bundles/5555555555555555555555555555555555555555555555555555555555555555/main.jsbundle',
-        updatedAt: '2026-03-01T00:00:00.000Z',
-      })
-    );
-    setMockFile(
-      PREVIOUS_POINTER_PATH,
-      JSON.stringify({
-        hash: '6666666666666666666666666666666666666666666666666666666666666666',
-        bundlePath: '/mock/doc/bundle-drop/bundles/6666666666666666666666666666666666666666666666666666666666666666/main.jsbundle',
-        updatedAt: '2026-03-01T00:00:00.000Z',
-      })
-    );
-    setMockFile(
-      STATE_PATH,
-      JSON.stringify({
-        failedBundles: {
-          '6666666666666666666666666666666666666666666666666666666666666666': {
-            reason: 'crash_loop',
-            failedAt: 32000,
+        schemaVersion: 1,
+        events: {
+          stale: {
+            failedHash: CANDIDATE_HASH,
+            channelName: 'Old channel',
           },
         },
-      })
+      }),
     );
 
-    await expect(rollbackToPreviousOrNative()).resolves.toEqual({
-      rolledBack: true,
-      toNative: true,
-    });
+    await module.reconcileStartupRecovery();
 
-    expect(readMockJson(CURRENT_POINTER_PATH)).toBeNull();
-    expect(readMockJson(PREVIOUS_POINTER_PATH)).toBeNull();
-    expect(readMockJson(BUNDLE_INFO_PATH)).not.toEqual(
-      expect.objectContaining({
-        hash: '6666666666666666666666666666666666666666666666666666666666666666',
-      })
-    );
-    expect(readMockJson(STATE_PATH)).toEqual(
-      expect.objectContaining({
-        failedBundles: expect.objectContaining({
-          '6666666666666666666666666666666666666666666666666666666666666666': expect.any(Object),
-        }),
-        candidateCommitted: true,
-        crashCount: 0,
-      })
-    );
-    expect(readMockJson(STATE_PATH)).not.toEqual(expect.objectContaining({ activeHash: '6666666666666666666666666666666666666666666666666666666666666666' }));
-    expect(readMockJson(STATE_PATH)).not.toEqual(expect.objectContaining({ candidateHash: '6666666666666666666666666666666666666666666666666666666666666666' }));
-
-    nowSpy.mockRestore();
+    expect(
+      require('../mocks/native/fs').readMockJson(
+        '/mock/doc/bundle-drop/recovery-telemetry-context.json',
+      ),
+    ).toEqual({ schemaVersion: 1, events: {} });
   });
 
-  it('reads iOS metadata and tolerates missing or malformed rollback metadata', async () => {
-    const nowSpy = jest.spyOn(Date, 'now').mockReturnValue(35_000_000);
+  it('continues serializing telemetry mutations after a failed context write', async () => {
+    const { module, mocks } = loadRollbackState();
+    const nativeFs = require('../mocks/native/fs');
+    nativeFs.mockWriteFile
+      .mockRejectedValueOnce(new Error('temporary write failed'))
+      .mockRejectedValueOnce(new Error('fallback write failed'));
 
-    setMockPlatform('ios');
-    setMockFile(
-      PREVIOUS_POINTER_PATH,
-      JSON.stringify({
-        hash: '7777777777777777777777777777777777777777777777777777777777777777',
-        bundlePath: '/mock/lib/bundle-drop/bundles/7777777777777777777777777777777777777777777777777777777777777777/main.jsbundle',
-        updatedAt: '2026-03-01T00:00:00.000Z',
-      }),
-    );
-    setMockFile(
-      '/mock/lib/bundle-drop/bundles/7777777777777777777777777777777777777777777777777777777777777777/metadata-ios.json',
-      JSON.stringify({
-        bundleVersion: 4,
-        version: '1.0.4',
-        runtimeVersion: '4.0.0',
-      }),
-    );
+    await expect(module.reconcileStartupRecovery(RECOVERY_STATE, {
+      hash: FAILED_HASH,
+      channelName: 'General',
+      runtimeVersion: '1.0.0',
+    })).rejects.toThrow('fallback write failed');
 
-    await expect(rollbackToPreviousOrNative()).resolves.toEqual({ rolledBack: true });
-    expect(readMockJson(BUNDLE_INFO_PATH)).toEqual(
-      expect.objectContaining({
-        hash: '7777777777777777777777777777777777777777777777777777777777777777',
-        bundleVersion: 4,
-        version: '1.0.4',
-        runtimeVersion: '4.0.0',
-      }),
-    );
+    await expect(module.reconcileStartupRecovery(RECOVERY_STATE, {
+      hash: FAILED_HASH,
+      channelName: 'General',
+      runtimeVersion: '1.0.0',
+    })).resolves.toEqual(RECOVERY_STATE);
+    expect(mocks.acknowledgeStartupRecoveryNative).toHaveBeenCalledWith('event-1');
+  });
 
-    resetNativeFsMocks();
-    setMockPlatform('android');
-    setMockFile(
-      PREVIOUS_POINTER_PATH,
-      JSON.stringify({
-        hash: '8888888888888888888888888888888888888888888888888888888888888888',
-        bundlePath: '/mock/doc/bundle-drop/bundles/8888888888888888888888888888888888888888888888888888888888888888/main.jsbundle',
-        updatedAt: '2026-03-01T00:00:00.000Z',
-      }),
-    );
-    setMockFile(
-      '/mock/doc/bundle-drop/bundles/8888888888888888888888888888888888888888888888888888888888888888/metadata-android.json',
-      '{bad json',
-    );
+  it('keeps telemetry pending when the failure has no printable error value', async () => {
+    const warnSpy = jest.spyOn(console, 'warn').mockImplementation(() => undefined);
+    const { module, mocks } = loadRollbackState({ reportError: null });
 
-    await expect(rollbackToPreviousOrNative()).resolves.toEqual({ rolledBack: true });
-    expect(readMockJson(BUNDLE_INFO_PATH)).toEqual(
-      expect.objectContaining({
-        hash: '8888888888888888888888888888888888888888888888888888888888888888',
-        pendingApply: false,
-      }),
-    );
-    expect(readMockJson(BUNDLE_INFO_PATH)).not.toHaveProperty('bundleVersion');
-    expect(readMockJson(BUNDLE_INFO_PATH)).not.toHaveProperty('version');
-    expect(readMockJson(BUNDLE_INFO_PATH)).not.toHaveProperty('runtimeVersion');
+    await expect(module.reconcileStartupRecovery()).resolves.toEqual(RECOVERY_STATE);
 
-    resetNativeFsMocks();
-    setMockFile(
-      PREVIOUS_POINTER_PATH,
-      JSON.stringify({
-        hash: '9999999999999999999999999999999999999999999999999999999999999999',
-        bundlePath: '/mock/doc/bundle-drop/bundles/9999999999999999999999999999999999999999999999999999999999999999/main.jsbundle',
-        updatedAt: '2026-03-01T00:00:00.000Z',
-      }),
+    expect(mocks.acknowledgeStartupRecoveryNative).not.toHaveBeenCalled();
+    expect(warnSpy).toHaveBeenCalledWith(
+      '⚠️ Failed to report BundleDrop startup recovery event event-1:',
+      null,
     );
-
-    await expect(rollbackToPreviousOrNative()).resolves.toEqual({ rolledBack: true });
-    expect(readMockJson(BUNDLE_INFO_PATH)).toEqual(
-      expect.objectContaining({
-        hash: '9999999999999999999999999999999999999999999999999999999999999999',
-        pendingApply: false,
-      }),
-    );
-    expect(readMockJson(BUNDLE_INFO_PATH)).not.toHaveProperty('bundleVersion');
-    expect(readMockJson(BUNDLE_INFO_PATH)).not.toHaveProperty('version');
-    expect(readMockJson(BUNDLE_INFO_PATH)).not.toHaveProperty('runtimeVersion');
-
-    nowSpy.mockRestore();
   });
 });

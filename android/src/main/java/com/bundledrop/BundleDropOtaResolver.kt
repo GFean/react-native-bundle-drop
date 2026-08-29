@@ -43,6 +43,39 @@ object BundleDropOtaResolver {
     }
   }
 
+  /** Verify an installed bundle independently of the active pointer. */
+  internal fun readBundleForHash(bundleDropRoot: File, hash: String): String? {
+    if (!bundleHashPattern.matches(hash)) return null
+    return try {
+      val bundleDir = File(File(bundleDropRoot, "bundles"), hash)
+      val bundleFile = File(bundleDir, "main.jsbundle")
+      val manifestFile = File(bundleDir, "bundle-manifest.json")
+      if (!bundleFile.exists() || !manifestFile.exists()) return null
+      val manifest = JSONObject(manifestFile.readText())
+      if (
+        manifest.optInt("manifestVersion", -1) != 1 ||
+        manifest.optString("bundleHash", "") != hash ||
+        !verifyBundleDir(bundleDir, manifest, hash)
+      ) {
+        return null
+      }
+      bundleFile.absolutePath
+    } catch (_: Exception) {
+      null
+    }
+  }
+
+  internal fun readBundleRuntimeVersion(bundleDropRoot: File, hash: String): String? {
+    readBundleForHash(bundleDropRoot, hash) ?: return null
+    return try {
+      JSONObject(File(File(File(bundleDropRoot, "bundles"), hash), "bundle-manifest.json").readText())
+        .optString("runtimeVersion", "")
+        .takeIf(String::isNotEmpty)
+    } catch (_: Exception) {
+      null
+    }
+  }
+
   private fun verifyBundleDir(bundleDir: File, manifest: JSONObject, expectedHash: String): Boolean {
     val files = manifest.optJSONArray("files") ?: return false
     if (manifest.optString("platform", "") != "android") {
@@ -184,6 +217,7 @@ object BundleDropOtaResolver {
       File(bundleDropRoot, "current.json"),
       File(bundleDropRoot, "previous.json"),
       File(bundleDropRoot, "state.json"),
+      File(bundleDropRoot, BundleDropStartupRecoveryController.RECOVERY_LEDGER),
       File(filesDir, "bundle-info.json"),
     )
     filesToClear.forEach {
@@ -196,6 +230,7 @@ object BundleDropOtaResolver {
       File(bundleDropRoot, "current.json"),
       File(bundleDropRoot, "previous.json"),
       File(bundleDropRoot, "state.json"),
+      File(bundleDropRoot, BundleDropStartupRecoveryController.RECOVERY_LEDGER),
       File(filesDir, "bundle-info.json"),
     ).any { it.exists() }
   }

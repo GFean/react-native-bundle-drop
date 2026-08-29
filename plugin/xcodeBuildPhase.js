@@ -28,7 +28,8 @@ function updatePhase(project, phaseUuid) {
   const phase = project.hash.project.objects.PBXShellScriptBuildPhase[phaseUuid];
   phase.name = `"${PHASE_NAME}"`;
   phase.shellPath = '/bin/sh';
-  phase.shellScript = `"${SHELL_SCRIPT.replace(/"/g, '\\"')}"`;
+  const escapedShellScript = SHELL_SCRIPT.replace(/\\/g, '\\\\').replace(/"/g, '\\"');
+  phase.shellScript = `"${escapedShellScript}"`;
 }
 
 function movePhaseToEnd(target, phaseUuid) {
