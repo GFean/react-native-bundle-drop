@@ -6,6 +6,7 @@ import androidx.test.core.app.ApplicationProvider
 import java.io.File
 import java.security.MessageDigest
 import java.util.concurrent.TimeUnit
+import org.json.JSONArray
 import org.json.JSONObject
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
@@ -275,6 +276,143 @@ class BundleDropStartupRecoveryTest {
     val snapshot = controller(root, filesDir, "snapshot").snapshot()
     assertEquals(listOf(hash), jsonStrings(snapshot, "quarantinedHashes"))
     assertEquals(0, snapshot.getJSONArray("pendingRecoveryEvents").length())
+  }
+
+  @Test
+  fun `malformed revoked hashes cannot erase a persisted revocation`() {
+    listOf("missing", "wrong-type", "invalid-element", "duplicate").forEach { corruption ->
+      val root = tempFolder.newFolder("corrupt-revocations-$corruption")
+      val filesDir = root.parentFile!!
+      val hash = writeBundle(root, "stable-$corruption")
+      val installer = controller(root, filesDir, "installer-$corruption")
+      installer.activateCandidate(hash, 2, "manual", 0.0)
+      val attempt = installer.selectForStartup()
+      assertTrue(installer.markHealthy(hash, attempt.attemptId!!))
+      installer.setRevokedHashes(setOf(hash))
+
+      val ledgerFile = File(root, BundleDropStartupRecoveryController.RECOVERY_LEDGER)
+      val ledger = JSONObject(ledgerFile.readText())
+      when (corruption) {
+        "missing" -> ledger.remove("revokedHashes")
+        "wrong-type" -> ledger.put("revokedHashes", "not-an-array")
+        "invalid-element" -> ledger.put("revokedHashes", JSONArray().put(123))
+        "duplicate" -> ledger.put("revokedHashes", JSONArray().put(hash).put(hash))
+      }
+      ledgerFile.writeText(ledger.toString())
+
+      val selected = controller(root, filesDir, "restart-$corruption").selectForStartup()
+
+      assertNull(corruption, selected.bundlePath)
+      assertFalse(corruption, File(root, "current.json").exists())
+      assertEquals(
+        corruption,
+        listOf(hash),
+        jsonStrings(controller(root, filesDir, "snapshot-$corruption").snapshot(), "quarantinedHashes"),
+      )
+    }
+  }
+
+  @Test
+  fun `malformed quarantine and event collections fail closed to embedded`() {
+    listOf(
+      "missing-quarantine",
+      "wrong-quarantine",
+      "invalid-quarantine",
+      "duplicate-quarantine",
+      "missing-events",
+      "wrong-events",
+      "scalar-event",
+      "invalid-event",
+    ).forEach { corruption ->
+      val root = tempFolder.newFolder("corrupt-collections-$corruption")
+      val filesDir = root.parentFile!!
+      val hash = writeBundle(root, "stable-$corruption")
+      val installer = controller(root, filesDir, "installer-$corruption")
+      installer.activateCandidate(hash, 2, "manual", 0.0)
+      val attempt = installer.selectForStartup()
+      assertTrue(installer.markHealthy(hash, attempt.attemptId!!))
+
+      val ledgerFile = File(root, BundleDropStartupRecoveryController.RECOVERY_LEDGER)
+      val ledger = JSONObject(ledgerFile.readText())
+      when (corruption) {
+        "missing-quarantine" -> ledger.remove("quarantinedHashes")
+        "wrong-quarantine" -> ledger.put("quarantinedHashes", "not-an-array")
+        "invalid-quarantine" -> ledger.put("quarantinedHashes", JSONArray().put(123))
+        "duplicate-quarantine" -> ledger.put(
+          "quarantinedHashes",
+          JSONArray().put("f".repeat(64)).put("f".repeat(64)),
+        )
+        "missing-events" -> ledger.remove("pendingRecoveryEvents")
+        "wrong-events" -> ledger.put("pendingRecoveryEvents", "not-an-array")
+        "scalar-event" -> ledger.put("pendingRecoveryEvents", JSONArray().put("not-an-object"))
+        "invalid-event" -> ledger.put(
+          "pendingRecoveryEvents",
+          JSONArray().put(
+            JSONObject()
+              .put("id", "event-1")
+              .put("failedHash", "f".repeat(64))
+              .put("recoveryTarget", "embedded")
+              .put("crashCount", 1)
+              .put("reason", "not-crash-loop")
+              .put("failedAt", 1),
+          ),
+        )
+      }
+      ledgerFile.writeText(ledger.toString())
+
+      val selected = controller(root, filesDir, "restart-$corruption").selectForStartup()
+
+      assertNull(corruption, selected.bundlePath)
+      assertFalse(corruption, File(root, "current.json").exists())
+      assertEquals(
+        corruption,
+        listOf(hash),
+        jsonStrings(controller(root, filesDir, "snapshot-$corruption").snapshot(), "quarantinedHashes"),
+      )
+    }
+  }
+
+  @Test
+  fun `malformed required ledger metadata fails closed to embedded`() {
+    val corruptions: List<Pair<String, (JSONObject) -> Unit>> = listOf(
+      "unsupported-schema" to { it.put("schemaVersion", 2) },
+      "missing-revision" to { it.remove("revision") },
+      "negative-revision" to { it.put("revision", -1) },
+      "missing-binary-identity" to { it.remove("binaryIdentity") },
+      "blank-binary-identity" to { it.put("binaryIdentity", "") },
+      "missing-phase" to { it.remove("phase") },
+      "invalid-phase" to { it.put("phase", "unknown") },
+      "missing-import-marker" to { it.remove("legacyStateImported") },
+      "missing-rollback-count" to { it.remove("rollbackCrashCount") },
+      "negative-rollback-count" to { it.put("rollbackCrashCount", -1) },
+      "invalid-policy-type" to { it.put("policy", "not-an-object") },
+      "invalid-attempt-type" to { it.put("activeAttempt", "not-an-object") },
+    )
+
+    corruptions.forEach { (corruption, mutate) ->
+      val root = tempFolder.newFolder("corrupt-metadata-$corruption")
+      val filesDir = root.parentFile!!
+      val hash = writeBundle(root, "stable-$corruption")
+      val installer = controller(root, filesDir, "installer-$corruption")
+      installer.activateCandidate(hash, 2, "manual", 0.0)
+      val attempt = installer.selectForStartup()
+      assertTrue(installer.markHealthy(hash, attempt.attemptId!!))
+
+      val ledgerFile = File(root, BundleDropStartupRecoveryController.RECOVERY_LEDGER)
+      val ledger = JSONObject(ledgerFile.readText())
+      mutate(ledger)
+      ledgerFile.writeText(ledger.toString())
+
+      val selected = controller(root, filesDir, "restart-$corruption").selectForStartup()
+
+      assertNull(corruption, selected.bundlePath)
+      assertFalse(corruption, File(root, "current.json").exists())
+      assertEquals(
+        corruption,
+        listOf(hash),
+        jsonStrings(controller(root, filesDir, "snapshot-$corruption").snapshot(), "quarantinedHashes"),
+      )
+    }
   }
 
   @Test

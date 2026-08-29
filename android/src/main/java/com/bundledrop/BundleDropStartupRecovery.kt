@@ -773,10 +773,10 @@ internal class BundleDropStartupRecoveryController(
   }
 
   private fun ledgerFromJson(json: JSONObject): Ledger {
-    if (json.optInt("schemaVersion", -1) != PROTOCOL_VERSION) {
+    if (json.getInt("schemaVersion") != PROTOCOL_VERSION) {
       throw IllegalArgumentException("Unsupported startup recovery schema")
     }
-    val policyJson = json.optJSONObject("policy")
+    val policyJson = json.optionalObject("policy")
     val policy = policyJson?.let {
       RecoveryPolicy(
         maxCrashCount = it.getInt("maxCrashCount"),
@@ -784,50 +784,63 @@ internal class BundleDropStartupRecoveryController(
         healthyAfterSec = it.getDouble("healthyAfterSec"),
       )
     }
-    val attemptJson = json.optJSONObject("activeAttempt")
+    val attemptJson = json.optionalObject("activeAttempt")
     val attempt = attemptJson?.let {
       ActiveAttempt(
         hash = it.getString("hash"),
         attemptId = it.getString("attemptId"),
         processToken = it.getString("processToken"),
-        unacknowledgedLaunchCount = it.optInt("unacknowledgedLaunchCount", 0),
+        unacknowledgedLaunchCount = it.getInt("unacknowledgedLaunchCount"),
       )
     }
-    val events = json.optJSONArray("pendingRecoveryEvents").toJsonObjects().map {
+    val events = json.requiredObjectList("pendingRecoveryEvents").map {
+      require(it.getString("reason") == ROLLBACK_CRASH_LOOP) {
+        "Invalid startup recovery event reason"
+      }
       RecoveryEvent(
         id = it.getString("id"),
         failedHash = it.getString("failedHash"),
         recoveryTarget = it.getString("recoveryTarget"),
-        recoveredHash = it.optString("recoveredHash", "").takeIf(String::isNotEmpty),
+        recoveredHash = it.optionalString("recoveredHash"),
         crashCount = it.getInt("crashCount"),
         failedAt = it.getLong("failedAt"),
       )
     }
     return Ledger(
-      revision = json.optLong("revision", 0),
-      binaryIdentity = json.optString("binaryIdentity", "").takeIf(String::isNotEmpty),
-      phase = json.optString("phase", PHASE_IDLE),
-      candidateHash = json.optString("candidateHash", "").takeIf(String::isNotEmpty),
-      candidateRuntimeVersion = json.optString("candidateRuntimeVersion", "").takeIf(String::isNotEmpty),
-      stableHash = json.optString("stableHash", "").takeIf(String::isNotEmpty),
-      stableRuntimeVersion = json.optString("stableRuntimeVersion", "").takeIf(String::isNotEmpty),
-      previousStableHash = json.optString("previousStableHash", "").takeIf(String::isNotEmpty),
-      previousStableRuntimeVersion = json.optString("previousStableRuntimeVersion", "").takeIf(String::isNotEmpty),
+      revision = json.getLong("revision"),
+      binaryIdentity = json.getString("binaryIdentity"),
+      phase = json.getString("phase"),
+      candidateHash = json.optionalString("candidateHash"),
+      candidateRuntimeVersion = json.optionalString("candidateRuntimeVersion"),
+      stableHash = json.optionalString("stableHash"),
+      stableRuntimeVersion = json.optionalString("stableRuntimeVersion"),
+      previousStableHash = json.optionalString("previousStableHash"),
+      previousStableRuntimeVersion = json.optionalString("previousStableRuntimeVersion"),
       policy = policy,
-      reservedAttemptId = json.optString("reservedAttemptId", "").takeIf(String::isNotEmpty),
+      reservedAttemptId = json.optionalString("reservedAttemptId"),
       activeAttempt = attempt,
-      lastHealthyAttemptId = json.optString("lastHealthyAttemptId", "").takeIf(String::isNotEmpty),
-      quarantinedHashes = json.optJSONArray("quarantinedHashes").toStringSet(),
-      revokedHashes = json.optJSONArray("revokedHashes").toStringSet(),
+      lastHealthyAttemptId = json.optionalString("lastHealthyAttemptId"),
+      quarantinedHashes = json.requiredHashSet("quarantinedHashes"),
+      revokedHashes = json.requiredHashSet("revokedHashes"),
       pendingRecoveryEvents = events,
-      legacyStateImported = json.optBoolean("legacyStateImported", false),
-      rollbackFailedHash = json.optString("rollbackFailedHash", "").takeIf(String::isNotEmpty),
-      rollbackCrashCount = json.optInt("rollbackCrashCount", 0),
-      rollbackReason = json.optString("rollbackReason", "").takeIf(String::isNotEmpty),
+      legacyStateImported = json.getBoolean("legacyStateImported"),
+      rollbackFailedHash = json.optionalString("rollbackFailedHash"),
+      rollbackCrashCount = json.getInt("rollbackCrashCount"),
+      rollbackReason = json.optionalString("rollbackReason"),
     ).also(::validateLedger)
   }
 
   private fun validateLedger(ledger: Ledger) {
+    require(ledger.revision >= 0) { "Invalid startup recovery revision" }
+    require(!ledger.binaryIdentity.isNullOrBlank()) { "Startup recovery ledger is missing its binary identity" }
+    require(ledger.phase in setOf(
+      PHASE_IDLE,
+      PHASE_ARMED,
+      PHASE_LAUNCHING,
+      PHASE_STABLE,
+      PHASE_ROLLBACK_REQUIRED,
+      PHASE_RECOVERED,
+    )) { "Invalid startup recovery phase" }
     ledger.candidateHash?.let(::requireHash)
     ledger.stableHash?.let(::requireHash)
     ledger.previousStableHash?.let(::requireHash)
@@ -861,6 +874,18 @@ internal class BundleDropStartupRecoveryController(
       ROLLBACK_CRASH_LOOP,
       ROLLBACK_REVOKED,
     )) { "Invalid startup rollback reason" }
+    require(ledger.rollbackCrashCount >= 0) { "Invalid startup rollback crash count" }
+    ledger.pendingRecoveryEvents.forEach { event ->
+      require(event.id.isNotBlank()) { "Startup recovery event is missing its ID" }
+      requireHash(event.failedHash)
+      require(event.crashCount >= 0) { "Invalid startup recovery event crash count" }
+      require(event.failedAt >= 0) { "Invalid startup recovery event timestamp" }
+      require(
+        (event.recoveryTarget == RECOVERY_EMBEDDED && event.recoveredHash == null) ||
+          (event.recoveryTarget == RECOVERY_PREVIOUS &&
+            event.recoveredHash?.let(::isValidHash) == true)
+      ) { "Invalid startup recovery event target" }
+    }
   }
 
   private fun attemptJson(attempt: ActiveAttempt): JSONObject = JSONObject()
@@ -934,19 +959,30 @@ internal class BundleDropStartupRecoveryController(
     }
   }
 
-  private fun JSONArray?.toStringSet(): Set<String> {
-    if (this == null) return emptySet()
-    val values = mutableSetOf<String>()
-    for (index in 0 until length()) {
-      val value = optString(index, "")
-      if (isValidHash(value)) values.add(value)
+  private fun JSONObject.optionalObject(key: String): JSONObject? {
+    if (!has(key) || isNull(key)) return null
+    return getJSONObject(key)
+  }
+
+  private fun JSONObject.optionalString(key: String): String? {
+    if (!has(key) || isNull(key)) return null
+    return getString(key)
+  }
+
+  private fun JSONObject.requiredHashSet(key: String): Set<String> {
+    val array = getJSONArray(key)
+    val values = linkedSetOf<String>()
+    for (index in 0 until array.length()) {
+      val value = array.getString(index)
+      requireHash(value)
+      require(values.add(value)) { "Startup recovery ledger contains duplicate $key entries" }
     }
     return values
   }
 
-  private fun JSONArray?.toJsonObjects(): List<JSONObject> {
-    if (this == null) return emptyList()
-    return (0 until length()).mapNotNull(::optJSONObject)
+  private fun JSONObject.requiredObjectList(key: String): List<JSONObject> {
+    val array = getJSONArray(key)
+    return (0 until array.length()).map(array::getJSONObject)
   }
 
   private fun requireHash(hash: String) {
