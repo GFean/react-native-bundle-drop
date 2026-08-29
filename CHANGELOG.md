@@ -5,6 +5,13 @@ All notable changes to this package are documented here.
 This project uses [Conventional Commits](https://www.conventionalcommits.org/) and
 [release-please](https://github.com/googleapis/release-please) to prepare releases.
 
+## [0.7.0](https://github.com/GFean/react-native-bundle-drop/compare/v0.6.0...v0.7.0) (2026-08-29)
+
+
+### Features
+
+* **recovery:** harden native bundle recovery ([#30](https://github.com/GFean/react-native-bundle-drop/issues/30)) ([f880bfd](https://github.com/GFean/react-native-bundle-drop/commit/f880bfd9872789dbbfb8bb2dbf6e2b92ed3ee6b0))
+
 ## [0.6.0](https://github.com/GFean/react-native-bundle-drop/compare/v0.5.1...v0.6.0) (2026-08-22)
 
 ### Managed Runtime Delivery and Safer Project Setup
