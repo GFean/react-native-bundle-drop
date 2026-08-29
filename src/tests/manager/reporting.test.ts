@@ -355,7 +355,7 @@ describe('manager/reporting', () => {
     });
   });
 
-  it('reports local rollback health telemetry without blocking on failures', async () => {
+  it('reports local rollback health telemetry and propagates delivery failures', async () => {
     initializeBundleDropRuntime({
       environment: 'production',
     });
@@ -394,18 +394,12 @@ describe('manager/reporting', () => {
       failedAt: '1970-01-01T00:16:40.000Z',
     });
 
-    const consoleSpy = jest.spyOn(console, 'warn').mockImplementation(() => undefined);
     mockReportLocalRollback.mockRejectedValueOnce(null);
     await expect(
       reportLocalRollback('hash-bad', {
         reason: 'crash_loop',
         failedAt: 1_000,
       }),
-    ).resolves.toBeUndefined();
-    expect(consoleSpy).toHaveBeenCalledWith(
-      '⚠️ Failed to report local rollback:',
-      null,
-    );
-    consoleSpy.mockRestore();
+    ).rejects.toBeNull();
   });
 });

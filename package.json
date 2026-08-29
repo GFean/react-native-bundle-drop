@@ -1,7 +1,7 @@
 {
   "name": "@gfean/react-native-bundle-drop",
   "version": "0.6.0",
-  "nativeVersion": "0.5.0",
+  "nativeVersion": "0.6.0",
   "description": "Over-the-air updates for Expo and bare React Native apps, with channels, staged rollouts, patch delivery, and rollback.",
   "main": "lib/index.js",
   "types": "lib/index.d.ts",
@@ -47,6 +47,9 @@
     "test:expo:plugin": "node --test plugin/__tests__/*.test.js",
     "package:check": "node scripts/check-package-contents.cjs",
     "audit:production": "yarn npm audit --environment production --recursive --severity high",
+    "codeql:local:fast": "node scripts/run-codeql-local.cjs fast",
+    "codeql:local:full": "node scripts/run-codeql-local.cjs full",
+    "codeql:local:compare": "node scripts/run-codeql-local.cjs compare",
     "verify:quick": "yarn build && yarn coverage:gate && yarn test:expo:plugin && yarn package:check",
     "verify:native": "yarn test:android && yarn test:ios",
     "verify:release": "yarn verify:quick && yarn verify:native && yarn audit:production",

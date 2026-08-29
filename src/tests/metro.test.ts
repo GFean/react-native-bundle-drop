@@ -12,6 +12,10 @@ jest.mock('../expo', () => ({
 
 import { withBundleDrop, withBundleDropExpo } from '../metro';
 import type { ExpoBuildIdentity } from '../expo';
+import {
+  LEGACY_RUNTIME_DELIVERY_BOOTSTRAP_PATH,
+  RUNTIME_DELIVERY_BOOTSTRAP_PATH,
+} from '../runtime-delivery/bootstrapConfig';
 
 const identity = (platform: 'ios' | 'android'): ExpoBuildIdentity => {
   const withoutHash: Omit<ExpoBuildIdentity, 'identityHash'> = {
@@ -47,7 +51,7 @@ describe('withBundleDropExpo', () => {
       "module.exports = { serverUrl: 'https://api.example.com', org: { slug: 'org' }, project: { name: 'App', slug: 'app' } };\n",
     );
     fs.ensureDirSync(path.join(root, '.bundle-drop'));
-    fs.writeJsonSync(path.join(root, '.bundle-drop/runtime-delivery.generated.json'), {
+    fs.writeJsonSync(path.join(root, RUNTIME_DELIVERY_BOOTSTRAP_PATH), {
       schemaVersion: 1,
       project: {
         serverUrl: 'https://api.example.com',
@@ -110,6 +114,7 @@ describe('withBundleDropExpo', () => {
     );
 
     const generatedPath = path.join(root, '.bundle-drop/generated/bundle.drop.config.js');
+    expect(fs.readFileSync(generatedPath, 'utf8').split('\n')[0]).toBe('/* eslint-disable */');
     expect(result).toEqual({
       transformer: { minifierPath: 'custom' },
       resolver: {
@@ -215,7 +220,7 @@ describe('withBundleDropExpo', () => {
 
   it('fails closed when generated trust belongs to another project', () => {
     const root = fixture();
-    const bootstrapPath = path.join(root, '.bundle-drop/runtime-delivery.generated.json');
+    const bootstrapPath = path.join(root, RUNTIME_DELIVERY_BOOTSTRAP_PATH);
     const bootstrap = fs.readJsonSync(bootstrapPath);
     bootstrap.project.projectSlug = 'other-app';
     fs.writeJsonSync(bootstrapPath, bootstrap);
@@ -224,7 +229,7 @@ describe('withBundleDropExpo', () => {
 
   it('ignores retired inline delivery authority when no generated bootstrap exists', () => {
     const root = fixture();
-    fs.removeSync(path.join(root, '.bundle-drop/runtime-delivery.generated.json'));
+    fs.removeSync(path.join(root, RUNTIME_DELIVERY_BOOTSTRAP_PATH));
     fs.writeFileSync(
       path.join(root, 'bundle.drop.config.js'),
       "module.exports = { serverUrl: 'https://api.example.com', org: { slug: 'org' }, project: { name: 'App', slug: 'app' }, runtimeDelivery: { mode: 'v2', manifestBaseUrl: 'https://stale.example.com' } };\n",
@@ -247,7 +252,7 @@ describe('withBundleDropExpo', () => {
 
   it('rejects an incomplete base config even without a generated bootstrap', () => {
     const invalidRoot = fixture();
-    fs.removeSync(path.join(invalidRoot, '.bundle-drop/runtime-delivery.generated.json'));
+    fs.removeSync(path.join(invalidRoot, RUNTIME_DELIVERY_BOOTSTRAP_PATH));
     fs.writeFileSync(
       path.join(invalidRoot, 'bundle.drop.config.js'),
       "module.exports = { serverUrl: 'https://api.example.com' };\n",
@@ -255,5 +260,22 @@ describe('withBundleDropExpo', () => {
     expect(() => withBundleDrop({}, { projectRoot: invalidRoot })).toThrow(
       'must define serverUrl, org.slug, and project.slug',
     );
+  });
+
+  it('accepts a legacy bootstrap without rewriting project files', () => {
+    const root = fixture();
+    const lockPath = path.join(root, RUNTIME_DELIVERY_BOOTSTRAP_PATH);
+    const legacyPath = path.join(root, LEGACY_RUNTIME_DELIVERY_BOOTSTRAP_PATH);
+    fs.moveSync(lockPath, legacyPath);
+
+    withBundleDrop({}, { projectRoot: root });
+
+    expect(fs.existsSync(lockPath)).toBe(false);
+    expect(fs.existsSync(legacyPath)).toBe(true);
+    expect(readGeneratedConfig(root)).toEqual(expect.objectContaining({
+      runtimeDelivery: expect.objectContaining({
+        manifestBaseUrl: 'https://manifests.example.com',
+      }),
+    }));
   });
 });

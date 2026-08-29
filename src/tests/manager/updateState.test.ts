@@ -7,6 +7,9 @@ const loadUpdateStateModule = (overrides?: {
   updateBundleInfoError?: Error;
   reportError?: Error;
   failedHash?: string;
+  recoveredManifest?: Record<string, unknown> | null;
+  recoveredMetadata?: Record<string, unknown> | null;
+  platform?: 'ios' | 'android';
 }) => {
   jest.resetModules();
 
@@ -21,6 +24,8 @@ const loadUpdateStateModule = (overrides?: {
       throw overrides.updateBundleInfoError;
     }
   });
+  const writeBundleInfoDurably = jest.fn(async (_info: Record<string, unknown>) => undefined);
+  const deleteBundleInfo = jest.fn(async () => undefined);
   const reportInstalledIfReady = jest.fn(async (_state?: unknown) => {
     if (overrides?.reportError) {
       throw overrides.reportError;
@@ -31,10 +36,15 @@ const loadUpdateStateModule = (overrides?: {
   );
   const restartReactNativeNative = jest.fn();
   const isBundleHashFailed = jest.fn(async (hash?: string | null) => !!hash && hash === overrides?.failedHash);
+  const verifyBundleDir = jest.fn(async () => overrides?.recoveredManifest ?? null);
+  const readJsonFile = jest.fn(async () => overrides?.recoveredMetadata ?? {});
+  const fsExists = jest.fn(async () => overrides?.recoveredMetadata != null);
 
   jest.doMock('../../bundleInfo', () => ({
     readBundleInfo,
     updateBundleInfo,
+    writeBundleInfoDurably,
+    deleteBundleInfo,
   }));
   jest.doMock('../../manager/reporting', () => ({
     reportInstalledIfReady,
@@ -46,6 +56,17 @@ const loadUpdateStateModule = (overrides?: {
   jest.doMock('../../manager/rollbackState', () => ({
     isBundleHashFailed,
   }));
+  jest.doMock('../../install/bundleVerification', () => ({
+    verifyBundleDir,
+    readJsonFile,
+  }));
+  jest.doMock('../../native/fs', () => ({
+    __esModule: true,
+    default: { exists: fsExists },
+  }));
+  jest.doMock('../../context', () => ({
+    platform: overrides?.platform ?? 'android',
+  }));
 
   const module = require('../../manager/updateState') as UpdateStateModule;
   return {
@@ -53,10 +74,14 @@ const loadUpdateStateModule = (overrides?: {
     mocks: {
       readBundleInfo,
       updateBundleInfo,
+      writeBundleInfoDurably,
+      deleteBundleInfo,
       reportInstalledIfReady,
       getDownloadedBundlePathNative,
       restartReactNativeNative,
       isBundleHashFailed,
+      verifyBundleDir,
+      readJsonFile,
     },
   };
 };
@@ -68,6 +93,9 @@ describe('manager/updateState', () => {
     jest.unmock('../../manager/reporting');
     jest.unmock('../../native/bundleDropNative');
     jest.unmock('../../manager/rollbackState');
+    jest.unmock('../../install/bundleVerification');
+    jest.unmock('../../native/fs');
+    jest.unmock('../../context');
   });
 
   it('returns cached update state without re-reading dependencies', async () => {
@@ -124,11 +152,11 @@ describe('manager/updateState', () => {
     );
     expect(mocks.reportInstalledIfReady).toHaveBeenCalledWith({
       hasBundle: true,
-      info: {
+      info: expect.objectContaining({
         hash: 'hash-1',
         pendingApply: false,
         channelName: 'General',
-      },
+      }),
     });
   });
 
@@ -145,6 +173,7 @@ describe('manager/updateState', () => {
 
     expect(mocks.updateBundleInfo).not.toHaveBeenCalled();
     expect(mocks.reportInstalledIfReady).not.toHaveBeenCalled();
+    expect(mocks.deleteBundleInfo).toHaveBeenCalledTimes(1);
 
     const noPending = loadUpdateStateModule({
       bundlePath: '/bundles/hash-1/main.jsbundle',
@@ -175,7 +204,10 @@ describe('manager/updateState', () => {
       reportError: new Error('report failed'),
     });
 
-    await expect(noPendingReportFailure.module.reconcileAppliedBundleOnLaunch()).resolves.toBeUndefined();
+    await expect(noPendingReportFailure.module.reconcileAppliedBundleOnLaunch()).resolves.toEqual({
+      hash: 'hash-2',
+      pendingApply: false,
+    });
     await Promise.resolve();
     expect(noPendingReportFailure.mocks.updateBundleInfo).not.toHaveBeenCalled();
     expect(noPendingReportFailure.mocks.reportInstalledIfReady).toHaveBeenCalledTimes(1);
@@ -192,7 +224,10 @@ describe('manager/updateState', () => {
       reportError: new Error('report failed'),
     });
 
-    await expect(module.reconcileAppliedBundleOnLaunch()).resolves.toBeUndefined();
+    await expect(module.reconcileAppliedBundleOnLaunch()).resolves.toMatchObject({
+      hash: 'hash-4',
+      pendingApply: false,
+    });
     await Promise.resolve();
 
     expect(mocks.updateBundleInfo).toHaveBeenCalledWith(
@@ -201,6 +236,114 @@ describe('manager/updateState', () => {
       })
     );
     expect(mocks.reportInstalledIfReady).toHaveBeenCalledTimes(1);
+  });
+
+  it('reconstructs recovered metadata from the executing verified bundle', async () => {
+    const { module, mocks } = loadUpdateStateModule({
+      bundlePath: '/bundles/stable-hash/main.jsbundle',
+      bundleInfo: {
+        hash: 'failed-hash',
+        channelName: 'Failed candidate channel',
+        runtimeVersion: 'failed-runtime',
+        version: 'failed-version',
+        bundleVersion: 99,
+        pendingApply: true,
+        installedReportedHashes: ['stable-hash'],
+      },
+      recoveredManifest: {
+        bundleHash: 'stable-hash',
+        runtimeVersion: 'stable-runtime',
+        version: '2.1.0',
+      },
+      recoveredMetadata: {
+        bundleVersion: 21,
+        runtimeVersion: 'metadata-runtime',
+        version: 'metadata-version',
+      },
+    });
+
+    await expect(module.reconcileAppliedBundleOnLaunch({
+      bundleInfo: {
+        hash: 'failed-hash',
+        channelName: 'Failed candidate channel',
+        runtimeVersion: 'failed-runtime',
+        pendingApply: true,
+        installedReportedHashes: ['stable-hash'],
+      },
+      bundlePath: '/bundles/stable-hash/main.jsbundle',
+      currentHash: 'stable-hash',
+    })).resolves.toEqual({
+      hash: 'stable-hash',
+      bundleVersion: 21,
+      version: '2.1.0',
+      runtimeVersion: 'stable-runtime',
+      platform: 'android',
+      installedAt: expect.any(String),
+      pendingApply: false,
+      lastInstalledReportedHash: 'stable-hash',
+      installedReportedHashes: ['stable-hash'],
+    });
+
+    expect(mocks.verifyBundleDir).toHaveBeenCalledWith(
+      '/bundles/stable-hash',
+      'stable-hash',
+      'android',
+    );
+    expect(mocks.writeBundleInfoDurably).toHaveBeenCalledWith(
+      expect.not.objectContaining({ channelName: 'Failed candidate channel' }),
+    );
+  });
+
+  it('reconstructs an iOS recovery without optional metadata and ignores report failures', async () => {
+    const { module, mocks } = loadUpdateStateModule({
+      platform: 'ios',
+      bundlePath: '/bundles/stable-hash/main.jsbundle',
+      bundleInfo: {
+        hash: 'failed-hash',
+        pendingApply: true,
+      },
+      recoveredManifest: {
+        bundleHash: 'stable-hash',
+        runtimeVersion: 'stable-runtime',
+        version: '2.2.0',
+      },
+      recoveredMetadata: null,
+      reportError: new Error('offline'),
+    });
+
+    await expect(module.reconcileAppliedBundleOnLaunch({
+      bundleInfo: { hash: 'failed-hash', pendingApply: true },
+      bundlePath: '/bundles/stable-hash/main.jsbundle',
+      currentHash: 'stable-hash',
+    })).resolves.toEqual({
+      hash: 'stable-hash',
+      bundleVersion: undefined,
+      version: '2.2.0',
+      runtimeVersion: 'stable-runtime',
+      platform: 'ios',
+      installedAt: expect.any(String),
+      pendingApply: false,
+      lastInstalledReportedHash: undefined,
+      installedReportedHashes: undefined,
+    });
+    await Promise.resolve();
+
+    expect(mocks.readJsonFile).not.toHaveBeenCalled();
+    expect(mocks.reportInstalledIfReady).toHaveBeenCalledTimes(1);
+  });
+
+  it('returns null metadata when a downloaded bundle has no stored bundle info', async () => {
+    const { module, mocks } = loadUpdateStateModule({
+      bundlePath: '/bundles/untracked/main.jsbundle',
+      bundleInfo: null,
+    });
+
+    await expect(module.reconcileAppliedBundleOnLaunch()).resolves.toBeNull();
+    expect(mocks.reportInstalledIfReady).toHaveBeenCalledWith({
+      hasBundle: true,
+      info: null,
+      pendingApply: false,
+    });
   });
 
   it('returns noBundle and alreadyApplied when apply preconditions fail', async () => {

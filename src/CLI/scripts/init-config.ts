@@ -7,19 +7,22 @@ import prompts from 'prompts';
 
 import type { ProjectType } from '../../expo';
 import {
-  createGeneratedRuntimeDeliveryBootstrap,
+  createRuntimeDeliveryBootstrapLockfile,
   ensureRuntimeDeliveryBootstrapGitignore,
   normalizeRuntimeDeliveryBootstrap,
-  removeGeneratedRuntimeDeliveryBootstrap,
+  readRuntimeDeliveryLockfile,
+  removeAllRuntimeDeliveryBootstraps,
+  removeLegacyRuntimeDeliveryBootstrap,
   runtimeDeliveryBootstrapPath,
-  serializeGeneratedRuntimeDeliveryBootstrap,
-  writeGeneratedRuntimeDeliveryBootstrap,
-  type GeneratedRuntimeDeliveryBootstrap,
+  serializeRuntimeDeliveryBootstrapLockfile,
+  writeRuntimeDeliveryBootstrapLockfile,
+  type RuntimeDeliveryBootstrapLockfile,
 } from '../../runtime-delivery/bootstrapConfig';
 import {
   inspectProjectFile,
   writeProjectFileAtomically,
 } from './safe-file-transaction';
+import { assertMatchingServerOrigin, normalizeServerUrl } from '../serverUrl';
 
 const DOCS_PROJECT_CREATION_URL = 'https://bundledrop.app/docs/project-creation';
 const DOCS_INSTALLATION_URL = 'https://bundledrop.app/docs/installation';
@@ -49,10 +52,6 @@ type BundleDropConfigValues = {
 };
 
 export { normalizeRuntimeDeliveryBootstrap } from '../../runtime-delivery/bootstrapConfig';
-
-function normalizeServerUrl(url: string): string {
-  return url.replace(/\/$/, '');
-}
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return Boolean(value) && typeof value === 'object' && !Array.isArray(value);
@@ -215,7 +214,7 @@ async function fetchProjectCredentials(params: {
 type RuntimeDeliveryBootstrapResult = {
   bootstrapPath?: string;
   bootstrapContent?: string;
-  bootstrap?: GeneratedRuntimeDeliveryBootstrap;
+  bootstrap?: RuntimeDeliveryBootstrapLockfile;
   runtimeDeliveryAvailable?: boolean;
   bootstrapRetired?: boolean;
 };
@@ -239,7 +238,7 @@ function createBootstrapResult(params: {
       bootstrapRetired: true,
     };
   }
-  const bootstrap = createGeneratedRuntimeDeliveryBootstrap({
+  const bootstrap = createRuntimeDeliveryBootstrapLockfile({
     identity: {
       serverUrl: params.serverUrl,
       orgSlug: params.orgSlug,
@@ -257,7 +256,7 @@ function createBootstrapResult(params: {
   return {
     bootstrap,
     bootstrapPath: runtimeDeliveryBootstrapPath(params.projectRoot),
-    bootstrapContent: serializeGeneratedRuntimeDeliveryBootstrap(bootstrap),
+    bootstrapContent: serializeRuntimeDeliveryBootstrapLockfile(bootstrap),
     runtimeDeliveryAvailable: true,
   };
 }
@@ -267,21 +266,35 @@ async function persistBootstrap(
   result: RuntimeDeliveryBootstrapResult,
 ): Promise<void> {
   if (result.bootstrap) {
-    const bootstrapPath = await writeGeneratedRuntimeDeliveryBootstrap({
+    const bootstrapPath = await writeRuntimeDeliveryBootstrapLockfile({
       projectRoot,
       bootstrap: result.bootstrap,
     });
+    const persisted = readRuntimeDeliveryLockfile({
+      projectRoot,
+      expectedIdentity: result.bootstrap.project,
+    });
+    if (
+      !persisted ||
+      serializeRuntimeDeliveryBootstrapLockfile(persisted) !==
+        serializeRuntimeDeliveryBootstrapLockfile(result.bootstrap)
+    ) {
+      throw new Error(
+        'Runtime delivery lockfile validation failed after writing. The legacy bootstrap was preserved.',
+      );
+    }
+    await removeLegacyRuntimeDeliveryBootstrap(projectRoot);
     await ensureRuntimeDeliveryBootstrapGitignore(projectRoot);
-    console.log(chalk.green(`✅ Synced Bundle Drop runtime delivery bootstrap at ${bootstrapPath}`));
+    console.log(chalk.green(`✅ Synced Bundle Drop runtime delivery lockfile at ${bootstrapPath}`));
     return;
   }
   if (result.bootstrapRetired) {
-    const bootstrapPath = await removeGeneratedRuntimeDeliveryBootstrap(projectRoot);
+    const removedPaths = await removeAllRuntimeDeliveryBootstraps(projectRoot);
     console.log(
       chalk.green(
-        bootstrapPath
-          ? `✅ Removed the runtime delivery bootstrap because delivery is disabled for this project: ${bootstrapPath}`
-          : '✅ Runtime delivery is disabled for this project; no bootstrap is present.',
+        removedPaths.length
+          ? `✅ Removed runtime delivery bootstrap files because delivery is disabled for this project: ${removedPaths.join(', ')}`
+          : '✅ Runtime delivery is disabled for this project; no bootstrap file is present.',
       ),
     );
   }
@@ -351,6 +364,7 @@ export async function initConfig(params: {
     const existing = loadExistingConfig(configPath, existingConfigFile.content);
     let bootstrapResult: RuntimeDeliveryBootstrapResult = {};
     if (existing && params.authToken) {
+      assertMatchingServerOrigin(existing.serverUrl, params.serverUrl);
       const credentials = await fetchProjectCredentials({
         serverUrl: existing.serverUrl,
         orgSlug: existing.orgSlug,

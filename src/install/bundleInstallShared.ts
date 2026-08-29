@@ -2,7 +2,7 @@ import RNFS from '../native/fs';
 
 import { BUNDLE_DROP_ROOT } from '../context';
 import { BundleInfo } from '../bundleInfo';
-import { readCurrentBundlePointer } from '../fs/bundlePointer';
+import { readCurrentBundleHash } from '../fs/bundlePointer';
 import { ensureDir } from '../fs/fsUtils';
 import { InstallPhaseError } from '../errors';
 import {
@@ -90,8 +90,8 @@ export const finalizeInstall = async (
     try {
       existingManifest = await verifyBundleDir(bundleDir, hash, platform);
     } catch (e) {
-      const currentPointer = await readCurrentBundlePointer();
-      if (currentPointer?.hash === hash) {
+      const currentHash = await readCurrentBundleHash();
+      if (currentHash === hash) {
         throw new Error('Active bundle folder failed verification');
       }
     }
@@ -102,8 +102,8 @@ export const finalizeInstall = async (
       return { bundlePath, metadataFromZip };
     }
 
-    const currentPointer = await readCurrentBundlePointer();
-    if (currentPointer?.hash === hash) {
+    const currentHash = await readCurrentBundleHash();
+    if (currentHash === hash) {
       throw new Error('Active bundle folder failed verification');
     }
     await RNFS.unlink(bundleDir);

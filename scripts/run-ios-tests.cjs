@@ -8,6 +8,7 @@ const repoRoot = path.resolve(__dirname, '..');
 
 const FILE_THRESHOLDS = {
   'ios/BundleDropOtaResolver.swift': 90,
+  'ios/BundleDropStartupRecovery.swift': 90,
   'ios/BundleDropFileOps.swift': 75,
   'ios/BundleDropLocator.swift': 60,
   'ios/BundleDropZipExtractor.m': 65,

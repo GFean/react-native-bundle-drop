@@ -5,7 +5,15 @@ import { getDownloadedBundlePathNative } from '../native/bundleDropNative';
 import { getOrCreateInstallId } from '../fs/installId';
 import { getCurrentUserProperties } from '../fs/userProperties';
 import { getBundleDropRuntimeConfig } from '../runtime/initState';
-import type { FailedBundleRecord } from './rollbackState';
+
+export type FailedBundleRecord = {
+  reason: 'crash_loop';
+  failedAt: number;
+  crashCount?: number;
+  channelName?: string;
+  runtimeVersion?: string;
+  previousHash?: string;
+};
 
 const MAX_REPORTED_INSTALL_HASHES = 50;
 const installedReportInFlightHashes = new Set<string>();
@@ -69,27 +77,26 @@ export async function reportInstalledIfReady(state?: { hasBundle?: boolean; info
   }
 }
 
-export async function reportLocalRollback(hash: string, record: FailedBundleRecord): Promise<void> {
-  try {
-    const [installId, userProperties] = await Promise.all([
-      getOrCreateInstallId(),
-      getCurrentUserProperties(),
-    ]);
-    const appEnvironment = getBundleDropRuntimeConfig()?.environment ?? null;
+export async function reportLocalRollback(
+  hash: string,
+  record: FailedBundleRecord,
+): Promise<void> {
+  const [installId, userProperties] = await Promise.all([
+    getOrCreateInstallId(),
+    getCurrentUserProperties(),
+  ]);
+  const appEnvironment = getBundleDropRuntimeConfig()?.environment ?? null;
 
-    await postLocalRollbackReport(config.project.slug, hash, {
-      reason: record.reason,
-      previousHash: record.previousHash ?? null,
-      channelName: record.channelName ?? null,
-      platform,
-      installId,
-      runtimeVersion: record.runtimeVersion ?? runtimeVersion ?? null,
-      environment: appEnvironment,
-      userProperties: Object.keys(userProperties).length > 0 ? userProperties : undefined,
-      crashCount: record.crashCount ?? null,
-      failedAt: record.failedAt ? new Date(record.failedAt * 1000).toISOString() : null,
-    });
-  } catch (e) {
-    console.warn('⚠️ Failed to report local rollback:', e?.toString?.() || e);
-  }
+  await postLocalRollbackReport(config.project.slug, hash, {
+    reason: record.reason,
+    previousHash: record.previousHash ?? null,
+    channelName: record.channelName ?? null,
+    platform,
+    installId,
+    runtimeVersion: record.runtimeVersion ?? runtimeVersion ?? null,
+    environment: appEnvironment,
+    userProperties: Object.keys(userProperties).length > 0 ? userProperties : undefined,
+    crashCount: record.crashCount ?? null,
+    failedAt: record.failedAt ? new Date(record.failedAt * 1000).toISOString() : null,
+  });
 }

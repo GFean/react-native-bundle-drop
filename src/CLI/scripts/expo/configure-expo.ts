@@ -1,7 +1,11 @@
 import crypto from 'crypto';
 import path from 'path';
 import { setBundleDropProjectType } from '../../../expo/projectType';
-import { addRuntimeDeliveryBootstrapGitignoreRules } from '../../../runtime-delivery/bootstrapConfig';
+import {
+  addRuntimeDeliveryBootstrapGitignoreRules,
+  LEGACY_RUNTIME_DELIVERY_BOOTSTRAP_PATH,
+  RUNTIME_DELIVERY_BOOTSTRAP_PATH,
+} from '../../../runtime-delivery/bootstrapConfig';
 import {
   createSafeBackupDirectory,
   inspectProjectFile,
@@ -241,7 +245,8 @@ const assertSetupPathAllowed = (file: string) => {
     file === 'package.json' ||
     file === '.fingerprintignore' ||
     file === '.gitignore' ||
-    file === '.bundle-drop/runtime-delivery.generated.json' ||
+    file === RUNTIME_DELIVERY_BOOTSTRAP_PATH ||
+    file === LEGACY_RUNTIME_DELIVERY_BOOTSTRAP_PATH ||
     file === 'bundle.drop.config.js' ||
     file === 'app.json' ||
     /^app\.config\.(js|ts|cjs|mjs)$/.test(file) ||

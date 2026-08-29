@@ -12,8 +12,9 @@ import {
   isExpoOtaStartupEnabledNative,
   restartReactNativeNative,
   setOtaEnabledNative,
+  warnIfStartupRecoveryUnavailableNative,
 } from '../native/bundleDropNative';
-import { readCurrentBundlePointer } from '../fs/bundlePointer';
+import { readCurrentBundleHash } from '../fs/bundlePointer';
 import type { DownloadUpdateResult } from '../manager/downloadAndInstall';
 import {
   downloadUpdate as downloadUpdateInternal,
@@ -25,11 +26,10 @@ import {
   checkForUpdate as checkForUpdateInternal,
 } from '../manager/updateCheck';
 import {
-  getRollbackPolicy,
-  readRollbackState,
+  readStartupRecoveryState,
+  reconcileStartupRecovery,
   reportActiveBundleHealthy,
-  rollbackToPreviousIfNeeded,
-  rollbackToPreviousOrNative,
+  rollbackStartupBundle,
 } from '../manager/rollbackState';
 import type { ApplyUpdateResult } from '../manager/updateState';
 import {
@@ -80,14 +80,11 @@ type ApplyAndRefreshResult = { result: ApplyUpdateResult; status?: string };
 type CheckLatestResult = { response: UpdateCheckResponse | null; status?: string };
 type LocalStartupState = {
   bundlePath: string | null;
-  currentPointer: Awaited<ReturnType<typeof readCurrentBundlePointer>>;
-  rollbackState: Awaited<ReturnType<typeof readRollbackState>>;
 };
 
 let updateFlowActive = false;
 let startupPromise: Promise<void> | null = null;
 let localStartupPromise: Promise<LocalStartupState> | null = null;
-let healthTimer: ReturnType<typeof setTimeout> | null = null;
 let runtimeRestartRequested = false;
 let activeBundleInfoForObservability: BundleInfo | null = null;
 let nativeOtaEnabledPromise: Promise<void> = Promise.resolve();
@@ -223,65 +220,24 @@ function getApplyStatus(result: ApplyUpdateResult): string | undefined {
         : 'ℹ️ Bundle already applied';
 }
 
-function clearHealthTimer() {
-  if (!healthTimer) return;
-  clearTimeout(healthTimer);
-  healthTimer = null;
-}
-
 function requestRuntimeRestart() {
   runtimeRestartRequested = true;
   restartReactNativeNative();
 }
 
 async function applyAuthoritativeRollback(reason?: string): Promise<void> {
-  if (isCurrentRevokedRollback(reason)) {
-    await rollbackToPreviousOrNative({ forceNative: true });
-  } else {
-    await rollbackToPreviousOrNative();
+  const result = await rollbackStartupBundle(isCurrentRevokedRollback(reason));
+  if (result?.rolledBack) {
+    requestRuntimeRestart();
   }
-  requestRuntimeRestart();
 }
 
-async function markActiveCandidateHealthy(expectedHash?: string): Promise<boolean> {
-  if (runtimeRestartRequested) {
-    return false;
-  }
-
-  const state = await getUpdateStateInternal();
-  if (runtimeRestartRequested) {
-    return false;
-  }
-
-  if (state.pendingApply) {
-    return false;
-  }
-
-  const markedHealthy = await reportActiveBundleHealthy(undefined, expectedHash);
+async function markActiveCandidateHealthy(): Promise<boolean> {
+  const markedHealthy = await reportActiveBundleHealthy();
   if (markedHealthy) {
     await refreshState();
   }
   return markedHealthy;
-}
-
-function scheduleCandidateHealthMark(
-  currentPointer: Awaited<ReturnType<typeof readCurrentBundlePointer>>,
-  rollbackState: Awaited<ReturnType<typeof readRollbackState>>,
-) {
-  clearHealthTimer();
-
-  const hash = currentPointer?.hash;
-  const rollbackPolicy = getRollbackPolicy();
-  if (!hash || rollbackPolicy.healthCheckMode === 'manual') return;
-  if (rollbackState?.candidateHash !== hash || rollbackState.candidateCommitted === true) return;
-
-  const delayMs = Math.max(0, rollbackPolicy.healthyAfterSec || 0) * 1000;
-  healthTimer = setTimeout(() => {
-    healthTimer = null;
-    markActiveCandidateHealthy(hash).catch(error => {
-      console.warn('⚠️ Failed to mark BundleDrop candidate healthy:', error);
-    });
-  }, delayMs);
 }
 
 async function refreshState(cached?: {
@@ -328,23 +284,29 @@ async function waitForLocalStartupIfNeeded(): Promise<void> {
 }
 
 async function runLocalStartupFlow(): Promise<LocalStartupState> {
-  const [bundleInfo, bundlePath, currentPointer, rollbackState] = await Promise.all([
+  const [bundleInfo, bundlePath, currentHash, recoveryState] = await Promise.all([
     readBundleInfo(),
     getDownloadedBundlePathNative(),
-    readCurrentBundlePointer(),
-    readRollbackState(),
+    readCurrentBundleHash(),
+    readStartupRecoveryState(),
   ]);
 
-  await reconcileAppliedBundleOnLaunch({ bundleInfo, bundlePath });
-  await refreshState({ bundleInfo, bundlePath });
-  const state = await getUpdateStateInternal({ bundlePath });
+  void reconcileStartupRecovery(recoveryState, bundleInfo).catch(error => {
+    console.warn('⚠️ Failed to reconcile BundleDrop startup recovery telemetry:', error);
+  });
+  const reconciledBundleInfo = await reconcileAppliedBundleOnLaunch({
+    bundleInfo,
+    bundlePath,
+    currentHash,
+  });
+  await refreshState({ bundleInfo: reconciledBundleInfo, bundlePath });
+  const state = await getUpdateStateInternal({
+    bundleInfo: reconciledBundleInfo,
+    bundlePath,
+  });
   activeBundleInfoForObservability = state.hasBundle ? state.info || null : null;
 
-  return {
-    bundlePath,
-    currentPointer,
-    rollbackState,
-  };
+  return { bundlePath };
 }
 
 async function runStartupFlow() {
@@ -357,22 +319,7 @@ async function runStartupFlow() {
     await nativeOtaEnabledPromise;
     return runLocalStartupFlow();
   })();
-  const { bundlePath, currentPointer, rollbackState } = await localStartupPromise;
-
-  const rollbackPolicy = getRollbackPolicy();
-  const rollbackResult = await rollbackToPreviousIfNeeded(rollbackPolicy, {
-    currentPointer,
-    rollbackState,
-  });
-
-  if (rollbackResult.rolledBack) {
-    clearHealthTimer();
-    emitStatus('↩️ Rolled back to previous bundle');
-    requestRuntimeRestart();
-    return;
-  }
-
-  scheduleCandidateHealthMark(currentPointer, await readRollbackState());
+  const { bundlePath } = await localStartupPromise;
 
   const pendingState = await refreshState({ bundlePath });
 
@@ -512,6 +459,9 @@ export function initBundleDrop(options: BundleDropInitOptions): void {
   if (!alreadyInitialized) {
     runtimeRestartRequested = false;
     activeBundleInfoForObservability = null;
+    if (config.enabled) {
+      warnIfStartupRecoveryUnavailableNative();
+    }
   }
 
   // Persist for the next cold start and for native path reads in this process.
@@ -657,11 +607,9 @@ export async function reportHealthy(): Promise<void> {
   if (!runtime) {
     return;
   }
-  await waitForStartupIfNeeded();
-  if (runtimeRestartRequested || updateFlowActive) {
+  if (runtimeRestartRequested) {
     return;
   }
-  clearHealthTimer();
   await markActiveCandidateHealthy();
 }
 
@@ -870,9 +818,9 @@ export async function getObservabilityContext(): Promise<ObservabilityContext> {
 
   return {
     source: 'ota',
-    dist: info.hash ?? 'embedded',
+    dist: info.hash,
     tags: {
-      bundle_drop_hash: info.hash ?? null,
+      bundle_drop_hash: info.hash,
       bundle_drop_channel: info.channelName ?? null,
       bundle_drop_version: info.bundleVersion != null ? `${info.bundleVersion}` : null,
       bundle_drop_runtime_version: info.runtimeVersion ?? null,
@@ -983,7 +931,6 @@ export async function installBundle(
 }
 
 export function resetBundleDropRuntimeServiceForTests() {
-  clearHealthTimer();
   updateFlowActive = false;
   startupPromise = null;
   localStartupPromise = null;

@@ -30,13 +30,106 @@ final class BundleDropModule: NSObject {
     _ resolve: @escaping RCTPromiseResolveBlock,
     rejecter reject: @escaping RCTPromiseRejectBlock
   ) {
-    if let url = BundleDropLocatorCore.bundleURL() {
+    if let url = BundleDropStartupRecoveryAdapter.downloadedBundleURL() {
       print("📦 Found downloaded bundle at: \(url.path)")
       resolve(url.path)
       return
     }
     print("📦 No downloaded bundle found.")
     resolve(nil)
+  }
+
+  @objc
+  func activateStartupCandidate(
+    _ hash: String,
+    maxCrashCount: NSNumber,
+    healthCheckMode: String,
+    healthyAfterSec: NSNumber,
+    resolve: @escaping RCTPromiseResolveBlock,
+    reject: @escaping RCTPromiseRejectBlock
+  ) {
+    runFileOperation(errorCode: "ERR_STARTUP_RECOVERY_ACTIVATE", resolve: resolve, reject: reject) {
+      let crashCount = maxCrashCount.doubleValue
+      let healthDelay = healthyAfterSec.doubleValue
+      guard crashCount.isFinite,
+            crashCount >= 0,
+            crashCount.rounded(.towardZero) == crashCount,
+            crashCount <= Double(Int32.max),
+            healthDelay.isFinite,
+            healthDelay >= 0 else {
+        throw BundleDropStartupRecoveryError.invalidPolicy
+      }
+      let result = try BundleDropStartupRecoveryAdapter.activateCandidate(
+        hash: hash,
+        maxCrashCount: Int(crashCount),
+        healthCheckMode: healthCheckMode,
+        healthyAfterSec: healthDelay
+      )
+      return ["hash": result.hash, "bundlePath": result.bundleURL.path]
+    }
+  }
+
+  @objc
+  func markStartupHealthy(
+    _ hash: String,
+    attemptId: String,
+    resolve: @escaping RCTPromiseResolveBlock,
+    reject: @escaping RCTPromiseRejectBlock
+  ) {
+    runFileOperation(errorCode: "ERR_STARTUP_RECOVERY_HEALTH", resolve: resolve, reject: reject) {
+      BundleDropStartupRecoveryAdapter.markHealthy(hash: hash, attemptId: attemptId)
+    }
+  }
+
+  @objc
+  func getStartupRecoveryState(
+    _ resolve: @escaping RCTPromiseResolveBlock,
+    reject: @escaping RCTPromiseRejectBlock
+  ) {
+    runFileOperation(errorCode: "ERR_STARTUP_RECOVERY_STATE", resolve: resolve, reject: reject) {
+      try BundleDropStartupRecoveryAdapter.snapshot()
+    }
+  }
+
+  @objc
+  func setStartupRecoveryRevokedHashes(
+    _ hashes: [String],
+    resolve: @escaping RCTPromiseResolveBlock,
+    reject: @escaping RCTPromiseRejectBlock
+  ) {
+    runFileOperation(errorCode: "ERR_STARTUP_RECOVERY_REVOKE", resolve: resolve, reject: reject) {
+      try BundleDropStartupRecoveryAdapter.setRevokedHashes(hashes)
+    }
+  }
+
+  @objc
+  func acknowledgeStartupRecovery(
+    _ eventId: String,
+    resolve: @escaping RCTPromiseResolveBlock,
+    reject: @escaping RCTPromiseRejectBlock
+  ) {
+    runFileOperation(errorCode: "ERR_STARTUP_RECOVERY_ACK", resolve: resolve, reject: reject) {
+      try BundleDropStartupRecoveryAdapter.acknowledgeRecovery(eventId: eventId)
+    }
+  }
+
+  @objc
+  func rollbackStartupBundle(
+    _ forceEmbedded: Bool,
+    resolve: @escaping RCTPromiseResolveBlock,
+    reject: @escaping RCTPromiseRejectBlock
+  ) {
+    runFileOperation(errorCode: "ERR_STARTUP_RECOVERY_ROLLBACK", resolve: resolve, reject: reject) {
+      let result = try BundleDropStartupRecoveryAdapter.rollback(forceEmbedded: forceEmbedded)
+      var response: [String: Any] = [
+        "rolledBack": result.rolledBack,
+        "toEmbedded": result.toEmbedded,
+      ]
+      if let hash = result.hash {
+        response["hash"] = hash
+      }
+      return response
+    }
   }
 
   @objc
@@ -57,14 +150,19 @@ final class BundleDropModule: NSObject {
         return
       }
 
-      guard let url = BundleDropLocatorCore.bundleURL() else {
+      guard let stagedURL = BundleDropStartupRecoveryAdapter.downloadedBundleURL() else {
         print("⚠️ No downloaded bundle found; skipping restart.")
         return
       }
 
-      let size = BundleDropLocatorCore.fileSize(at: url)
+      let size = BundleDropLocatorCore.fileSize(at: stagedURL)
       if size < 1024 {
         print("⚠️ Bundle exists but looks invalid (size=\(size)). Skipping restart.")
+        return
+      }
+
+      guard let url = BundleDropStartupRecoveryAdapter.beginReload() else {
+        print("⚠️ Downloaded bundle became unavailable; skipping restart.")
         return
       }
 
@@ -87,9 +185,14 @@ final class BundleDropModule: NSObject {
     let fm = FileManager.default
     let docs = fm.urls(for: .documentDirectory, in: .userDomainMask).first?.path ?? ""
     let lib = fm.urls(for: .libraryDirectory, in: .userDomainMask).first?.path ?? ""
+    let attempt = BundleDropStartupRecoveryAdapter.capturedAttempt()
     return [
       "DocumentDirectoryPath": docs,
       "LibraryDirectoryPath": lib,
+      "startupRecoveryProtocolVersion": BundleDropStartupRecoveryAdapter.protocolVersion,
+      "startupRecoverySelectedHash": BundleDropStartupRecoveryAdapter.capturedSelectedHash() ?? NSNull(),
+      "startupRecoveryAttemptHash": attempt.hash ?? NSNull(),
+      "startupRecoveryAttemptId": attempt.attemptId ?? NSNull(),
     ]
   }
 

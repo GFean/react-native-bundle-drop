@@ -13,7 +13,7 @@ describe('Expo native target isolation', () => {
     const expoPodspec = readPackageFile('BundleDropExpo.podspec');
     const expoAndroidBuild = readPackageFile('expo/android/build.gradle');
 
-    expect(packageManifest.nativeVersion).toBe('0.5.0');
+    expect(packageManifest.nativeVersion).toBe('0.6.0');
     expect(barePodspec).toContain('native_version = package["nativeVersion"] || package["version"]');
     expect(expoPodspec).toContain('native_version = package["nativeVersion"] || package["version"]');
     expect(expoAndroidBuild).toContain(
@@ -34,6 +34,34 @@ describe('Expo native target isolation', () => {
     expect(reactNativeConfig).toContain("sourceDir: 'android'");
   });
 
+  it('embeds the literal bare runtime identity in native application builds', () => {
+    const barePodspec = readPackageFile('BundleDrop.podspec');
+    const bareAndroidBuild = readPackageFile('android/build.gradle');
+
+    expect(barePodspec).toContain('write-runtime-identity.js');
+    expect(barePodspec).toContain('"--platform", "ios"');
+    expect(barePodspec).toContain('"bundle-drop-build-identity.json"');
+    expect(barePodspec).toContain('Digest::SHA256.hexdigest(project_root)[0, 16]');
+    expect(barePodspec).toContain('"runtime-identity"');
+    expect(barePodspec).toContain('s.resources = native_runtime_identity_resource');
+    expect(barePodspec).toContain('s.script_phase = {');
+    expect(barePodspec).toContain(':execution_position => :before_compile');
+    expect(barePodspec).toContain('Regenerate Bundle Drop runtime identity');
+    expect(barePodspec).toContain('"${NODE_BINARY:-node}"');
+    expect(barePodspec).not.toContain(':output_files');
+    expect(barePodspec).not.toContain('return nil unless File.file?(config_path)');
+    expect(barePodspec).toContain('"source" => "unconfigured"');
+    expect(barePodspec).toContain('FileUtils.mkdir_p(File.dirname(output_path))');
+    expect(barePodspec).toContain('return nil if identity["source"] == "expo"');
+    expect(bareAndroidBuild).toContain('BundleDropNativeIdentityCommandExecutor');
+    expect(bareAndroidBuild).toContain('generateBundleDropNativeRuntimeIdentity');
+    expect(bareAndroidBuild).toContain('bundle-drop/build-identity.json');
+    expect(bareAndroidBuild).toContain('android.sourceSets.main.assets.srcDir');
+    expect(bareAndroidBuild).toContain('rootProject.findProject(":bundledrop-expo") == null');
+    expect(bareAndroidBuild).toContain('abstract ExecOperations getExecOperations()');
+    expect(bareAndroidBuild).not.toMatch(/\bproject\.exec\s*\{/);
+  });
+
   it('keeps the iOS adapter in an isolated pod that depends on the unchanged core pod', () => {
     const moduleConfig = JSON.parse(readPackageFile('expo-module.config.json'));
     const expoPodspec = readPackageFile('BundleDropExpo.podspec');
@@ -49,6 +77,7 @@ describe('Expo native target isolation', () => {
     expect(expoPodspec).toContain('s.dependency "ExpoModulesCore"');
     expect(expoPodspec).toContain('s.dependency "BundleDrop"');
     expect(expoPodspec).not.toContain('"ios/**/*.{h,m,mm,swift}"');
+    expect(expoPodspec).not.toContain('Regenerate Bundle Drop runtime identity');
     expect(adapter).toContain('import BundleDrop');
     expect(adapter).toContain('BundleDropLocatorCore.bundleURL()');
     expect(adapter).toContain('EXAppDefines.APP_DEBUG');

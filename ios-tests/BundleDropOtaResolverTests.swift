@@ -212,12 +212,14 @@ final class BundleDropOtaResolverTests: XCTestCase {
     let current = root.appendingPathComponent("current.json")
     let previous = root.appendingPathComponent("previous.json")
     let state = root.appendingPathComponent("state.json")
+    let recoveryLedger = root.appendingPathComponent("recovery-ledger.json")
     let bundleInfo = docs.appendingPathComponent("bundle-info.json")
     let kept = keptDir.appendingPathComponent("main.jsbundle")
 
     try write("{}", to: current)
     try write("{}", to: previous)
     try write("{}", to: state)
+    try write("{}", to: recoveryLedger)
     try write("{}", to: bundleInfo)
     try write("bundle", to: kept)
 
@@ -229,6 +231,7 @@ final class BundleDropOtaResolverTests: XCTestCase {
     XCTAssertFalse(FileManager.default.fileExists(atPath: current.path))
     XCTAssertFalse(FileManager.default.fileExists(atPath: previous.path))
     XCTAssertFalse(FileManager.default.fileExists(atPath: state.path))
+    XCTAssertFalse(FileManager.default.fileExists(atPath: recoveryLedger.path))
     XCTAssertFalse(FileManager.default.fileExists(atPath: bundleInfo.path))
     XCTAssertTrue(FileManager.default.fileExists(atPath: kept.path))
   }

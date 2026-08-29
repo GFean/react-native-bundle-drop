@@ -7,47 +7,149 @@ struct BundleDropOtaResolveResult {
   let storedVersion: String
 }
 
+struct BundleDropOtaPointer {
+  let hash: String
+  let bundleURL: URL
+  let runtimeVersion: String
+}
+
 enum BundleDropOtaResolver {
   static func readCurrentPointer(
     bundleDropRoot: URL,
+    expectedRuntimeVersion: String? = nil,
     fileManager: FileManager = .default
   ) -> URL? {
-    let current = bundleDropRoot.appendingPathComponent("current.json")
-    guard fileManager.fileExists(atPath: current.path) else { return nil }
+    readPointer(
+      named: "current.json",
+      bundleDropRoot: bundleDropRoot,
+      expectedRuntimeVersion: expectedRuntimeVersion,
+      fileManager: fileManager
+    )?.bundleURL
+  }
+
+  static func readPointer(
+    named filename: String,
+    bundleDropRoot: URL,
+    expectedRuntimeVersion: String? = nil,
+    fileManager: FileManager = .default
+  ) -> BundleDropOtaPointer? {
+    let pointerURL = bundleDropRoot.appendingPathComponent(filename)
+    guard fileManager.fileExists(atPath: pointerURL.path) else { return nil }
 
     do {
-      let data = try Data(contentsOf: current)
+      let data = try Data(contentsOf: pointerURL)
       let obj = try JSONSerialization.jsonObject(with: data) as? [String: Any]
       guard let hash = obj?["hash"] as? String,
             hash.range(of: "^[a-f0-9]{64}$", options: .regularExpression) != nil else {
         return nil
       }
-
-      let expectedURL = bundleDropRoot
-        .appendingPathComponent("bundles")
-        .appendingPathComponent(hash)
-        .appendingPathComponent("main.jsbundle")
-      let manifestURL = expectedURL
-        .deletingLastPathComponent()
-        .appendingPathComponent("bundle-manifest.json")
-      guard fileManager.fileExists(atPath: manifestURL.path),
-            let manifestData = try? Data(contentsOf: manifestURL),
-            let manifest = try? JSONSerialization.jsonObject(with: manifestData) as? [String: Any],
-            (manifest["manifestVersion"] as? NSNumber)?.intValue == 1,
-            manifest["bundleHash"] as? String == hash else {
-        return nil
-      }
-      guard verifyBundleDir(
-        bundleDir: expectedURL.deletingLastPathComponent(),
-        manifest: manifest,
-        expectedHash: hash,
+      return verifiedBundle(
+        hash: hash,
+        bundleDropRoot: bundleDropRoot,
+        expectedRuntimeVersion: expectedRuntimeVersion,
         fileManager: fileManager
-      ) else {
-        return nil
-      }
-      return fileManager.fileExists(atPath: expectedURL.path) ? expectedURL : nil
+      )
     } catch {
       return nil
+    }
+  }
+
+  static func readBundle(
+    hash: String,
+    bundleDropRoot: URL,
+    expectedRuntimeVersion: String? = nil,
+    fileManager: FileManager = .default
+  ) -> BundleDropOtaPointer? {
+    guard hash.range(of: "^[a-f0-9]{64}$", options: .regularExpression) != nil else {
+      return nil
+    }
+    return verifiedBundle(
+      hash: hash,
+      bundleDropRoot: bundleDropRoot,
+      expectedRuntimeVersion: expectedRuntimeVersion,
+      fileManager: fileManager
+    )
+  }
+
+  private static func verifiedBundle(
+    hash: String,
+    bundleDropRoot: URL,
+    expectedRuntimeVersion: String?,
+    fileManager: FileManager
+  ) -> BundleDropOtaPointer? {
+    let bundleURL = bundleDropRoot
+      .appendingPathComponent("bundles")
+      .appendingPathComponent(hash)
+      .appendingPathComponent("main.jsbundle")
+    let manifestURL = bundleURL
+      .deletingLastPathComponent()
+      .appendingPathComponent("bundle-manifest.json")
+    guard fileManager.fileExists(atPath: manifestURL.path),
+          let manifestData = try? Data(contentsOf: manifestURL),
+          let manifest = try? JSONSerialization.jsonObject(with: manifestData) as? [String: Any],
+          (manifest["manifestVersion"] as? NSNumber)?.intValue == 1,
+          manifest["bundleHash"] as? String == hash,
+          let runtimeVersion = manifest["runtimeVersion"] as? String,
+          expectedRuntimeVersion == nil || runtimeVersion == expectedRuntimeVersion,
+          verifyBundleDir(
+            bundleDir: bundleURL.deletingLastPathComponent(),
+            manifest: manifest,
+            expectedHash: hash,
+            fileManager: fileManager
+          ),
+          fileManager.fileExists(atPath: bundleURL.path) else {
+      return nil
+    }
+    return BundleDropOtaPointer(hash: hash, bundleURL: bundleURL, runtimeVersion: runtimeVersion)
+  }
+
+  static func writePointer(
+    named filename: String,
+    hash: String,
+    bundleDropRoot: URL,
+    fileManager: FileManager = .default
+  ) throws {
+    guard hash.range(of: "^[a-f0-9]{64}$", options: .regularExpression) != nil else {
+      throw NSError(
+        domain: "BundleDropStartupRecovery",
+        code: 1,
+        userInfo: [NSLocalizedDescriptionKey: "Bundle pointer hash is invalid"]
+      )
+    }
+    try fileManager.createDirectory(at: bundleDropRoot, withIntermediateDirectories: true)
+    let pointerURL = bundleDropRoot.appendingPathComponent(filename)
+    let pointer: [String: Any] = [
+      "hash": hash,
+      "updatedAt": ISO8601DateFormatter().string(from: Date()),
+    ]
+    let temporaryURL = bundleDropRoot.appendingPathComponent(
+      ".\(filename)-\(UUID().uuidString).tmp"
+    )
+    do {
+      try JSONSerialization.data(withJSONObject: pointer, options: [.sortedKeys])
+        .write(to: temporaryURL)
+      let handle = try FileHandle(forWritingTo: temporaryURL)
+      try handle.synchronize()
+      try handle.close()
+      if fileManager.fileExists(atPath: pointerURL.path) {
+        _ = try fileManager.replaceItemAt(pointerURL, withItemAt: temporaryURL)
+      } else {
+        try fileManager.moveItem(at: temporaryURL, to: pointerURL)
+      }
+    } catch {
+      try? fileManager.removeItem(at: temporaryURL)
+      throw error
+    }
+  }
+
+  static func deletePointer(
+    named filename: String,
+    bundleDropRoot: URL,
+    fileManager: FileManager = .default
+  ) throws {
+    let pointerURL = bundleDropRoot.appendingPathComponent(filename)
+    if fileManager.fileExists(atPath: pointerURL.path) {
+      try fileManager.removeItem(at: pointerURL)
     }
   }
 
@@ -174,27 +276,32 @@ enum BundleDropOtaResolver {
     return String(encoded.dropFirst().dropLast()).replacingOccurrences(of: "\\/", with: "/")
   }
 
+  @discardableResult
   static func clearOtaState(
     bundleDropRoot: URL,
     documentsDirectory: URL,
     fileManager: FileManager = .default
-  ) {
+  ) -> Bool {
     let filesToClear = [
       bundleDropRoot.appendingPathComponent("current.json"),
       bundleDropRoot.appendingPathComponent("previous.json"),
       bundleDropRoot.appendingPathComponent("state.json"),
+      bundleDropRoot.appendingPathComponent("recovery-ledger.json"),
       documentsDirectory.appendingPathComponent("bundle-info.json"),
     ]
 
+    var clearedAllFiles = true
     filesToClear.forEach { url in
       do {
         if fileManager.fileExists(atPath: url.path) {
           try fileManager.removeItem(at: url)
         }
       } catch {
+        clearedAllFiles = false
         // Best effort cleanup; a single bad file should not block native fallback.
       }
     }
+    return clearedAllFiles
   }
 
   static func hasOtaState(
@@ -206,6 +313,7 @@ enum BundleDropOtaResolver {
       bundleDropRoot.appendingPathComponent("current.json"),
       bundleDropRoot.appendingPathComponent("previous.json"),
       bundleDropRoot.appendingPathComponent("state.json"),
+      bundleDropRoot.appendingPathComponent("recovery-ledger.json"),
       documentsDirectory.appendingPathComponent("bundle-info.json"),
     ].contains { url in
       fileManager.fileExists(atPath: url.path)
@@ -226,7 +334,7 @@ enum BundleDropOtaResolver {
         documentsDirectory: documentsDirectory,
         fileManager: fileManager
       )
-      clearOtaState(
+      let clearedAllFiles = clearOtaState(
         bundleDropRoot: bundleDropRoot,
         documentsDirectory: documentsDirectory,
         fileManager: fileManager
@@ -234,7 +342,7 @@ enum BundleDropOtaResolver {
       return BundleDropOtaResolveResult(
         bundleURL: nil,
         clearedOta: hadOtaState,
-        storedVersion: currentBinaryVersion
+        storedVersion: clearedAllFiles ? currentBinaryVersion : storedBinaryVersion
       )
     }
 

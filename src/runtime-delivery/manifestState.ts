@@ -13,6 +13,10 @@ export type VerifiedLaneState = {
   verifiedAt: string;
 };
 
+export type PersistVerifiedRuntimeRevocations = (
+  revokedHashes: string[],
+) => Promise<void>;
+
 type RuntimeDeliveryState = {
   schemaVersion: 1;
   lanes: Record<string, VerifiedLaneState>;
@@ -74,6 +78,27 @@ function laneStateKey(identity: RuntimeDeliveryLaneIdentity): string {
     .join('/');
 }
 
+function belongsToRuntime(
+  laneKey: string,
+  identity: RuntimeDeliveryLaneIdentity,
+): boolean {
+  const parts = laneKey.split('/');
+  return parts.length === 4 &&
+    parts[0] === encodeURIComponent(identity.projectSlug) &&
+    parts[2] === encodeURIComponent(identity.platform) &&
+    parts[3] === encodeURIComponent(identity.runtimeVersion);
+}
+
+function verifiedRuntimeRevokedHashes(
+  state: RuntimeDeliveryState,
+  identity: RuntimeDeliveryLaneIdentity,
+): string[] {
+  const revokedHashes = Object.entries(state.lanes)
+    .filter(([key]) => belongsToRuntime(key, identity))
+    .flatMap(([, lane]) => lane.revokedHashes);
+  return Array.from(new Set(revokedHashes)).sort();
+}
+
 async function readState(): Promise<RuntimeDeliveryState> {
   if (!await RNFS.exists(STATE_PATH)) return { schemaVersion: 1, lanes: {} };
   let raw: string;
@@ -92,9 +117,17 @@ export async function readVerifiedLaneState(
   return state.lanes[laneStateKey(identity)] || null;
 }
 
+export async function readVerifiedRuntimeRevokedHashes(
+  identity: RuntimeDeliveryLaneIdentity,
+): Promise<string[]> {
+  const state = await readState();
+  return verifiedRuntimeRevokedHashes(state, identity);
+}
+
 export async function recordVerifiedLaneManifest(
   manifest: RuntimeDeliveryLaneManifest,
   payloadSha256: string,
+  persistRuntimeRevocations?: PersistVerifiedRuntimeRevocations,
 ): Promise<void> {
   const mutation = stateMutation.then(async () => {
     const identity: RuntimeDeliveryLaneIdentity = manifest;
@@ -117,6 +150,9 @@ export async function recordVerifiedLaneManifest(
       revokedHashes: [...manifest.revokedHashes],
       verifiedAt: new Date().toISOString(),
     };
+    if (persistRuntimeRevocations) {
+      await persistRuntimeRevocations(verifiedRuntimeRevokedHashes(state, identity));
+    }
     await atomicWriteJson(STATE_PATH, state);
   });
   stateMutation = mutation.then(() => undefined, () => undefined);

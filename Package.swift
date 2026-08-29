@@ -75,6 +75,8 @@ let package = Package(
         "BundleDropBundleVerifier.swift",
         "BundleDropLocator.swift",
         "BundleDropOtaResolver.swift",
+        "BundleDropStartupRecovery.swift",
+        "BundleDropStartupRecoveryAdapter.swift",
         "BundleDropRuntimeCrypto.swift",
       ]
     ),

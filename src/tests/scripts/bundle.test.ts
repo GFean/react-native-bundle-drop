@@ -12,9 +12,29 @@ type MockZipInstance = {
 
 const zipInstances: MockZipInstance[] = [];
 const mockExecSync = jest.fn();
+const spawnCalls: Array<{ executable: string; args: string[]; options: unknown }> = [];
+
+const quotePath = (value: string) => `"${value}"`;
+const legacyCommand = (executable: string, args: string[]) => {
+  if (executable === process.execPath) {
+    if (args[0]?.replace(/\\/g, '/').endsWith('/react-native/cli.js')) {
+      return ['npx', 'react-native', ...args.slice(1).map(arg =>
+        arg.includes(path.sep) ? quotePath(arg) : arg,
+      )].join(' ');
+    }
+    return ['node', ...args.map(arg => arg.startsWith('-') ? arg : quotePath(arg))].join(' ');
+  }
+  return [quotePath(executable), ...args.map(arg => arg.startsWith('-') ? arg : quotePath(arg))]
+    .join(' ');
+};
 
 jest.mock('child_process', () => ({
-  execSync: (...args: unknown[]) => mockExecSync(...args),
+  spawnSync: (executable: string, args: string[], options: unknown) => {
+    spawnCalls.push({ executable, args, options });
+    const output = mockExecSync(legacyCommand(executable, args), options);
+    if (output && typeof output === 'object' && 'status' in output) return output;
+    return { status: 0, stdout: output ?? '', stderr: '' };
+  },
 }));
 jest.mock('adm-zip', () =>
   jest.fn().mockImplementation(() => {
@@ -27,7 +47,10 @@ jest.mock('adm-zip', () =>
   }),
 );
 
-import { findProjectRoot, runBundleScript } from '../../scripts/bundle';
+import {
+  findProjectRoot,
+  runBundleScript as runBundleScriptImplementation,
+} from '../../scripts/bundle';
 
 describe('scripts/bundle', () => {
   const originalArgv = [...process.argv];
@@ -38,6 +61,10 @@ describe('scripts/bundle', () => {
   let consoleLogSpy: jest.SpyInstance;
   let consoleWarnSpy: jest.SpyInstance;
   let consoleErrorSpy: jest.SpyInstance;
+
+  const runBundleScript = (
+    options: Parameters<typeof runBundleScriptImplementation>[0] = {},
+  ) => runBundleScriptImplementation({ ...options, packageRoot: tempPackageRoot });
 
   const osBin =
     process.platform === 'darwin'
@@ -54,6 +81,7 @@ describe('scripts/bundle', () => {
     consoleWarnSpy = jest.spyOn(console, 'warn').mockImplementation(() => undefined);
     consoleErrorSpy = jest.spyOn(console, 'error').mockImplementation(() => undefined);
     zipInstances.length = 0;
+    spawnCalls.length = 0;
     mockExecSync.mockReset().mockImplementation((command: string) => {
       if (command.includes('react-native bundle')) {
         fs.mkdirSync(path.join(distDir, 'assets', 'drawable-mdpi'), { recursive: true });
@@ -87,7 +115,6 @@ describe('scripts/bundle', () => {
         }
       }
     });
-    process.env.BUNDLE_DROP_PACKAGE_ROOT_OVERRIDE = tempPackageRoot;
     process.env.BUNDLE_DROP_APP_VERSION = '1.2.3';
     process.argv = [...originalArgv];
     fs.rmSync(distDir, { recursive: true, force: true });
@@ -103,7 +130,6 @@ describe('scripts/bundle', () => {
     process.argv = [...originalArgv];
     removeTempDir(tempProjectDir);
     fs.rmSync(tempPackageRoot, { recursive: true, force: true });
-    delete process.env.BUNDLE_DROP_PACKAGE_ROOT_OVERRIDE;
     delete process.env.BUNDLE_DROP_APP_VERSION;
     fs.rmSync(distDir, { recursive: true, force: true });
   });
@@ -584,7 +610,7 @@ describe('scripts/bundle', () => {
     expect(fs.existsSync(path.join(distDir, 'assets', 'stale', 'old.txt'))).toBe(false);
   });
 
-  it('falls back to the package root derived from the script directory when no env override is set', () => {
+  it('derives the package root from the script directory when none is injected', () => {
     const originalResolve = path.resolve.bind(path);
 
     fs.writeFileSync(
@@ -594,8 +620,6 @@ describe('scripts/bundle', () => {
 };`,
       'utf8',
     );
-    delete process.env.BUNDLE_DROP_PACKAGE_ROOT_OVERRIDE;
-
     const resolveSpy = jest.spyOn(path, 'resolve').mockImplementation((...args: string[]) => {
       if (
         args.length === 3 &&
@@ -610,7 +634,7 @@ describe('scripts/bundle', () => {
     });
 
     try {
-      const result = runBundleScript({
+      const result = runBundleScriptImplementation({
         platform: 'ios',
         cwd: tempProjectDir,
       });
@@ -1071,7 +1095,7 @@ describe('scripts/bundle', () => {
     expect(result.sourceMapPath).toBeUndefined();
   });
 
-  it('quotes file paths in the react-native bundle command', () => {
+  it('passes file paths as discrete arguments with shell execution disabled', () => {
     fs.writeFileSync(
       path.join(tempProjectDir, 'bundle.drop.config.js'),
       `module.exports = { runtimeVersion: { ios: '1.0.0' } };`,
@@ -1087,6 +1111,95 @@ describe('scripts/bundle', () => {
     const cmd = bundleCall[0] as string;
     expect(cmd).toMatch(/--bundle-output "[^"]+main\.jsbundle"/);
     expect(cmd).toMatch(/--assets-dest "[^"]+assets"/);
+
+    const spawnCall = spawnCalls.find(call =>
+      call.executable === process.execPath &&
+      call.args[0]?.replace(/\\/g, '/').endsWith('/react-native/cli.js') &&
+      call.args.includes('bundle'),
+    );
+    expect(spawnCall).toEqual(
+      expect.objectContaining({
+        executable: process.execPath,
+        args: expect.arrayContaining([
+          expect.stringMatching(/react-native[\\/]cli\.js$/),
+          'bundle',
+          '--bundle-output',
+          path.join(distDir, 'main.jsbundle'),
+          '--assets-dest',
+          path.join(distDir, 'assets'),
+        ]),
+        options: expect.objectContaining({ shell: false }),
+      }),
+    );
+  });
+
+  it('runs the resolved React Native JavaScript CLI without a platform shell shim', () => {
+    fs.writeFileSync(
+      path.join(tempProjectDir, 'bundle.drop.config.js'),
+      `module.exports = { runtimeVersion: { android: '1.0.0' } };`,
+      'utf8',
+    );
+    const cliPath = path.join(tempProjectDir, 'node_modules', 'react-native', 'cli.js');
+    const packageJsonPath = path.join(path.dirname(cliPath), 'package.json');
+    fs.mkdirSync(path.dirname(cliPath), { recursive: true });
+    fs.writeFileSync(cliPath, '', 'utf8');
+    fs.writeFileSync(packageJsonPath, '{}', 'utf8');
+    const resolveModule = jest.fn(() => packageJsonPath);
+
+    runBundleScriptImplementation({
+      platform: 'android',
+      cwd: tempProjectDir,
+      packageRoot: tempPackageRoot,
+      resolveModule,
+    });
+
+    expect(resolveModule).toHaveBeenCalledWith('react-native/package.json', [
+      tempProjectDir,
+      tempPackageRoot,
+      expect.any(String),
+    ]);
+    expect(spawnCalls[0]).toEqual(expect.objectContaining({
+      executable: process.execPath,
+      args: expect.arrayContaining([cliPath, 'bundle', '--platform', 'android']),
+      options: expect.objectContaining({ shell: false }),
+    }));
+  });
+
+  it('does not interpret shell metacharacters in generated artifact paths', () => {
+    fs.writeFileSync(
+      path.join(tempProjectDir, 'bundle.drop.config.js'),
+      `module.exports = { runtimeVersion: { ios: '1.0.0' } };`,
+      'utf8',
+    );
+    const packageRoot = path.join(
+      tempPackageRoot,
+      'output";touch bundle-drop-pwned;# $()',
+    );
+    const sentinelPath = path.join(tempProjectDir, 'bundle-drop-pwned');
+    const calls: Array<{ executable: string; args: string[]; options: unknown }> = [];
+    const safeSpawn = ((executable: string, args: string[], options: unknown) => {
+      calls.push({ executable, args, options });
+      const bundleOutputIndex = args.indexOf('--bundle-output');
+      const assetsOutputIndex = args.indexOf('--assets-dest');
+      if (bundleOutputIndex >= 0) {
+        fs.mkdirSync(args[assetsOutputIndex + 1], { recursive: true });
+        fs.writeFileSync(args[bundleOutputIndex + 1], 'plain-bundle', 'utf8');
+      }
+      return { status: 0, stdout: '', stderr: '' };
+    }) as typeof import('child_process').spawnSync;
+
+    process.chdir(tempProjectDir);
+    const result = runBundleScriptImplementation({
+      platform: 'ios',
+      cwd: tempProjectDir,
+      packageRoot,
+      spawnProcess: safeSpawn,
+    });
+
+    expect(result.bundlePath).toBe(path.join(packageRoot, 'dist', 'main.jsbundle'));
+    expect(calls[0].options).toEqual(expect.objectContaining({ shell: false }));
+    expect(calls[0].args).toContain(result.bundlePath);
+    expect(fs.existsSync(sentinelPath)).toBe(false);
   });
 
   it('falls back to the plain JS bundle when the Hermes compiler writes no bytecode output', () => {
@@ -1139,5 +1252,86 @@ describe('scripts/bundle', () => {
     expect(() => runBundleScript({ platform: 'ios', cwd: tempProjectDir })).toThrow(
       /Bundle output missing after bundling/,
     );
+  });
+
+  it('propagates a Metro spawn error', () => {
+    fs.writeFileSync(
+      path.join(tempProjectDir, 'bundle.drop.config.js'),
+      `module.exports = { runtimeVersion: { ios: '1.0.0' } };`,
+      'utf8',
+    );
+    const spawnError = new Error('could not start Metro');
+    const failingSpawn = jest.fn().mockReturnValue({
+      status: null,
+      error: spawnError,
+    }) as unknown as typeof import('child_process').spawnSync;
+
+    expect(() =>
+      runBundleScriptImplementation({
+        platform: 'ios',
+        cwd: tempProjectDir,
+        packageRoot: tempPackageRoot,
+        spawnProcess: failingSpawn,
+      }),
+    ).toThrow(spawnError);
+  });
+
+  it('reports stderr when Metro exits unsuccessfully', () => {
+    fs.writeFileSync(
+      path.join(tempProjectDir, 'bundle.drop.config.js'),
+      `module.exports = { runtimeVersion: { ios: '1.0.0' } };`,
+      'utf8',
+    );
+    const failingSpawn = jest.fn().mockReturnValue({
+      status: 9,
+      stdout: '',
+      stderr: 'Metro rejected the arguments',
+    }) as unknown as typeof import('child_process').spawnSync;
+
+    expect(() =>
+      runBundleScriptImplementation({
+        platform: 'ios',
+        cwd: tempProjectDir,
+        packageRoot: tempPackageRoot,
+        spawnProcess: failingSpawn,
+      }),
+    ).toThrow('Metro rejected the arguments');
+  });
+
+  it('handles an iOS project without a native ios directory', () => {
+    fs.writeFileSync(
+      path.join(tempProjectDir, 'bundle.drop.config.js'),
+      `module.exports = { runtimeVersion: { ios: '1.0.0' } };`,
+      'utf8',
+    );
+    fs.rmSync(path.join(tempProjectDir, 'ios'), { recursive: true, force: true });
+
+    expect(runBundleScript({ platform: 'ios', cwd: tempProjectDir }).runtimeVersion).toBe(
+      '1.0.0',
+    );
+  });
+
+  it('refuses a generated cleanup path that escapes dist', () => {
+    fs.writeFileSync(
+      path.join(tempProjectDir, 'bundle.drop.config.js'),
+      `module.exports = { runtimeVersion: { ios: '1.0.0' } };`,
+      'utf8',
+    );
+    const originalResolve = path.resolve.bind(path);
+    const bundlePath = path.join(distDir, 'main.jsbundle');
+    const resolveSpy = jest.spyOn(path, 'resolve').mockImplementation((...args: string[]) => {
+      if (args.length === 1 && args[0] === bundlePath) {
+        return path.join(tempPackageRoot, 'outside-main.jsbundle');
+      }
+      return originalResolve(...args);
+    });
+
+    try {
+      expect(() => runBundleScript({ platform: 'ios', cwd: tempProjectDir })).toThrow(
+        /escaped the package output directory/,
+      );
+    } finally {
+      resolveSpy.mockRestore();
+    }
   });
 });

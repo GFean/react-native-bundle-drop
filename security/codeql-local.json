@@ -1,0 +1,276 @@
+{
+  "schemaVersion": 1,
+  "codeqlVersion": "2.26.3",
+  "querySuite": "default",
+  "threatModel": "remote_and_local",
+  "languages": {
+    "actions": {
+      "buildMode": "none",
+      "suite": "qlpacks/codeql/actions-queries/0.6.33/codeql-suites/actions-code-scanning.qls"
+    },
+    "javascript-typescript": {
+      "buildMode": "none",
+      "suite": "qlpacks/codeql/javascript-queries/2.4.3/codeql-suites/javascript-code-scanning.qls"
+    },
+    "c-cpp": {
+      "buildMode": "none",
+      "suite": "qlpacks/codeql/cpp-queries/1.8.1/codeql-suites/cpp-code-scanning.qls"
+    },
+    "swift": {
+      "buildMode": "autobuild",
+      "suite": "qlpacks/codeql/swift-queries/1.3.8/codeql-suites/swift-code-scanning.qls"
+    }
+  },
+  "acceptedFindings": [
+    {
+      "language": "c-cpp",
+      "ruleId": "cpp/comparison-with-wider-type",
+      "path": "third_party/xdelta/xdelta3/xdelta3.c",
+      "line": 857,
+      "messageSha256": "c78fa66e4dbecb98b965177f4bfccf49a89af87423794ce6a3f431d5411e12bc",
+      "count": 1,
+      "justification": "Vendored xdelta default-table width comparison; inputs and table widths are statically bounded by the upstream format."
+    },
+    {
+      "language": "javascript-typescript",
+      "ruleId": "js/command-line-injection",
+      "path": "scripts/android-gradle-env.cjs",
+      "line": 11,
+      "messageSha256": "e3bd223c0e4ac5eb053b4b087416a149f33775d980bfa027b01ebce5600baf66",
+      "count": 1,
+      "justification": "Maintainer host-test launcher uses explicit argument arrays and no shell; executable paths come from validated Java/Gradle locations."
+    },
+    {
+      "language": "javascript-typescript",
+      "ruleId": "js/command-line-injection",
+      "path": "scripts/run-codeql-local.cjs",
+      "line": 81,
+      "messageSha256": "c6fefa543e4076106b8e4fb11e35e8af829a2d84ef0aa7e65a04ee4b92aacee5",
+      "count": 1,
+      "justification": "Maintainer-only gate requires an explicit pinned CodeQL executable and always invokes it with argument arrays and shell disabled."
+    },
+    {
+      "language": "javascript-typescript",
+      "ruleId": "js/command-line-injection",
+      "path": "src/CLI/scripts/expo/write-build-receipt.ts",
+      "line": 59,
+      "messageSha256": "83755f6f7080b679a02644b2563b660d8857660c4b73e687fc0fdebc6578bf35",
+      "count": 1,
+      "justification": "Android signature tools are resolved from the configured SDK or platform and invoked with explicit arguments and shell disabled."
+    },
+    {
+      "language": "javascript-typescript",
+      "ruleId": "js/path-injection",
+      "path": "scripts/android-gradle-env.cjs",
+      "line": 29,
+      "messageSha256": "745b4f362542507992e779bbeeb84bbe02b3385f68d4fc79ecce9339d14ac4a5",
+      "count": 1,
+      "justification": "Maintainer test launcher inspects an explicitly configured Java home and verifies the expected executable exists before use."
+    },
+    {
+      "language": "javascript-typescript",
+      "ruleId": "js/path-injection",
+      "path": "scripts/inspect-package-tarball.cjs",
+      "line": 36,
+      "messageSha256": "c00a435fca4f003c882557433dd6e852d59f97b52586ca941e11f6037140a0a2",
+      "count": 2,
+      "justification": "Read-only maintainer inspection of the explicitly selected npm tarball after regular-file validation."
+    },
+    {
+      "language": "javascript-typescript",
+      "ruleId": "js/path-injection",
+      "path": "scripts/inspect-package-tarball.cjs",
+      "line": 134,
+      "messageSha256": "c00a435fca4f003c882557433dd6e852d59f97b52586ca941e11f6037140a0a2",
+      "count": 1,
+      "justification": "Read-only hashing of the same explicitly selected and validated npm tarball."
+    },
+    {
+      "language": "javascript-typescript",
+      "ruleId": "js/path-injection",
+      "path": "scripts/run-codeql-local.cjs",
+      "line": 110,
+      "messageSha256": "c00a435fca4f003c882557433dd6e852d59f97b52586ca941e11f6037140a0a2",
+      "count": 1,
+      "justification": "External run root is mandatory, proven outside the repository, and cleanup is restricted to its literal current child."
+    },
+    {
+      "language": "javascript-typescript",
+      "ruleId": "js/path-injection",
+      "path": "scripts/run-codeql-local.cjs",
+      "line": 111,
+      "messageSha256": "c00a435fca4f003c882557433dd6e852d59f97b52586ca941e11f6037140a0a2",
+      "count": 1,
+      "justification": "Creates only the contained source child of the validated external run root."
+    },
+    {
+      "language": "javascript-typescript",
+      "ruleId": "js/path-injection",
+      "path": "scripts/run-codeql-local.cjs",
+      "line": 112,
+      "messageSha256": "c00a435fca4f003c882557433dd6e852d59f97b52586ca941e11f6037140a0a2",
+      "count": 1,
+      "justification": "Creates only the contained results child of the validated external run root."
+    },
+    {
+      "language": "javascript-typescript",
+      "ruleId": "js/path-injection",
+      "path": "scripts/run-codeql-local.cjs",
+      "line": 150,
+      "messageSha256": "c00a435fca4f003c882557433dd6e852d59f97b52586ca941e11f6037140a0a2",
+      "count": 1,
+      "justification": "Checks a pinned query-suite path underneath the verified CodeQL installation."
+    },
+    {
+      "language": "javascript-typescript",
+      "ruleId": "js/path-injection",
+      "path": "scripts/run-codeql-local.cjs",
+      "line": 213,
+      "messageSha256": "c00a435fca4f003c882557433dd6e852d59f97b52586ca941e11f6037140a0a2",
+      "count": 1,
+      "justification": "Reads only the fixed results directory beneath the validated external work root."
+    },
+    {
+      "language": "javascript-typescript",
+      "ruleId": "js/path-injection",
+      "path": "scripts/run-codeql-local.cjs",
+      "line": 216,
+      "messageSha256": "c00a435fca4f003c882557433dd6e852d59f97b52586ca941e11f6037140a0a2",
+      "count": 1,
+      "justification": "Enumerates SARIF files only inside the fixed contained results directory."
+    },
+    {
+      "language": "javascript-typescript",
+      "ruleId": "js/path-injection",
+      "path": "scripts/run-codeql-local.cjs",
+      "line": 222,
+      "messageSha256": "c00a435fca4f003c882557433dd6e852d59f97b52586ca941e11f6037140a0a2",
+      "count": 1,
+      "justification": "Reads only filenames produced by the scanner within its fixed results directory."
+    },
+    {
+      "language": "javascript-typescript",
+      "ruleId": "js/path-injection",
+      "path": "src/CLI/scripts/expo/write-build-receipt.ts",
+      "line": 72,
+      "messageSha256": "8fe6bd88d6342f0f72a3f2d539b6f6f60dc404023a3a97e5fb6aa08f40b5c356",
+      "count": 1,
+      "justification": "Reads Android SDK build-tools selected by the native build environment; no destructive operation occurs."
+    },
+    {
+      "language": "javascript-typescript",
+      "ruleId": "js/path-injection",
+      "path": "src/CLI/scripts/expo/write-build-receipt.ts",
+      "line": 75,
+      "messageSha256": "8fe6bd88d6342f0f72a3f2d539b6f6f60dc404023a3a97e5fb6aa08f40b5c356",
+      "count": 1,
+      "justification": "Enumerates version children of the configured Android SDK build-tools directory."
+    },
+    {
+      "language": "javascript-typescript",
+      "ruleId": "js/path-injection",
+      "path": "src/CLI/scripts/expo/write-build-receipt.ts",
+      "line": 77,
+      "messageSha256": "8fe6bd88d6342f0f72a3f2d539b6f6f60dc404023a3a97e5fb6aa08f40b5c356",
+      "count": 1,
+      "justification": "Accepts only an existing apksigner candidate under the configured SDK build-tools directory."
+    },
+    {
+      "language": "javascript-typescript",
+      "ruleId": "js/path-injection",
+      "path": "src/scripts/bundle.ts",
+      "line": 274,
+      "messageSha256": "c00a435fca4f003c882557433dd6e852d59f97b52586ca941e11f6037140a0a2",
+      "count": 2,
+      "justification": "Deletes only fixed generated artifact names after explicit containment under the package dist directory."
+    },
+    {
+      "language": "javascript-typescript",
+      "ruleId": "js/path-injection",
+      "path": "src/scripts/canonicalArtifact.ts",
+      "line": 211,
+      "messageSha256": "c00a435fca4f003c882557433dd6e852d59f97b52586ca941e11f6037140a0a2",
+      "count": 1,
+      "justification": "Writes deterministic metadata to the caller-selected generated artifact directory; it does not delete user content."
+    },
+    {
+      "language": "javascript-typescript",
+      "ruleId": "js/path-injection",
+      "path": "src/scripts/download-bundle.ts",
+      "line": 100,
+      "messageSha256": "c00a435fca4f003c882557433dd6e852d59f97b52586ca941e11f6037140a0a2",
+      "count": 1,
+      "justification": "Writes one fixed bundle filename under the package dist root; the overridable root is internal test dependency injection."
+    },
+    {
+      "language": "javascript-typescript",
+      "ruleId": "js/path-injection",
+      "path": "src/tests/scripts/download-bundle.test.ts",
+      "line": 106,
+      "messageSha256": "c00a435fca4f003c882557433dd6e852d59f97b52586ca941e11f6037140a0a2",
+      "count": 1,
+      "justification": "Test-only read from an isolated temporary package directory."
+    },
+    {
+      "language": "javascript-typescript",
+      "ruleId": "js/path-injection",
+      "path": "src/tests/scripts/download-bundle.test.ts",
+      "line": 144,
+      "messageSha256": "c00a435fca4f003c882557433dd6e852d59f97b52586ca941e11f6037140a0a2",
+      "count": 1,
+      "justification": "Test-only read from an isolated temporary package directory."
+    },
+    {
+      "language": "javascript-typescript",
+      "ruleId": "js/request-forgery",
+      "path": "src/CLI/cli.ts",
+      "line": 121,
+      "messageSha256": "056fcdf6522a90bedc0fd57f1daef4017c18f0d489e0a60e7acd858d89ba4044",
+      "count": 1,
+      "justification": "Stored-token requests use the HTTP(S)-validated origin recorded by login; project/config origin mismatches are rejected before authenticated requests."
+    },
+    {
+      "language": "javascript-typescript",
+      "ruleId": "js/request-forgery",
+      "path": "src/CLI/scripts/aipowered/backend-client.ts",
+      "line": 43,
+      "messageSha256": "239b81f153ffe6d1b47bd0cabb87ba80adbb4b7715b3c5e573308f0849285a13",
+      "count": 1,
+      "justification": "AI planning is called only after scanner validation restricts the destination to Bundle Drop hosts or explicit local development."
+    },
+    {
+      "language": "javascript-typescript",
+      "ruleId": "js/request-forgery",
+      "path": "src/CLI/scripts/init-config.ts",
+      "line": 192,
+      "messageSha256": "7bfc0701e5a038247774069182042dbc3eec2576343bc583e006334f2402c3b6",
+      "count": 1,
+      "justification": "The authenticated origin is normalized and must match the existing project configuration before the token is sent."
+    },
+    {
+      "language": "javascript-typescript",
+      "ruleId": "js/request-forgery",
+      "path": "src/CLI/scripts/login-cli.ts",
+      "line": 172,
+      "messageSha256": "239b81f153ffe6d1b47bd0cabb87ba80adbb4b7715b3c5e573308f0849285a13",
+      "count": 1,
+      "justification": "Login destination is an explicitly selected normalized HTTP(S) server; no stored credential is sent to create a session."
+    },
+    {
+      "language": "javascript-typescript",
+      "ruleId": "js/request-forgery",
+      "path": "src/CLI/scripts/login-cli.ts",
+      "line": 187,
+      "messageSha256": "239b81f153ffe6d1b47bd0cabb87ba80adbb4b7715b3c5e573308f0849285a13",
+      "count": 1,
+      "justification": "Session exchange returns the token from the same normalized HTTP(S) origin selected for login."
+    }
+  ],
+  "documentedAdvisories": [
+    {
+      "package": "fast-xml-parser",
+      "advisory": "GHSA-gh4j-gqv2-49f6",
+      "disposition": "Dev-only transitive dependency; the vulnerable XMLBuilder feature is unused. Do not force an incompatible major override."
+    }
+  ]
+}

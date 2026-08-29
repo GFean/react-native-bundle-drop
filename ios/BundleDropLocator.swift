@@ -6,6 +6,7 @@ import Foundation
   static let runtimeVersionInfoKey = "BundleDropRuntimeVersion"
   static let expoEnabledInfoKey = "BundleDropExpoEnabled"
   static let embeddedBuildIdentityFilename = ".bundle-drop-build-identity.json"
+  static let bareEmbeddedBuildIdentityFilename = "bundle-drop-build-identity.json"
 
   private struct EmbeddedBuildIdentity: Decodable {
     let schemaVersion: Int
@@ -44,20 +45,23 @@ import Foundation
   }
 
   private static func getEmbeddedRuntimeVersion(bundle: Bundle) -> String? {
-    let candidateURL = bundle.bundleURL.appendingPathComponent(embeddedBuildIdentityFilename)
-    guard let attributes = try? FileManager.default.attributesOfItem(atPath: candidateURL.path),
-          let fileType = attributes[.type] as? FileAttributeType,
-          fileType == .typeRegular,
-          let fileSize = attributes[.size] as? NSNumber,
-          fileSize.intValue > 0,
-          fileSize.intValue <= 64 * 1024,
-          let data = try? Data(contentsOf: candidateURL),
-          let candidate = try? JSONDecoder().decode(EmbeddedBuildIdentity.self, from: data),
-          candidate.schemaVersion == 1,
-          candidate.platform == "ios" else {
-      return nil
+    for filename in [embeddedBuildIdentityFilename, bareEmbeddedBuildIdentityFilename] {
+      let candidateURL = bundle.bundleURL.appendingPathComponent(filename)
+      guard let attributes = try? FileManager.default.attributesOfItem(atPath: candidateURL.path),
+            let fileType = attributes[.type] as? FileAttributeType,
+            fileType == .typeRegular,
+            let fileSize = attributes[.size] as? NSNumber,
+            fileSize.intValue > 0,
+            fileSize.intValue <= 64 * 1024,
+            let data = try? Data(contentsOf: candidateURL),
+            let candidate = try? JSONDecoder().decode(EmbeddedBuildIdentity.self, from: data),
+            candidate.schemaVersion == 1,
+            candidate.platform == "ios" else {
+        continue
+      }
+      return normalizeRuntimeVersion(candidate.runtimeVersion)
     }
-    return normalizeRuntimeVersion(candidate.runtimeVersion)
+    return nil
   }
 
   private static func normalizeRuntimeVersion(_ runtimeVersion: String?) -> String? {
@@ -68,7 +72,12 @@ import Foundation
 
   @objc public static func bundleURL() -> URL? {
     guard hasRuntimeIdentityForOta() else {
+      BundleDropStartupRecoveryAdapter.clearCapturedSelection()
       print("BundleDrop: Expo runtime identity is missing; using the embedded bundle")
+      return nil
+    }
+    guard isOtaEnabled() else {
+      BundleDropStartupRecoveryAdapter.clearCapturedSelection()
       return nil
     }
     let fm = FileManager.default
@@ -80,7 +89,10 @@ import Foundation
     return bundleURL(
       bundleDropRoot: root,
       documentsDirectory: docs,
-      currentBinaryVersion: currentVersion
+      currentBinaryVersion: currentVersion,
+      startupSelection: {
+        BundleDropStartupRecoveryAdapter.selectStartupBundle(bundleDropRoot: root)
+      }
     )
   }
 
@@ -91,7 +103,8 @@ import Foundation
     userDefaults: UserDefaults = .standard,
     fileManager: FileManager = .default,
     shouldLogBinaryUpdate: Bool = true,
-    log: (String) -> Void = { print($0) }
+    log: (String) -> Void = { print($0) },
+    startupSelection: (() -> URL?)? = nil
   ) -> URL? {
     // Single gate for public and internal entrypoints (tests inject `userDefaults`).
     if !isOtaEnabled(userDefaults: userDefaults) { return nil }
@@ -109,6 +122,9 @@ import Foundation
     }
 
     userDefaults.set(result.storedVersion, forKey: binaryVersionKey)
+    if let startupSelection {
+      return startupSelection()
+    }
     return result.bundleURL
   }
 

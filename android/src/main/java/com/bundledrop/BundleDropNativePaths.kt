@@ -8,8 +8,8 @@ import org.json.JSONObject
 /**
  * Resolves the on-disk OTA JS bundle path (no React / bridge types).
  *
- * Shared by [BundleDropModule] so cold-start `resolveJSBundleFile`, the JS bridge
- * `getDownloadedBundlePath`, and tests use the same logic — including the OTA-disabled gate.
+ * Cold-start resolution records a launch attempt, while bridge lookups are passive and never
+ * change the attempt selected for the current React runtime.
  */
 object BundleDropNativePaths {
   private const val KEY_BINARY_VERSION = "binary_version"
@@ -40,6 +40,9 @@ object BundleDropNativePaths {
     return binaryVersionKey(versionName, versionCode, runtimeVersion)
   }
 
+  internal fun currentBinaryIdentity(context: Context): String =
+    getBinaryVersionKey(context, readEmbeddedRuntimeVersion(context))
+
   internal fun readEmbeddedRuntimeVersion(context: Context): String? {
     return try {
       context.assets.open(BUILD_IDENTITY_ASSET).bufferedReader().use { reader ->
@@ -64,11 +67,37 @@ object BundleDropNativePaths {
 
   @JvmStatic
   fun getDownloadedBundlePath(context: Context): String? {
-    if (!BundleDropOtaPrefs.isOtaEnabled(context)) return null
-    return getDownloadedBundlePath(context, readEmbeddedRuntimeVersion(context))
+    if (!BundleDropOtaPrefs.isOtaEnabled(context)) {
+      BundleDropStartupRecovery.clearStartupSelection()
+      return null
+    }
+    resolveForBinary(context, readEmbeddedRuntimeVersion(context))
+    val selection = BundleDropStartupRecovery.selectForStartup(context)
+    logResolvedPath(selection.bundlePath)
+    return selection.bundlePath
   }
 
   internal fun getDownloadedBundlePath(context: Context, runtimeVersion: String?): String? {
+    if (!BundleDropOtaPrefs.isOtaEnabled(context)) {
+      BundleDropStartupRecovery.clearStartupSelection()
+      return null
+    }
+    resolveForBinary(context, runtimeVersion)
+    val selection = BundleDropStartupRecovery.selectForStartup(context)
+    logResolvedPath(selection.bundlePath)
+    return selection.bundlePath
+  }
+
+  internal fun getDownloadedBundlePathPassive(context: Context): String? {
+    if (!BundleDropOtaPrefs.isOtaEnabled(context)) return null
+    val resolved = resolveForBinary(context, readEmbeddedRuntimeVersion(context))
+    if (resolved == null) return null
+    val path = BundleDropStartupRecovery.controller(context).resolvePassive()
+    logResolvedPath(path)
+    return path
+  }
+
+  private fun resolveForBinary(context: Context, runtimeVersion: String?): String? {
     val bundleDropRoot = File(context.filesDir, "bundle-drop")
     val result = BundleDropOtaResolver.resolve(
       bundleDropRoot = bundleDropRoot,
@@ -79,16 +108,17 @@ object BundleDropNativePaths {
 
     result.storedVersion?.let { setStoredBinaryVersion(context, it) }
 
-    if (result.bundlePath == null) {
-      if (result.clearedOta) {
-        Log.d("BundleDrop", "Binary updated, clearing OTA bundle")
-      } else {
-        Log.d("BundleDrop", "📦 No OTA bundle found.")
-      }
-    } else {
-      Log.d("BundleDrop", "🔁 Using OTA bundle at: ${result.bundlePath}")
+    if (result.clearedOta) {
+      Log.d("BundleDrop", "Binary updated, clearing OTA bundle")
     }
-
     return result.bundlePath
+  }
+
+  private fun logResolvedPath(path: String?) {
+    if (path == null) {
+      Log.d("BundleDrop", "📦 No OTA bundle found.")
+    } else {
+      Log.d("BundleDrop", "🔁 Using OTA bundle at: $path")
+    }
   }
 }

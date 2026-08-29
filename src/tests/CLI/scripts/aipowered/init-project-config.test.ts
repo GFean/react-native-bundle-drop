@@ -889,14 +889,14 @@ describe('initProjectConfigAi', () => {
       projectRoot: root,
       changes: expect.arrayContaining([
         expect.objectContaining({
-          file: '.bundle-drop/runtime-delivery.generated.json',
+          file: '.bundle-drop/runtime-delivery.lock.json',
           original: null,
           updated: '{"schemaVersion":1}\n',
         }),
         expect.objectContaining({
           file: '.gitignore',
           original: 'node_modules\n',
-          updated: expect.stringContaining('!.bundle-drop/runtime-delivery.generated.json'),
+          updated: expect.stringContaining('!.bundle-drop/runtime-delivery.lock.json'),
         }),
       ]),
     });
@@ -908,12 +908,15 @@ describe('initProjectConfigAi', () => {
     cwdSpy.mockReturnValue(root);
     fs.ensureDirSync(path.join(root, '.bundle-drop'));
     fs.writeFileSync(
-      path.join(root, '.bundle-drop/runtime-delivery.generated.json'),
+      path.join(root, '.bundle-drop/runtime-delivery.lock.json'),
       '{"schemaVersion":1}\n',
     );
     fs.writeFileSync(
       path.join(root, '.gitignore'),
-      '!.bundle-drop/runtime-delivery.generated.json\n',
+      '# Bundle Drop: commit the public trust bootstrap; ignore generated runtime artifacts.\n' +
+        '!.bundle-drop/\n' +
+        '.bundle-drop/*\n' +
+        '!.bundle-drop/runtime-delivery.lock.json\n',
     );
     mockInspectProject.mockResolvedValue({
       projectRoot: root,

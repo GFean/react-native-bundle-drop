@@ -25,7 +25,12 @@ import {
   resetNativeFsMocks,
   setMockFile,
 } from '../mocks/native/fs';
-import { mockGetDownloadedBundlePathNative, resetBundleDropNativeMocks } from '../mocks/native/bundleDropNative';
+import {
+  mockGetDownloadedBundlePathNative,
+  mockGetStartupRecoveryStateNative,
+  mockGetStartupRecoverySelectedHashNative,
+  resetBundleDropNativeMocks,
+} from '../mocks/native/bundleDropNative';
 import { initializeBundleDropRuntime, resetBundleDropRuntimeForTests } from '../../runtime/initState';
 import * as manifestStateModule from '../../runtime-delivery/manifestState';
 
@@ -37,7 +42,6 @@ jest.mock('../../api/clientApi', () => require('../mocks/api/clientApi'));
 const BUNDLE_INFO_PATH = '/mock/doc/bundle-info.json';
 const CURRENT_POINTER_PATH = '/mock/doc/bundle-drop/current.json';
 const PREVIOUS_POINTER_PATH = '/mock/doc/bundle-drop/previous.json';
-const STATE_PATH = '/mock/doc/bundle-drop/state.json';
 const USER_PROPERTIES_PATH = '/mock/doc/bundle-drop/user-properties.json';
 const INSTALL_ID_PATH = '/mock/doc/bundle-drop/install-id.txt';
 const RUNTIME_DELIVERY_STATE_PATH = '/mock/doc/bundle-drop/runtime-delivery-state.json';
@@ -726,21 +730,13 @@ describe('manager/updateCheck', () => {
         },
       })
     );
-    setMockFile(
-      STATE_PATH,
-      JSON.stringify({
-        failedBundles: {
-          'failed-newer': {
-            reason: 'crash_loop',
-            failedAt: 3000,
-          },
-          'failed-older': {
-            reason: 'crash_loop',
-            failedAt: 1000,
-          },
-        },
-      }),
-    );
+    mockGetStartupRecoveryStateNative.mockResolvedValue({
+      protocolVersion: 1,
+      revision: 2,
+      phase: 'idle',
+      quarantinedHashes: ['failed-newer', 'failed-older'],
+      pendingRecoveryEvents: [],
+    });
     setMockFile(INSTALL_ID_PATH, 'install-123');
     mockGetDownloadedBundlePathNative.mockResolvedValue(
       '/mock/doc/bundle-drop/bundles/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa/main.jsbundle',
@@ -803,7 +799,7 @@ describe('manager/updateCheck', () => {
     expect(statusSpy).toHaveBeenLastCalledWith('⬇️ Update available');
   });
 
-  it('does not report a raw current pointer hash when native rejects the bundle path', async () => {
+  it('uses passive eligibility as the resolve-context fallback for older native adapters', async () => {
     setMockFile(
       CURRENT_POINTER_PATH,
       JSON.stringify({
@@ -826,6 +822,60 @@ describe('manager/updateCheck', () => {
       expect.objectContaining({
         currentHash: null,
       }),
+    );
+  });
+
+  it('reports the passively eligible pointer hash when the selected-hash constant is missing', async () => {
+    const pointerHash = v2Hash('a');
+    setMockFile(CURRENT_POINTER_PATH, JSON.stringify({ hash: pointerHash }));
+    mockGetStartupRecoverySelectedHashNative.mockReturnValue(undefined);
+    mockGetDownloadedBundlePathNative.mockResolvedValue(
+      `/mock/doc/bundle-drop/bundles/${pointerHash}/main.jsbundle`,
+    );
+    mockPostOtaResolve.mockResolvedValue({
+      data: { action: 'NOOP', reason: 'UP_TO_DATE' },
+    } as never);
+
+    await checkForUpdate('General');
+
+    expect(mockPostOtaResolve).toHaveBeenCalledWith(
+      'bundle-drop-app',
+      expect.objectContaining({ currentHash: pointerHash }),
+    );
+  });
+
+  it('keeps the runtime-selected hash after passive eligibility becomes null', async () => {
+    const selectedHash = v2Hash('a');
+    setMockFile(CURRENT_POINTER_PATH, JSON.stringify({ hash: selectedHash }));
+    mockGetStartupRecoverySelectedHashNative.mockReturnValue(selectedHash);
+    mockGetDownloadedBundlePathNative.mockResolvedValue(null);
+    mockPostOtaResolve.mockResolvedValue({
+      data: { action: 'NOOP', reason: 'UP_TO_DATE' },
+    } as never);
+
+    await checkForUpdate('General');
+
+    expect(mockPostOtaResolve).toHaveBeenCalledWith(
+      'bundle-drop-app',
+      expect.objectContaining({ currentHash: selectedHash }),
+    );
+  });
+
+  it('does not infer an OTA hash when new native explicitly selected embedded', async () => {
+    setMockFile(CURRENT_POINTER_PATH, JSON.stringify({ hash: v2Hash('a') }));
+    mockGetStartupRecoverySelectedHashNative.mockReturnValue(null);
+    mockGetDownloadedBundlePathNative.mockResolvedValue(
+      `/mock/doc/bundle-drop/bundles/${v2Hash('a')}/main.jsbundle`,
+    );
+    mockPostOtaResolve.mockResolvedValue({
+      data: { action: 'NOOP', reason: 'UP_TO_DATE' },
+    } as never);
+
+    await checkForUpdate('General');
+
+    expect(mockPostOtaResolve).toHaveBeenCalledWith(
+      'bundle-drop-app',
+      expect.objectContaining({ currentHash: null }),
     );
   });
 
@@ -854,17 +904,13 @@ describe('manager/updateCheck', () => {
   });
 
   it('converts locally failed install targets into a no-op decision', async () => {
-    setMockFile(
-      STATE_PATH,
-      JSON.stringify({
-        failedBundles: {
-          'failed-hash': {
-            reason: 'crash_loop',
-            failedAt: 1000,
-          },
-        },
-      }),
-    );
+    mockGetStartupRecoveryStateNative.mockResolvedValue({
+      protocolVersion: 1,
+      revision: 1,
+      phase: 'idle',
+      quarantinedHashes: ['failed-hash'],
+      pendingRecoveryEvents: [],
+    });
     mockPostOtaResolve.mockResolvedValue({
       data: {
         action: 'INSTALL',

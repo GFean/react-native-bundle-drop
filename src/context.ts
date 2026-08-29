@@ -34,6 +34,20 @@ export const runtimeVersion =
 
 export const defaultChannel = config.defaultChannel || 'develop';
 
+const configuredMaxCrashCount = config.rollback?.maxCrashCount ?? 3;
+if (
+  !Number.isSafeInteger(configuredMaxCrashCount) ||
+  configuredMaxCrashCount < 0 ||
+  configuredMaxCrashCount > 2_147_483_647
+) {
+  throw new Error('[BundleDrop] rollback.maxCrashCount must be a non-negative 32-bit integer.');
+}
+
+const configuredHealthyAfterSec = config.rollback?.healthyAfterSec ?? 0;
+if (!Number.isFinite(configuredHealthyAfterSec) || configuredHealthyAfterSec < 0) {
+  throw new Error('[BundleDrop] rollback.healthyAfterSec must be a finite non-negative number.');
+}
+
 export const BUNDLE_DROP_ROOT = isIOS
   ? `${RNFS.LibraryDirectoryPath}/bundle-drop`
   : `${RNFS.DocumentDirectoryPath}/bundle-drop`;
@@ -76,8 +90,8 @@ export const bundleDropConfig: BundleDropConfig = {
   org: { slug: config.org.slug },
   project: { name: config.project.name, slug: config.project.slug },
   rollback: {
-    maxCrashCount: config.rollback?.maxCrashCount ?? 3,
+    maxCrashCount: configuredMaxCrashCount,
     healthCheckMode: config.rollback?.healthCheckMode === 'manual' ? 'manual' : 'auto',
-    healthyAfterSec: config.rollback?.healthyAfterSec ?? 0,
+    healthyAfterSec: configuredHealthyAfterSec,
   },
 };

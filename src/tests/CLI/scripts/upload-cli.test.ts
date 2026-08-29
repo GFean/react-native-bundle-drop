@@ -14,6 +14,7 @@ type MockFormDataInstance = {
 
 const formInstances: MockFormDataInstance[] = [];
 const mockExecSync = jest.fn();
+const spawnCalls: Array<{ executable: string; args: string[]; options: unknown }> = [];
 const mockResolveExpoUploadIdentity = jest.fn();
 const mockExportProjectArtifact = jest.fn();
 const mockDetectProjectType = jest.fn();
@@ -29,7 +30,18 @@ const mockLog = {
 
 jest.mock('axios', () => require('../../mocks/modules/axiosNode'));
 jest.mock('child_process', () => ({
-  execSync: (...args: unknown[]) => mockExecSync(...args),
+  spawnSync: (executable: string, args: string[], options: unknown) => {
+    spawnCalls.push({ executable, args, options });
+    const commandName = executable === process.execPath ? 'node' : executable;
+    const command = [
+      commandName,
+      ...args.map(arg => arg.includes(path.sep) ? `"${arg}"` : arg),
+    ].join(' ');
+    const { shell: _shell, ...legacyOptions } = options as Record<string, unknown>;
+    const output = mockExecSync(command, legacyOptions);
+    if (output && typeof output === 'object' && 'status' in output) return output;
+    return { status: 0, stdout: output ?? '', stderr: '' };
+  },
 }));
 jest.mock('form-data', () => ({
   __esModule: true,
@@ -67,7 +79,7 @@ jest.mock('../../../expo', () => ({
     jest.requireActual('../../../expo/expoUpdatesOwnership').assertExpoUpdatesDoesNotOwnStartup(...args),
 }));
 
-import upload from '../../../CLI/scripts/upload-cli';
+import uploadWithDefaultDependencies, { runUpload } from '../../../CLI/scripts/upload-cli';
 
 describe('CLI/scripts/upload-cli', () => {
   const originalCwd = process.cwd();
@@ -82,6 +94,18 @@ describe('CLI/scripts/upload-cli', () => {
   let consoleWarnSpy: jest.SpyInstance;
   let consoleErrorSpy: jest.SpyInstance;
 
+  const upload = (
+    platform: string,
+    options: Parameters<typeof runUpload>[1],
+  ) => runUpload(platform, options, {
+    packageRoot: tempPackageRoot,
+    spawnProcess: require('child_process').spawnSync,
+    resolveModule: moduleId => {
+      if (moduleId !== 'ts-node/dist/bin.js') throw new Error(`Unexpected module: ${moduleId}`);
+      return path.join(tempPackageRoot, 'test-tools', 'ts-node.js');
+    },
+  });
+
   const writeConfig = (content: string) => {
     const configPath = path.join(tempProjectDir, 'bundle.drop.config.js');
     fs.writeFileSync(configPath, content, 'utf8');
@@ -95,7 +119,11 @@ describe('CLI/scripts/upload-cli', () => {
   const writeAuth = (token = 'jwt-token') => {
     const authDir = path.join(tempHome, '.bundle-drop');
     fs.mkdirSync(authDir, { recursive: true });
-    fs.writeFileSync(path.join(authDir, 'auth.json'), JSON.stringify({ token }), 'utf8');
+    fs.writeFileSync(
+      path.join(authDir, 'auth.json'),
+      JSON.stringify({ token, serverUrl: 'https://api.example.com' }),
+      'utf8',
+    );
   };
 
   const prepareDist = (platform: 'ios' | 'android', runtimeVersion = '2.0.0') => {
@@ -124,8 +152,13 @@ describe('CLI/scripts/upload-cli', () => {
     platform: 'ios' | 'android',
     runtimeVersion: string,
   ) => {
-    const outputDir = path.join(distDir, `expo-artifacts-${platform}`);
-    const expoExportDirectory = path.join(distDir, `expo-export-${platform}`);
+    const artifactRoot = path.join(
+      fs.realpathSync(tempProjectDir),
+      '.bundle-drop',
+      'artifacts',
+    );
+    const outputDir = path.join(artifactRoot, `expo-artifacts-${platform}`);
+    const expoExportDirectory = path.join(artifactRoot, `expo-export-${platform}`);
     const bundlePath = path.join(outputDir, 'main.jsbundle');
     const sourceMapPath = path.join(outputDir, 'main.jsbundle.map');
     const metadataPath = path.join(outputDir, `metadata-${platform}.json`);
@@ -171,9 +204,9 @@ describe('CLI/scripts/upload-cli', () => {
     consoleWarnSpy = jest.spyOn(console, 'warn').mockImplementation(() => undefined);
     consoleErrorSpy = jest.spyOn(console, 'error').mockImplementation(() => undefined);
     process.chdir(tempProjectDir);
-    process.env.BUNDLE_DROP_PACKAGE_ROOT_OVERRIDE = tempPackageRoot;
     mockAxiosNodePost.mockReset();
     mockExecSync.mockReset();
+    spawnCalls.length = 0;
     mockResolveExpoUploadIdentity.mockReset();
     mockExportProjectArtifact.mockReset().mockResolvedValue(undefined);
     mockDetectProjectType.mockReset().mockImplementation(() => {
@@ -200,7 +233,6 @@ describe('CLI/scripts/upload-cli', () => {
     removeTempDir(tempProjectDir);
     removeTempDir(tempHome);
     removeTempDir(tempPackageRoot);
-    delete process.env.BUNDLE_DROP_PACKAGE_ROOT_OVERRIDE;
     process.exitCode = originalExitCode;
     fs.rmSync(distDir, { recursive: true, force: true });
   });
@@ -338,6 +370,49 @@ describe('CLI/scripts/upload-cli', () => {
         BUNDLE_DROP_APP_VERSION: '1.2.3',
       }),
     });
+  });
+
+  it('passes a platform containing shell metacharacters as one inert argument', async () => {
+    const platform = 'android";touch bundle-drop-upload-pwned;# $()';
+    const sentinelPath = path.join(tempProjectDir, 'bundle-drop-upload-pwned');
+    const compiledScriptPath = path.join(tempPackageRoot, 'lib', 'scripts', 'bundle.js');
+    fs.mkdirSync(path.dirname(compiledScriptPath), { recursive: true });
+    fs.writeFileSync(compiledScriptPath, '// compiled bundle script', 'utf8');
+    writeConfig(`module.exports = {
+  serverUrl: 'https://api.example.com',
+  org: { slug: 'alpha-org' },
+  project: { slug: 'demo-app' },
+  runtimeVersion: { android: '1.0.0', ios: '1.0.0' },
+};`);
+    fs.mkdirSync(path.join(distDir, 'assets'), { recursive: true });
+    fs.writeFileSync(path.join(distDir, 'main.jsbundle'), 'bundle-data', 'utf8');
+    fs.writeFileSync(path.join(distDir, `bundle-${platform}.zip`), 'zip-data', 'utf8');
+    fs.writeFileSync(
+      path.join(distDir, `metadata-${platform}.json`),
+      JSON.stringify({ runtimeVersion: '2.0.0' }),
+      'utf8',
+    );
+    fs.writeFileSync(
+      path.join(distDir, 'bundle-manifest.json'),
+      JSON.stringify({ manifestVersion: 1, runtimeVersion: '2.0.0' }),
+      'utf8',
+    );
+    mockAxiosNodePost.mockResolvedValue({ data: {} });
+
+    await upload(platform, {
+      version: '1.2.3',
+      channel: 'General',
+      token: 'explicit-token',
+    });
+
+    expect(spawnCalls[0]).toEqual(
+      expect.objectContaining({
+        executable: process.execPath,
+        args: [compiledScriptPath, platform],
+        options: expect.objectContaining({ shell: false }),
+      }),
+    );
+    expect(fs.existsSync(sentinelPath)).toBe(false);
   });
 
   it('uses the plist version, token override, and manifest runtimeVersion for iOS uploads', async () => {
@@ -499,6 +574,24 @@ describe('CLI/scripts/upload-cli', () => {
       expect(mockLog.error).toHaveBeenCalledWith(
         '❌ bundle.drop.config.js not found in project root\n' +
           'See https://bundledrop.app/docs/installation',
+      );
+    } finally {
+      exitSpy.mockRestore();
+    }
+  });
+
+  it('constructs default production dependencies in the public upload entrypoint', async () => {
+    const exitSpy = mockProcessExit();
+    try {
+      await expect(
+        uploadWithDefaultDependencies('android', {
+          version: '1.2.3',
+          channel: 'General',
+          token: 'override-token',
+        }),
+      ).rejects.toMatchObject({ code: 1 });
+      expect(mockLog.error).toHaveBeenCalledWith(
+        expect.stringContaining('bundle.drop.config.js not found'),
       );
     } finally {
       exitSpy.mockRestore();
@@ -668,6 +761,87 @@ describe('CLI/scripts/upload-cli', () => {
     }
   });
 
+  it('rejects malformed and cross-origin stored credentials before any request', async () => {
+    const exitSpy = mockProcessExit();
+    writeConfig(`module.exports = {
+  serverUrl: 'https://api.example.com',
+  org: { slug: 'alpha-org' },
+  project: { slug: 'demo-app' },
+};`);
+    const authDir = path.join(tempHome, '.bundle-drop');
+    const authPath = path.join(authDir, 'auth.json');
+    fs.mkdirSync(authDir, { recursive: true });
+
+    try {
+      fs.writeFileSync(authPath, '{ malformed', 'utf8');
+      await expect(
+        upload('android', { version: '1.2.3', channel: 'General' }),
+      ).rejects.toMatchObject({ code: 1 });
+      expect(mockLog.error).toHaveBeenLastCalledWith(
+        '❌ Failed to read CLI auth session. Run `bundle-drop login` again or pass --token.',
+      );
+
+      fs.writeFileSync(
+        authPath,
+        JSON.stringify({ serverUrl: 'https://api.example.com' }),
+        'utf8',
+      );
+      await expect(
+        upload('android', { version: '1.2.3', channel: 'General' }),
+      ).rejects.toMatchObject({ code: 1 });
+      expect(mockLog.error).toHaveBeenLastCalledWith(
+        '❌ CLI auth session is missing a token. Run `bundle-drop login` again or pass --token.',
+      );
+
+      fs.writeFileSync(
+        authPath,
+        JSON.stringify({
+          token: 'staging-token',
+          serverUrl: 'https://api-staging.example.com',
+        }),
+        'utf8',
+      );
+      await expect(
+        upload('android', { version: '1.2.3', channel: 'General' }),
+      ).rejects.toMatchObject({ code: 1 });
+      expect(mockLog.error).toHaveBeenLastCalledWith(
+        expect.stringContaining('stored CLI login belongs to'),
+      );
+      expect(mockAxiosNodePost).not.toHaveBeenCalled();
+      expect(spawnCalls).toHaveLength(0);
+    } finally {
+      exitSpy.mockRestore();
+    }
+  });
+
+  it('keeps an explicit token usable for the selected project server', async () => {
+    writeConfig(`module.exports = {
+  serverUrl: 'https://api.example.com',
+  org: { slug: 'alpha-org' },
+  project: { slug: 'demo-app' },
+  runtimeVersion: { android: '1.0.0', ios: '1.0.0' },
+};`);
+    const authDir = path.join(tempHome, '.bundle-drop');
+    fs.mkdirSync(authDir, { recursive: true });
+    fs.writeFileSync(
+      path.join(authDir, 'auth.json'),
+      JSON.stringify({ token: 'wrong-origin-token', serverUrl: 'https://other.example.com' }),
+      'utf8',
+    );
+    prepareDist('android', '2.0.0');
+    mockAxiosNodePost.mockResolvedValue({ data: {} });
+
+    await upload('android', {
+      version: '1.2.3',
+      channel: 'General',
+      token: 'explicit-token',
+    });
+
+    expect(mockAxiosNodePost.mock.calls[0][2].headers.Authorization).toBe(
+      'Bearer explicit-token',
+    );
+  });
+
   it('fails on missing or invalid version sources for Android and iOS', async () => {
     const exitSpy = mockProcessExit();
 
@@ -799,6 +973,39 @@ describe('CLI/scripts/upload-cli', () => {
         }),
       ).rejects.toMatchObject({ code: 1 });
       expect(mockLog.error).toHaveBeenCalledWith('❌ Bundling failed');
+    } finally {
+      exitSpy.mockRestore();
+    }
+  });
+
+  it.each([
+    {
+      result: { status: null, error: new Error('spawn failed') },
+      label: 'spawn error',
+    },
+    {
+      result: { status: 7, stderr: 'bundle rejected' },
+      label: 'nonzero child status',
+    },
+  ])('fails when bundling returns a $label', async ({ result }) => {
+    const exitSpy = mockProcessExit();
+    try {
+      writeConfig(`module.exports = {
+  serverUrl: 'https://api.example.com',
+  org: { slug: 'alpha-org' },
+  project: { slug: 'demo-app' },
+};`);
+      mockExecSync.mockReturnValueOnce(result);
+
+      await expect(
+        upload('android', {
+          version: '1.2.3',
+          channel: 'General',
+          token: 'override-token',
+        }),
+      ).rejects.toMatchObject({ code: 1 });
+      expect(mockLog.error).toHaveBeenCalledWith('❌ Bundling failed');
+      expect(mockAxiosNodePost).not.toHaveBeenCalled();
     } finally {
       exitSpy.mockRestore();
     }
@@ -1171,6 +1378,52 @@ describe('CLI/scripts/upload-cli', () => {
     );
     expect(mockLog.success).toHaveBeenCalledWith(expect.stringContaining('Upload complete'));
     rmSpy.mockRestore();
+  });
+
+  it('refuses to remove an Expo artifact outside its generated directory', async () => {
+    mockDetectProjectType.mockReturnValue('expo');
+    writeConfig(`module.exports = {
+  projectType: 'expo',
+  serverUrl: 'https://api.example.com',
+  org: { slug: 'alpha-org' },
+  project: { slug: 'demo-app' },
+  runtimeVersion: { source: 'expo' },
+};`);
+    const outsideRoot = path.join(tempHome, 'must-survive');
+    const outputDir = path.join(outsideRoot, 'artifact');
+    const artifact = {
+      outputDir,
+      bundlePath: path.join(outputDir, 'main.jsbundle'),
+      metadataPath: path.join(outputDir, 'metadata-ios.json'),
+      manifestPath: path.join(outputDir, 'bundle-manifest.json'),
+      zipPath: path.join(outputDir, 'bundle-ios.zip'),
+      expoExportDirectory: path.join(outsideRoot, 'export'),
+    };
+    fs.mkdirSync(outputDir, { recursive: true });
+    fs.mkdirSync(artifact.expoExportDirectory, { recursive: true });
+    fs.writeFileSync(artifact.bundlePath, 'bundle', 'utf8');
+    fs.writeFileSync(artifact.metadataPath, '{}', 'utf8');
+    fs.writeFileSync(
+      artifact.manifestPath,
+      JSON.stringify({ manifestVersion: 1, runtimeVersion: '1.0.0' }),
+      'utf8',
+    );
+    fs.writeFileSync(artifact.zipPath, 'zip', 'utf8');
+    mockResolveExpoUploadIdentity.mockResolvedValue({
+      platform: 'ios',
+      runtimeVersion: '1.0.0',
+      appVersion: '1.0.0',
+    });
+    mockExportProjectArtifact.mockResolvedValue(artifact);
+    mockAxiosNodePost.mockResolvedValue({ data: {} });
+
+    await upload('ios', { channel: 'General', token: 'explicit-token' });
+
+    expect(mockLog.warn).toHaveBeenCalledWith(
+      expect.stringContaining('escaped its generated output directory'),
+    );
+    expect(fs.existsSync(artifact.zipPath)).toBe(true);
+    expect(fs.existsSync(artifact.expoExportDirectory)).toBe(true);
   });
 
   it('does not copy artifacts or add paths to result when flags are omitted', async () => {

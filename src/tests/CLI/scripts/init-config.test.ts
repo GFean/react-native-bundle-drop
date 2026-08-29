@@ -4,6 +4,7 @@ import path from 'path';
 import { mockAxiosNodeGet } from '../../mocks/modules/axiosNode';
 import { queuePromptResponse } from '../../mocks/modules/prompts';
 import { createTempProjectDir, removeTempDir } from '../../utils/tempDir';
+import * as runtimeDeliveryBootstrapConfig from '../../../runtime-delivery/bootstrapConfig';
 
 jest.mock('axios', () => require('../../mocks/modules/axiosNode'));
 jest.mock('prompts', () => require('../../mocks/modules/prompts'));
@@ -150,7 +151,7 @@ describe('CLI/scripts/init-config', () => {
     });
 
     const result = await initConfig({
-      serverUrl: 'https://ignored.example.com',
+      serverUrl: 'https://api.example.com',
       organizations: [],
       projects: [],
       authToken: 'jwt-token',
@@ -158,15 +159,194 @@ describe('CLI/scripts/init-config', () => {
 
     expect(fs.readFileSync(configPath, 'utf8')).toBe(original);
     expect(result?.bootstrapPath).toBe(
-      path.join(fs.realpathSync(tempDir), '.bundle-drop/runtime-delivery.generated.json'),
+      path.join(fs.realpathSync(tempDir), '.bundle-drop/runtime-delivery.lock.json'),
     );
     expect(fs.readFileSync(path.join(tempDir, '.gitignore'), 'utf8')).toContain(
-      '!.bundle-drop/runtime-delivery.generated.json',
+      '!.bundle-drop/runtime-delivery.lock.json',
     );
     expect(mockAxiosNodeGet).toHaveBeenCalledWith(
       'https://api.example.com/projects/demo-app/credentials?orgSlug=alpha-org',
       expect.any(Object),
     );
+
+    const lockPath = path.join(tempDir, '.bundle-drop/runtime-delivery.lock.json');
+    const firstLockfile = fs.readFileSync(lockPath, 'utf8');
+    const firstGitignore = fs.readFileSync(path.join(tempDir, '.gitignore'), 'utf8');
+    await initConfig({
+      serverUrl: 'https://api.example.com',
+      organizations: [],
+      projects: [],
+      authToken: 'jwt-token',
+    });
+    expect(fs.readFileSync(lockPath, 'utf8')).toBe(firstLockfile);
+    expect(fs.readFileSync(path.join(tempDir, '.gitignore'), 'utf8')).toBe(firstGitignore);
+  });
+
+  it('repairs shadowed bootstrap ignore rules during sync', async () => {
+    fs.writeFileSync(
+      path.join(tempDir, 'bundle.drop.config.js'),
+      `module.exports = {
+  serverUrl: 'https://api.example.com',
+  org: { slug: 'alpha-org' },
+  project: { name: 'Demo', slug: 'demo-app', apiKey: 'existing-key' },
+};\n`,
+      'utf8',
+    );
+    fs.writeFileSync(
+      path.join(tempDir, '.gitignore'),
+      '# !.bundle-drop/runtime-delivery.lock.json\n' +
+        '!.bundle-drop/runtime-delivery.lock.json\n' +
+        '.bundle-drop/\n',
+      'utf8',
+    );
+    mockAxiosNodeGet.mockResolvedValue({
+      data: projectCredentials({
+        runtimeDeliveryMode: 'v2',
+        runtimeDelivery: runtimeDeliveryBootstrap('v2'),
+      }),
+    });
+
+    await initConfig({
+      serverUrl: 'https://api.example.com',
+      organizations: [],
+      projects: [],
+      authToken: 'jwt-token',
+    });
+
+    const gitignore = fs.readFileSync(path.join(tempDir, '.gitignore'), 'utf8');
+    expect(gitignore).toContain('# !.bundle-drop/runtime-delivery.lock.json');
+    expect(gitignore.match(/^!\.bundle-drop\/runtime-delivery\.lock\.json$/gm)).toHaveLength(1);
+    expect(gitignore).toMatch(
+      /# Bundle Drop: commit the public trust bootstrap; ignore generated runtime artifacts\.\n!\.bundle-drop\/\n\.bundle-drop\/\*\n!\.bundle-drop\/runtime-delivery\.lock\.json\n$/,
+    );
+  });
+
+  it('rejects an auth-token origin mismatch before fetching project credentials', async () => {
+    const configPath = path.join(tempDir, 'bundle.drop.config.js');
+    fs.writeFileSync(
+      configPath,
+      `module.exports = {
+  serverUrl: 'https://api.example.com',
+  org: { slug: 'alpha-org' },
+  project: { slug: 'demo-app' },
+};\n`,
+      'utf8',
+    );
+
+    await expect(
+      initConfig({
+        serverUrl: 'https://api-staging.example.com',
+        organizations: [],
+        projects: [],
+        authToken: 'staging-token',
+      }),
+    ).rejects.toThrow(/stored CLI login belongs to/);
+
+    expect(mockAxiosNodeGet).not.toHaveBeenCalled();
+    expect(fs.readFileSync(configPath, 'utf8')).toContain(
+      "serverUrl: 'https://api.example.com'",
+    );
+  });
+
+  it('migrates a valid legacy bootstrap only after validating the new lockfile', async () => {
+    fs.writeFileSync(
+      path.join(tempDir, 'bundle.drop.config.js'),
+      "module.exports = { serverUrl: 'https://api.example.com', org: { slug: 'alpha-org' }, project: { slug: 'demo-app' } };\n",
+    );
+    const legacyPath = path.join(tempDir, '.bundle-drop/runtime-delivery.generated.json');
+    fs.mkdirSync(path.dirname(legacyPath), { recursive: true });
+    fs.writeFileSync(legacyPath, JSON.stringify({
+      schemaVersion: 1,
+      project: {
+        serverUrl: 'https://api.example.com',
+        orgSlug: 'alpha-org',
+        projectSlug: 'demo-app',
+        projectId: 'project-1',
+        orgId: 'org-1',
+      },
+      runtimeDelivery: normalizeRuntimeDeliveryBootstrap(runtimeDeliveryBootstrap('v2')),
+    }));
+    mockAxiosNodeGet.mockResolvedValue({
+      data: projectCredentials({
+        runtimeDeliveryMode: 'v2',
+        runtimeDelivery: runtimeDeliveryBootstrap('v2'),
+      }),
+    });
+
+    await initConfig({
+      serverUrl: 'https://api.example.com',
+      organizations: [],
+      projects: [],
+      authToken: 'jwt-token',
+    });
+
+    expect(fs.existsSync(path.join(tempDir, '.bundle-drop/runtime-delivery.lock.json'))).toBe(true);
+    expect(fs.existsSync(legacyPath)).toBe(false);
+  });
+
+  it('preserves a valid legacy bootstrap when the lockfile write is rejected', async () => {
+    fs.writeFileSync(
+      path.join(tempDir, 'bundle.drop.config.js'),
+      "module.exports = { serverUrl: 'https://api.example.com', org: { slug: 'alpha-org' }, project: { slug: 'demo-app' } };\n",
+    );
+    const bootstrapDirectory = path.join(tempDir, '.bundle-drop');
+    const legacyPath = path.join(bootstrapDirectory, 'runtime-delivery.generated.json');
+    const outsideRoot = createTempProjectDir();
+    fs.mkdirSync(bootstrapDirectory, { recursive: true });
+    fs.writeFileSync(legacyPath, '{"legacy":"preserved"}\n');
+    const outsideSentinel = path.join(outsideRoot, 'sentinel.json');
+    fs.writeFileSync(outsideSentinel, '{"outside":"safe"}\n');
+    fs.symlinkSync(outsideSentinel, path.join(bootstrapDirectory, 'runtime-delivery.lock.json'));
+    mockAxiosNodeGet.mockResolvedValue({
+      data: projectCredentials({
+        runtimeDeliveryMode: 'v2',
+        runtimeDelivery: runtimeDeliveryBootstrap('v2'),
+      }),
+    });
+
+    try {
+      await expect(initConfig({
+        serverUrl: 'https://api.example.com',
+        organizations: [],
+        projects: [],
+        authToken: 'jwt-token',
+      })).rejects.toThrow('symlinked or non-regular');
+      expect(fs.readFileSync(legacyPath, 'utf8')).toBe('{"legacy":"preserved"}\n');
+      expect(fs.readFileSync(outsideSentinel, 'utf8')).toBe('{"outside":"safe"}\n');
+    } finally {
+      removeTempDir(outsideRoot);
+    }
+  });
+
+  it('preserves the legacy bootstrap when lockfile read-back validation fails', async () => {
+    fs.writeFileSync(
+      path.join(tempDir, 'bundle.drop.config.js'),
+      "module.exports = { serverUrl: 'https://api.example.com', org: { slug: 'alpha-org' }, project: { slug: 'demo-app' } };\n",
+    );
+    const legacyPath = path.join(tempDir, '.bundle-drop/runtime-delivery.generated.json');
+    fs.mkdirSync(path.dirname(legacyPath), { recursive: true });
+    fs.writeFileSync(legacyPath, '{"legacy":"preserved"}\n');
+    mockAxiosNodeGet.mockResolvedValue({
+      data: projectCredentials({
+        runtimeDeliveryMode: 'v2',
+        runtimeDelivery: runtimeDeliveryBootstrap('v2'),
+      }),
+    });
+    const readBack = jest
+      .spyOn(runtimeDeliveryBootstrapConfig, 'readRuntimeDeliveryLockfile')
+      .mockReturnValue(null);
+
+    try {
+      await expect(initConfig({
+        serverUrl: 'https://api.example.com',
+        organizations: [],
+        projects: [],
+        authToken: 'jwt-token',
+      })).rejects.toThrow('lockfile validation failed after writing');
+      expect(fs.readFileSync(legacyPath, 'utf8')).toBe('{"legacy":"preserved"}\n');
+    } finally {
+      readBack.mockRestore();
+    }
   });
 
   it('accepts the neutral credentials response and recreates deleted generated state', async () => {
@@ -188,7 +368,7 @@ describe('CLI/scripts/init-config', () => {
     });
 
     const result = await initConfig({
-      serverUrl: 'https://ignored.example.com',
+      serverUrl: 'https://api.example.com',
       organizations: [],
       projects: [],
       authToken: 'jwt-token',
@@ -196,10 +376,10 @@ describe('CLI/scripts/init-config', () => {
 
     expect(result).toEqual(expect.objectContaining({ runtimeDeliveryAvailable: true }));
     expect(fs.existsSync(
-      path.join(tempDir, '.bundle-drop/runtime-delivery.generated.json'),
+      path.join(tempDir, '.bundle-drop/runtime-delivery.lock.json'),
     )).toBe(true);
     expect(fs.readFileSync(path.join(tempDir, '.gitignore'), 'utf8')).toContain(
-      '!.bundle-drop/runtime-delivery.generated.json',
+      '!.bundle-drop/runtime-delivery.lock.json',
     );
   });
 
@@ -210,7 +390,7 @@ describe('CLI/scripts/init-config', () => {
       "module.exports = { serverUrl: 'https://api.example.com', org: { slug: 'alpha-org' }, project: { slug: 'demo-app' } };\n",
       'utf8',
     );
-    const bootstrapPath = path.join(tempDir, '.bundle-drop/runtime-delivery.generated.json');
+    const bootstrapPath = path.join(tempDir, '.bundle-drop/runtime-delivery.lock.json');
     fs.mkdirSync(path.dirname(bootstrapPath), { recursive: true });
     fs.writeFileSync(bootstrapPath, '{"lastGood":true}\n', 'utf8');
     mockAxiosNodeGet.mockResolvedValue({
@@ -218,7 +398,7 @@ describe('CLI/scripts/init-config', () => {
     });
 
     const result = await initConfig({
-      serverUrl: 'https://ignored.example.com',
+      serverUrl: 'https://api.example.com',
       organizations: [],
       projects: [],
       authToken: 'jwt-token',
@@ -238,7 +418,7 @@ describe('CLI/scripts/init-config', () => {
       "module.exports = { serverUrl: 'https://api.example.com', org: { slug: 'alpha-org' }, project: { name: 'Demo', slug: 'demo-app' } };\n",
       'utf8',
     );
-    const bootstrapPath = path.join(tempDir, '.bundle-drop/runtime-delivery.generated.json');
+    const bootstrapPath = path.join(tempDir, '.bundle-drop/runtime-delivery.lock.json');
     fs.mkdirSync(path.dirname(bootstrapPath), { recursive: true });
     fs.writeFileSync(bootstrapPath, '{"lastGood":true}\n', 'utf8');
     mockAxiosNodeGet.mockResolvedValue({
@@ -267,7 +447,7 @@ describe('CLI/scripts/init-config', () => {
         "module.exports = { serverUrl: 'https://api.example.com', org: { slug: 'alpha-org' }, project: { name: 'Demo', slug: 'demo-app' } };\n",
         'utf8',
       );
-      const bootstrapPath = path.join(tempDir, '.bundle-drop/runtime-delivery.generated.json');
+      const bootstrapPath = path.join(tempDir, '.bundle-drop/runtime-delivery.lock.json');
       fs.mkdirSync(path.dirname(bootstrapPath), { recursive: true });
       fs.writeFileSync(bootstrapPath, '{"lastGood":true}\n', 'utf8');
       mockAxiosNodeGet.mockResolvedValue({
@@ -275,7 +455,7 @@ describe('CLI/scripts/init-config', () => {
       });
 
       const result = await initConfig({
-        serverUrl: 'https://ignored.example.com',
+        serverUrl: 'https://api.example.com',
         organizations: [],
         projects: [],
         authToken: 'jwt-token',
@@ -297,13 +477,13 @@ describe('CLI/scripts/init-config', () => {
       "module.exports = { serverUrl: 'https://api.example.com', org: { slug: 'alpha-org' }, project: { slug: 'demo-app' } };\n",
       'utf8',
     );
-    const bootstrapPath = path.join(tempDir, '.bundle-drop/runtime-delivery.generated.json');
+    const bootstrapPath = path.join(tempDir, '.bundle-drop/runtime-delivery.lock.json');
     fs.mkdirSync(path.dirname(bootstrapPath), { recursive: true });
     fs.writeFileSync(bootstrapPath, '{"lastGood":true}\n', 'utf8');
     mockAxiosNodeGet.mockResolvedValue({ data: projectCredentials() });
 
     const result = await initConfig({
-      serverUrl: 'https://ignored.example.com',
+      serverUrl: 'https://api.example.com',
       organizations: [],
       projects: [],
       authToken: 'jwt-token',
@@ -321,13 +501,13 @@ describe('CLI/scripts/init-config', () => {
       "module.exports = { serverUrl: 'https://api.example.com', org: { slug: 'alpha-org' }, project: { slug: 'demo-app' } };\n",
       'utf8',
     );
-    const bootstrapPath = path.join(tempDir, '.bundle-drop/runtime-delivery.generated.json');
+    const bootstrapPath = path.join(tempDir, '.bundle-drop/runtime-delivery.lock.json');
     fs.mkdirSync(path.dirname(bootstrapPath), { recursive: true });
     fs.writeFileSync(bootstrapPath, '{"lastGood":true}\n', 'utf8');
     mockAxiosNodeGet.mockRejectedValueOnce(new Error('network down'));
 
     await initConfig({
-      serverUrl: 'https://ignored.example.com',
+      serverUrl: 'https://api.example.com',
       organizations: [],
       projects: [],
       authToken: 'jwt-token',
@@ -338,7 +518,7 @@ describe('CLI/scripts/init-config', () => {
       data: projectCredentials({ runtimeDeliveryMode: undefined }),
     });
     await expect(initConfig({
-      serverUrl: 'https://ignored.example.com',
+      serverUrl: 'https://api.example.com',
       organizations: [],
       projects: [],
       authToken: 'jwt-token',
@@ -397,13 +577,13 @@ describe('CLI/scripts/init-config', () => {
       "module.exports = { serverUrl: 'https://api.example.com', org: { slug: 'alpha-org' }, project: { slug: 'demo-app' } };\n",
       'utf8',
     );
-    const bootstrapPath = path.join(tempDir, '.bundle-drop/runtime-delivery.generated.json');
+    const bootstrapPath = path.join(tempDir, '.bundle-drop/runtime-delivery.lock.json');
     fs.mkdirSync(path.dirname(bootstrapPath), { recursive: true });
     fs.writeFileSync(bootstrapPath, '{"lastGood":true}\n', 'utf8');
     mockAxiosNodeGet.mockResolvedValue({ data: response });
 
     await expect(initConfig({
-      serverUrl: 'https://ignored.example.com',
+      serverUrl: 'https://api.example.com',
       organizations: [],
       projects: [],
       authToken: 'jwt-token',
@@ -442,7 +622,7 @@ describe('CLI/scripts/init-config', () => {
       "module.exports = { serverUrl: 'https://api.example.com', org: { slug: 'alpha-org' }, project: { slug: 'demo-app' } };\n",
       'utf8',
     );
-    const bootstrapPath = path.join(tempDir, '.bundle-drop/runtime-delivery.generated.json');
+    const bootstrapPath = path.join(tempDir, '.bundle-drop/runtime-delivery.lock.json');
     fs.mkdirSync(path.dirname(bootstrapPath), { recursive: true });
     fs.writeFileSync(bootstrapPath, '{"lastGood":true}\n', 'utf8');
     mockAxiosNodeGet.mockResolvedValue({
@@ -454,7 +634,7 @@ describe('CLI/scripts/init-config', () => {
     });
 
     await expect(initConfig({
-      serverUrl: 'https://ignored.example.com',
+      serverUrl: 'https://api.example.com',
       organizations: [],
       projects: [],
       authToken: 'jwt-token',
@@ -552,7 +732,7 @@ describe('CLI/scripts/init-config', () => {
     const content = fs.readFileSync(path.join(tempDir, 'bundle.drop.config.js'), 'utf8');
     expect(content).not.toContain('runtimeDelivery');
     const bootstrap = fs.readFileSync(
-      path.join(tempDir, '.bundle-drop/runtime-delivery.generated.json'),
+      path.join(tempDir, '.bundle-drop/runtime-delivery.lock.json'),
       'utf8',
     );
     expect(bootstrap).not.toContain('"mode"');
@@ -596,7 +776,7 @@ describe('CLI/scripts/init-config', () => {
     expect(content).not.toContain('runtimeDelivery');
     expect(content).not.toContain('private-material');
     expect(content).toContain('apiKey: "download-key"');
-    expect(fs.existsSync(path.join(tempDir, '.bundle-drop/runtime-delivery.generated.json'))).toBe(false);
+    expect(fs.existsSync(path.join(tempDir, '.bundle-drop/runtime-delivery.lock.json'))).toBe(false);
   });
 
   it('fails closed for malformed runtime-delivery bootstrap subshapes', () => {
@@ -718,7 +898,7 @@ describe('CLI/scripts/init-config', () => {
       expect.any(Object),
     );
     expect(fs.readFileSync(
-      path.join(tempDir, '.bundle-drop/runtime-delivery.generated.json'),
+      path.join(tempDir, '.bundle-drop/runtime-delivery.lock.json'),
       'utf8',
     )).toContain('"projectId": "project-beta-shared"');
   });

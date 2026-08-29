@@ -6,22 +6,19 @@ import android.util.Log
 import com.facebook.react.bridge.*
 import com.facebook.react.modules.network.OkHttpClientProvider
 import java.io.File
+import org.json.JSONArray
+import org.json.JSONObject
 
 class BundleDropModule(reactContext: ReactApplicationContext) :
   ReactContextBaseJavaModule(reactContext) {
 
-  private var downloadedBundlePath: String? = null
-
   companion object {
-    var latestBundlePath: String? = null
-      private set
-
     fun getDownloadedBundlePath(context: Context): String? =
-      BundleDropNativePaths.getDownloadedBundlePath(context)
+      BundleDropNativePaths.getDownloadedBundlePathPassive(context)
 
     @JvmStatic
     fun resolveJSBundleFile(context: Context, fallback: String?): String? {
-      val path = getDownloadedBundlePath(context)
+      val path = BundleDropNativePaths.getDownloadedBundlePath(context)
       return if (!path.isNullOrEmpty()) path else fallback
     }
   }
@@ -30,10 +27,7 @@ class BundleDropModule(reactContext: ReactApplicationContext) :
 
   @ReactMethod
   fun getDownloadedBundlePath(promise: Promise) {
-    val path = getDownloadedBundlePath(reactApplicationContext)
-    downloadedBundlePath = path
-    latestBundlePath = path
-    promise.resolve(path)
+    promise.resolve(getDownloadedBundlePath(reactApplicationContext))
   }
 
   @ReactMethod
@@ -66,6 +60,95 @@ class BundleDropModule(reactContext: ReactApplicationContext) :
       promise.resolve(null)
     } catch (e: Exception) {
       promise.reject("ERR_SET_OTA_ENABLED", e.message, e)
+    }
+  }
+
+  @ReactMethod
+  fun activateStartupCandidate(
+    hash: String,
+    maxCrashCount: Double,
+    healthCheckMode: String,
+    healthyAfterSec: Double,
+    promise: Promise,
+  ) {
+    try {
+      require(maxCrashCount.isFinite() && maxCrashCount >= 0 && maxCrashCount % 1.0 == 0.0) {
+        "maxCrashCount must be a non-negative integer"
+      }
+      require(maxCrashCount <= Int.MAX_VALUE) { "maxCrashCount is outside the supported range" }
+      val result = BundleDropStartupRecovery.controller(reactApplicationContext)
+        .activateCandidate(hash, maxCrashCount.toInt(), healthCheckMode, healthyAfterSec)
+      promise.resolve(Arguments.createMap().apply {
+        putString("hash", result.hash)
+        putString("bundlePath", result.bundlePath)
+      })
+    } catch (error: Exception) {
+      promise.reject("ERR_STARTUP_RECOVERY_ACTIVATE", error.message, error)
+    }
+  }
+
+  @ReactMethod
+  fun markStartupHealthy(hash: String, attemptId: String, promise: Promise) {
+    try {
+      val marked = BundleDropStartupRecovery.controller(reactApplicationContext)
+        .markHealthy(hash, attemptId)
+      promise.resolve(marked)
+    } catch (error: Exception) {
+      promise.reject("ERR_STARTUP_RECOVERY_HEALTH", error.message, error)
+    }
+  }
+
+  @ReactMethod
+  fun getStartupRecoveryState(promise: Promise) {
+    try {
+      val state = BundleDropStartupRecovery.controller(reactApplicationContext).snapshot()
+      promise.resolve(jsonObjectToWritableMap(state))
+    } catch (error: Exception) {
+      promise.reject("ERR_STARTUP_RECOVERY_STATE", error.message, error)
+    }
+  }
+
+  @ReactMethod
+  fun setStartupRecoveryRevokedHashes(hashes: ReadableArray, promise: Promise) {
+    try {
+      val values = buildSet {
+        for (index in 0 until hashes.size()) {
+          val hash = hashes.getString(index)
+            ?: throw IllegalArgumentException("Revoked bundle hashes must be strings")
+          add(hash)
+        }
+      }
+      BundleDropStartupRecovery.controller(reactApplicationContext).setRevokedHashes(values)
+      promise.resolve(true)
+    } catch (error: Exception) {
+      promise.reject("ERR_STARTUP_RECOVERY_REVOKE", error.message, error)
+    }
+  }
+
+  @ReactMethod
+  fun acknowledgeStartupRecovery(eventId: String, promise: Promise) {
+    try {
+      promise.resolve(
+        BundleDropStartupRecovery.controller(reactApplicationContext)
+          .acknowledgeRecovery(eventId),
+      )
+    } catch (error: Exception) {
+      promise.reject("ERR_STARTUP_RECOVERY_ACK", error.message, error)
+    }
+  }
+
+  @ReactMethod
+  fun rollbackStartupBundle(forceEmbedded: Boolean, promise: Promise) {
+    try {
+      val result = BundleDropStartupRecovery.controller(reactApplicationContext)
+        .rollbackStartupBundle(forceEmbedded)
+      promise.resolve(Arguments.createMap().apply {
+        putBoolean("rolledBack", result.rolledBack)
+        putBoolean("toEmbedded", result.toEmbedded)
+        result.hash?.let { putString("hash", it) }
+      })
+    } catch (error: Exception) {
+      promise.reject("ERR_STARTUP_RECOVERY_ROLLBACK", error.message, error)
     }
   }
 
@@ -332,12 +415,53 @@ class BundleDropModule(reactContext: ReactApplicationContext) :
 
   override fun getConstants(): MutableMap<String, Any> {
     val map = mutableMapOf<String, Any>()
-    downloadedBundlePath?.let {
-      map["downloadedBundlePath"] = it
+    map["startupRecoveryProtocolVersion"] = BundleDropStartupRecoveryController.PROTOCOL_VERSION
+    @Suppress("UNCHECKED_CAST")
+    (map as MutableMap<String, Any?>)["startupRecoverySelectedHash"] =
+      BundleDropStartupRecovery.startupSelectedHash()
+    BundleDropStartupRecovery.startupAttempt()?.let { (hash, attemptId) ->
+      map["startupRecoveryAttemptHash"] = hash
+      map["startupRecoveryAttemptId"] = attemptId
     }
     val context = reactApplicationContext
     map["DocumentDirectoryPath"] = context.filesDir.absolutePath
     map["LibraryDirectoryPath"] = context.filesDir.absolutePath
     return map
+  }
+
+  private fun jsonObjectToWritableMap(json: JSONObject): WritableMap {
+    val map = Arguments.createMap()
+    val keys = json.keys()
+    while (keys.hasNext()) {
+      val key = keys.next()
+      putJsonValue(map, key, json.opt(key))
+    }
+    return map
+  }
+
+  private fun jsonArrayToWritableArray(json: JSONArray): WritableArray {
+    val array = Arguments.createArray()
+    for (index in 0 until json.length()) {
+      when (val value = json.opt(index)) {
+        null, JSONObject.NULL -> array.pushNull()
+        is JSONObject -> array.pushMap(jsonObjectToWritableMap(value))
+        is JSONArray -> array.pushArray(jsonArrayToWritableArray(value))
+        is Boolean -> array.pushBoolean(value)
+        is Number -> array.pushDouble(value.toDouble())
+        else -> array.pushString(value.toString())
+      }
+    }
+    return array
+  }
+
+  private fun putJsonValue(map: WritableMap, key: String, value: Any?) {
+    when (value) {
+      null, JSONObject.NULL -> map.putNull(key)
+      is JSONObject -> map.putMap(key, jsonObjectToWritableMap(value))
+      is JSONArray -> map.putArray(key, jsonArrayToWritableArray(value))
+      is Boolean -> map.putBoolean(key, value)
+      is Number -> map.putDouble(key, value.toDouble())
+      else -> map.putString(key, value.toString())
+    }
   }
 }

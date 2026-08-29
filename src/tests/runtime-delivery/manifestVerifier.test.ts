@@ -2,6 +2,7 @@ jest.mock('../../context', () => require('../mocks/context'));
 jest.mock('../../native/fs', () => require('../mocks/native/fs'));
 
 import { verifyRuntimeDeliveryManifest } from '../../runtime-delivery/manifestVerifier';
+import { NativeModules } from 'react-native';
 import type { RuntimeDeliveryJws } from '../../runtime-delivery/types';
 import { mockVerifyEs256Signature, readMockJson, resetNativeFsMocks } from '../mocks/native/fs';
 
@@ -33,7 +34,10 @@ const encodedPayload = (payload: unknown) =>
   Buffer.from(JSON.stringify(payload)).toString('base64url');
 
 describe('runtime-delivery/manifestVerifier', () => {
-  beforeEach(resetNativeFsMocks);
+  beforeEach(() => {
+    resetNativeFsMocks();
+    NativeModules.BundleDrop.setStartupRecoveryRevokedHashes.mockClear();
+  });
 
   it('verifies the shared cross-repository ES256 golden vector', async () => {
     await expect(verifyRuntimeDeliveryManifest(
@@ -46,6 +50,67 @@ describe('runtime-delivery/manifestVerifier', () => {
       channelName: 'Production / β',
       candidateSetComplete: true,
     }));
+    expect(NativeModules.BundleDrop.setStartupRecoveryRevokedHashes).toHaveBeenCalledWith([]);
+  });
+
+  it('accepts repeated verification when native accepts an unchanged revocation set', async () => {
+    await verifyRuntimeDeliveryManifest(serialize(), IDENTITY, { 'test-key-2026-08': KEY });
+
+    await expect(
+      verifyRuntimeDeliveryManifest(serialize(), IDENTITY, { 'test-key-2026-08': KEY }),
+    ).resolves.toEqual(expect.objectContaining({ revokedHashes: [] }));
+    expect(NativeModules.BundleDrop.setStartupRecoveryRevokedHashes).toHaveBeenNthCalledWith(1, []);
+    expect(NativeModules.BundleDrop.setStartupRecoveryRevokedHashes).toHaveBeenNthCalledWith(2, []);
+  });
+
+  it('keeps revocations from other verified channels in the same runtime', async () => {
+    const verifySignature = mockVerifyEs256Signature.getMockImplementation();
+    mockVerifyEs256Signature.mockResolvedValue(true);
+    const firstPayload = basePayload();
+    firstPayload.revokedHashes = ['a'.repeat(64)];
+    const secondPayload = {
+      ...basePayload(),
+      channelName: 'Beta',
+      revokedHashes: ['b'.repeat(64)],
+    };
+
+    try {
+      await verifyRuntimeDeliveryManifest(
+        serialize({ payload: encodedPayload(firstPayload) }),
+        IDENTITY,
+        { 'test-key-2026-08': KEY },
+      );
+      await verifyRuntimeDeliveryManifest(
+        serialize({ payload: encodedPayload(secondPayload) }),
+        { ...IDENTITY, channelName: 'Beta' },
+        { 'test-key-2026-08': KEY },
+      );
+
+      expect(NativeModules.BundleDrop.setStartupRecoveryRevokedHashes).toHaveBeenNthCalledWith(
+        1,
+        ['a'.repeat(64)],
+      );
+      expect(NativeModules.BundleDrop.setStartupRecoveryRevokedHashes).toHaveBeenNthCalledWith(
+        2,
+        ['a'.repeat(64), 'b'.repeat(64)],
+      );
+    } finally {
+      if (verifySignature) {
+        mockVerifyEs256Signature.mockImplementation(verifySignature);
+      }
+    }
+  });
+
+  it('does not commit the verified generation when native rejects revocation persistence', async () => {
+    NativeModules.BundleDrop.setStartupRecoveryRevokedHashes.mockResolvedValueOnce(false);
+
+    await expect(verifyRuntimeDeliveryManifest(
+      serialize(),
+      IDENTITY,
+      { 'test-key-2026-08': KEY },
+    )).rejects.toThrow('rejected the verified revocation set');
+
+    expect(readMockJson('/mock/doc/bundle-drop/runtime-delivery-state.json')).toBeNull();
   });
 
   it('rejects unknown keys, tampered payloads, malformed signatures, and wrong lanes', async () => {

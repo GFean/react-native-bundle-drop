@@ -117,6 +117,23 @@ describe('context', () => {
     expect(context.bundleDropConfig.runtimeVersion).toBeUndefined();
   });
 
+  it.each([
+    ['negative maxCrashCount', { maxCrashCount: -1 }],
+    ['fractional maxCrashCount', { maxCrashCount: 1.5 }],
+    ['oversized maxCrashCount', { maxCrashCount: 2_147_483_648 }],
+    ['negative healthyAfterSec', { healthyAfterSec: -1 }],
+    ['non-finite healthyAfterSec', { healthyAfterSec: Number.POSITIVE_INFINITY }],
+  ])('rejects an invalid rollback policy: %s', (_label, rollback) => {
+    expect(() => loadContextModule(({ bundleDropConfig }) => {
+      Object.assign(bundleDropConfig, {
+        serverUrl: 'https://bundledrop.app',
+        org: { slug: 'alpha-org' },
+        project: { name: 'Bundle Drop', slug: 'app' },
+        rollback,
+      });
+    })).toThrow(/rollback\.(maxCrashCount|healthyAfterSec)/);
+  });
+
   it('derives a remote nativeVersion policy from the installed Expo binary', () => {
     const context = loadContextModule(({ Platform, bundleDropConfig, NativeModules }) => {
       Platform.OS = 'android';

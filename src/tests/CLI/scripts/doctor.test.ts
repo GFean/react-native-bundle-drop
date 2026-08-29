@@ -762,7 +762,7 @@ describe('CLI/scripts/doctor', () => {
     const projectRoot = createBareProject();
     fs.mkdirSync(path.join(projectRoot, '.bundle-drop'), { recursive: true });
     fs.writeFileSync(
-      path.join(projectRoot, '.bundle-drop/runtime-delivery.generated.json'),
+      path.join(projectRoot, '.bundle-drop/runtime-delivery.lock.json'),
       JSON.stringify({
         schemaVersion: 1,
         project: {
@@ -793,9 +793,39 @@ describe('CLI/scripts/doctor', () => {
       status: 'pass',
     }));
 
+    const lockPath = path.join(projectRoot, '.bundle-drop/runtime-delivery.lock.json');
+    const legacyPath = path.join(projectRoot, '.bundle-drop/runtime-delivery.generated.json');
+    const validBootstrap = fs.readFileSync(lockPath, 'utf8');
+    fs.renameSync(lockPath, legacyPath);
+    result = await inspectProject({ cwd: projectRoot, projectType: 'bare' });
+    expect(result.checks).toContainEqual(expect.objectContaining({
+      name: 'Runtime delivery bootstrap',
+      status: 'warning',
+      message: expect.stringContaining('legacy runtime-delivery.generated.json'),
+    }));
+
+    fs.writeFileSync(lockPath, validBootstrap);
+    result = await inspectProject({ cwd: projectRoot, projectType: 'bare' });
+    expect(result.checks).toContainEqual(expect.objectContaining({
+      name: 'Runtime delivery bootstrap',
+      status: 'warning',
+      message: expect.stringContaining('matches the legacy bootstrap'),
+    }));
+
+    const conflictingLegacy = JSON.parse(validBootstrap);
+    conflictingLegacy.runtimeDelivery.manifestBaseUrl = 'https://other.example.com';
+    fs.writeFileSync(legacyPath, JSON.stringify(conflictingLegacy));
+    result = await inspectProject({ cwd: projectRoot, projectType: 'bare' });
+    expect(result.checks).toContainEqual(expect.objectContaining({
+      name: 'Runtime delivery bootstrap',
+      status: 'error',
+      message: expect.stringContaining('lockfile and legacy bootstrap differ'),
+    }));
+    fs.rmSync(legacyPath);
+
     const malformedBootstrapPath = path.join(
       projectRoot,
-      '.bundle-drop/runtime-delivery.generated.json',
+      '.bundle-drop/runtime-delivery.lock.json',
     );
     const malformedBootstrap = JSON.parse(fs.readFileSync(malformedBootstrapPath, 'utf8'));
     delete malformedBootstrap.project.orgId;
@@ -822,7 +852,7 @@ describe('CLI/scripts/doctor', () => {
 
   it('rejects ignored bootstraps and warns until a valid bootstrap is committed', async () => {
     const projectRoot = createBareProject();
-    const bootstrapPath = path.join(projectRoot, '.bundle-drop/runtime-delivery.generated.json');
+    const bootstrapPath = path.join(projectRoot, '.bundle-drop/runtime-delivery.lock.json');
     fs.mkdirSync(path.dirname(bootstrapPath), { recursive: true });
     fs.writeFileSync(
       bootstrapPath,
@@ -848,7 +878,12 @@ describe('CLI/scripts/doctor', () => {
       }),
     );
     execFileSync('git', ['init', '-q'], { cwd: projectRoot });
-    fs.writeFileSync(path.join(projectRoot, '.gitignore'), '.bundle-drop/\n');
+    fs.writeFileSync(
+      path.join(projectRoot, '.gitignore'),
+      '# !.bundle-drop/runtime-delivery.lock.json\n' +
+        '!.bundle-drop/runtime-delivery.lock.json\n' +
+        '.bundle-drop/\n',
+    );
 
     let result = await inspectProject({ cwd: projectRoot, projectType: 'bare' });
     expect(result.checks).toContainEqual(expect.objectContaining({
@@ -859,7 +894,7 @@ describe('CLI/scripts/doctor', () => {
 
     fs.writeFileSync(
       path.join(projectRoot, '.gitignore'),
-      '.bundle-drop/*\n!.bundle-drop/runtime-delivery.generated.json\n',
+      '.bundle-drop/*\n!.bundle-drop/runtime-delivery.lock.json\n',
     );
     result = await inspectProject({ cwd: projectRoot, projectType: 'bare' });
     expect(result.checks).toContainEqual(expect.objectContaining({
@@ -868,7 +903,7 @@ describe('CLI/scripts/doctor', () => {
       message: expect.stringContaining('not committed yet'),
     }));
 
-    execFileSync('git', ['add', '.gitignore', '.bundle-drop/runtime-delivery.generated.json'], {
+    execFileSync('git', ['add', '.gitignore', '.bundle-drop/runtime-delivery.lock.json'], {
       cwd: projectRoot,
     });
     result = await inspectProject({ cwd: projectRoot, projectType: 'bare' });

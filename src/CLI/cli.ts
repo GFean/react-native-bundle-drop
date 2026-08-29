@@ -11,6 +11,7 @@ import { runSightCommand } from './scripts/sight-cli';
 import { runPostInitPrompts } from './scripts/post-init';
 import type { ProjectType } from '../expo';
 import { buildBundleDropLogo } from './logo';
+import { normalizeServerUrl } from './serverUrl';
 import pkg from '../../package.json';
 
 const logo = buildBundleDropLogo();
@@ -39,7 +40,6 @@ type CliContextResponse = {
   memberships?: unknown[];
 };
 
-const DEFAULT_SERVER_URL = 'https://api.bundledrop.app';
 const DOCS_CLI_URL = 'https://bundledrop.app/docs/cli';
 const DOCS_UPLOADING_URL = 'https://bundledrop.app/docs/uploading';
 const DOCS_CI_CD_URL = 'https://bundledrop.app/docs/ci-cd';
@@ -79,8 +79,6 @@ const runSetupWithManualFallback = async (params: {
 };
 
 const getTokenPath = () => path.join(os.homedir(), '.bundle-drop', 'auth.json');
-
-const normalizeServerUrl = (url?: string) => url?.replace(/\/$/, '') || DEFAULT_SERVER_URL;
 
 const readStoredAuthData = (): {
   tokenPath: string;

@@ -9,7 +9,13 @@ import {
 } from '../mocks/manager/updateCheck';
 import { getMockFile, readMockJson, resetNativeFsMocks, setMockFile } from '../mocks/native/fs';
 import { mockReportPatchApplyFailure } from '../mocks/api/clientApi';
-import { mockGetDownloadedBundlePathNative, resetBundleDropNativeMocks } from '../mocks/native/bundleDropNative';
+import {
+  mockActivateStartupCandidateNative,
+  mockGetDownloadedBundlePathNative,
+  mockGetStartupRecoveryStateNative,
+  mockRollbackStartupBundleNative,
+  resetBundleDropNativeMocks,
+} from '../mocks/native/bundleDropNative';
 
 jest.mock('../../context', () => require('../mocks/context'));
 jest.mock('../../native/fs', () => require('../mocks/native/fs'));
@@ -36,6 +42,20 @@ describe('manager/downloadAndInstall', () => {
       return pointer?.hash
         ? `/mock/doc/bundle-drop/bundles/${pointer.hash}/main.jsbundle`
         : null;
+    });
+    mockActivateStartupCandidateNative.mockImplementation(async hash => {
+      const current = readMockJson(CURRENT_POINTER_PATH) as { hash?: string } | null;
+      if (current?.hash) {
+        setMockFile(PREVIOUS_POINTER_PATH, JSON.stringify(current));
+      }
+      setMockFile(CURRENT_POINTER_PATH, JSON.stringify({
+        hash,
+        updatedAt: '2026-08-28T00:00:00.000Z',
+      }));
+      return {
+        hash,
+        bundlePath: `/mock/doc/bundle-drop/bundles/${hash}/main.jsbundle`,
+      };
     });
     mockCheckForUpdate.mockReset();
     mockInstallFromZip.mockReset();
@@ -174,12 +194,9 @@ describe('manager/downloadAndInstall', () => {
         hash: '1111111111111111111111111111111111111111111111111111111111111111',
       })
     );
-    expect(readMockJson(STATE_PATH)).toEqual(
-      expect.objectContaining({
-        activeHash: '1111111111111111111111111111111111111111111111111111111111111111',
-        candidateHash: '1111111111111111111111111111111111111111111111111111111111111111',
-        candidateCommitted: false,
-      })
+    expect(mockActivateStartupCandidateNative).toHaveBeenCalledWith(
+      '1111111111111111111111111111111111111111111111111111111111111111',
+      { maxCrashCount: 2, healthCheckMode: 'auto', healthyAfterSec: 0 },
     );
   });
 
@@ -394,11 +411,14 @@ describe('manager/downloadAndInstall', () => {
     }
   });
 
-  it('clears the candidate pointer before throwing when native rejects without a previous pointer', async () => {
+  it('asks native to revert activation when resolver validation fails without a previous pointer', async () => {
     const consoleSpy = jest.spyOn(console, 'error').mockImplementation(() => undefined);
 
     try {
-      mockGetDownloadedBundlePathNative.mockResolvedValueOnce(null);
+      mockActivateStartupCandidateNative.mockResolvedValueOnce({
+        hash: '2222222222222222222222222222222222222222222222222222222222222222',
+        bundlePath: '/wrong/path/main.jsbundle',
+      });
       mockCheckForUpdate.mockResolvedValue({
         action: 'INSTALL',
         upToDate: false,
@@ -424,7 +444,7 @@ describe('manager/downloadAndInstall', () => {
           step: 'install',
         }),
       );
-      expect(getMockFile(CURRENT_POINTER_PATH)).toBeUndefined();
+      expect(mockRollbackStartupBundleNative).toHaveBeenCalledWith(false);
       expect(getMockFile(BUNDLE_INFO_PATH)).toBeUndefined();
       expect(getMockFile(STATE_PATH)).toBeUndefined();
     } finally {
@@ -432,7 +452,7 @@ describe('manager/downloadAndInstall', () => {
     }
   });
 
-  it('restores the previous verified pointer before throwing when native rejects the installed pointer', async () => {
+  it('asks native to restore the ledger when its resolver rejects the installed pointer', async () => {
     const consoleSpy = jest.spyOn(console, 'error').mockImplementation(() => undefined);
     const previousHash = '1111111111111111111111111111111111111111111111111111111111111111';
     const rejectedHash = '2222222222222222222222222222222222222222222222222222222222222222';
@@ -445,7 +465,7 @@ describe('manager/downloadAndInstall', () => {
           updatedAt: '2026-03-01T00:00:00.000Z',
         }),
       );
-      mockGetDownloadedBundlePathNative.mockRejectedValueOnce(new Error('native rejected candidate'));
+      mockActivateStartupCandidateNative.mockRejectedValueOnce(new Error('native rejected candidate'));
       mockCheckForUpdate.mockResolvedValue({
         action: 'INSTALL',
         upToDate: false,
@@ -472,12 +492,7 @@ describe('manager/downloadAndInstall', () => {
           cause: expect.objectContaining({ message: 'native rejected candidate' }),
         }),
       );
-      expect(readMockJson(CURRENT_POINTER_PATH)).toEqual(
-        expect.objectContaining({
-          hash: previousHash,
-        }),
-      );
-      expect(readMockJson(PREVIOUS_POINTER_PATH)).toBeNull();
+      expect(mockRollbackStartupBundleNative).not.toHaveBeenCalled();
       expect(getMockFile(BUNDLE_INFO_PATH)).toBeUndefined();
       expect(getMockFile(STATE_PATH)).toBeUndefined();
     } finally {
@@ -485,7 +500,7 @@ describe('manager/downloadAndInstall', () => {
     }
   });
 
-  it('restores both current and previous pointers when native rejects after writing candidate pointer', async () => {
+  it('does not use JS pointer restoration when native rejects after activation', async () => {
     const consoleSpy = jest.spyOn(console, 'error').mockImplementation(() => undefined);
     const currentHash = '1111111111111111111111111111111111111111111111111111111111111111';
     const rollbackHash = 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa';
@@ -500,7 +515,7 @@ describe('manager/downloadAndInstall', () => {
         hash: rollbackHash,
         updatedAt: '2026-02-01T00:00:00.000Z',
       }));
-      mockGetDownloadedBundlePathNative.mockRejectedValueOnce(new Error('native rejected candidate'));
+      mockActivateStartupCandidateNative.mockRejectedValueOnce(new Error('native rejected candidate'));
       mockCheckForUpdate.mockResolvedValue({
         action: 'INSTALL',
         upToDate: false,
@@ -526,8 +541,7 @@ describe('manager/downloadAndInstall', () => {
           step: 'install',
         }),
       );
-      expect(readMockJson(CURRENT_POINTER_PATH)).toEqual(expect.objectContaining({ hash: currentHash }));
-      expect(readMockJson(PREVIOUS_POINTER_PATH)).toEqual(expect.objectContaining({ hash: rollbackHash }));
+      expect(mockRollbackStartupBundleNative).not.toHaveBeenCalled();
       expect(getMockFile(BUNDLE_INFO_PATH)).toBeUndefined();
       expect(getMockFile(STATE_PATH)).toBeUndefined();
     } finally {
@@ -535,7 +549,7 @@ describe('manager/downloadAndInstall', () => {
     }
   });
 
-  it('restores the previous verified pointer when native resolves a different bundle path', async () => {
+  it('asks native to restore the previous ledger target when it resolves a different path', async () => {
     const consoleSpy = jest.spyOn(console, 'error').mockImplementation(() => undefined);
     const previousHash = '1111111111111111111111111111111111111111111111111111111111111111';
     const targetHash = '2222222222222222222222222222222222222222222222222222222222222222';
@@ -548,9 +562,10 @@ describe('manager/downloadAndInstall', () => {
           updatedAt: '2026-03-01T00:00:00.000Z',
         }),
       );
-      mockGetDownloadedBundlePathNative.mockResolvedValueOnce(
-        `/mock/doc/bundle-drop/bundles/${previousHash}/main.jsbundle`,
-      );
+      mockActivateStartupCandidateNative.mockResolvedValueOnce({
+        hash: targetHash,
+        bundlePath: `/mock/doc/bundle-drop/bundles/${previousHash}/main.jsbundle`,
+      });
       mockCheckForUpdate.mockResolvedValue({
         action: 'INSTALL',
         upToDate: false,
@@ -580,11 +595,7 @@ describe('manager/downloadAndInstall', () => {
           }),
         }),
       );
-      expect(readMockJson(CURRENT_POINTER_PATH)).toEqual(
-        expect.objectContaining({
-          hash: previousHash,
-        }),
-      );
+      expect(mockRollbackStartupBundleNative).toHaveBeenCalledWith(false);
       expect(getMockFile(BUNDLE_INFO_PATH)).toBeUndefined();
       expect(getMockFile(STATE_PATH)).toBeUndefined();
     } finally {
@@ -890,17 +901,13 @@ describe('manager/downloadAndInstall', () => {
   });
 
   it('refuses to install a locally failed bundle hash', async () => {
-    setMockFile(
-      STATE_PATH,
-      JSON.stringify({
-        failedBundles: {
-          'hash-failed': {
-            reason: 'crash_loop',
-            failedAt: 1000,
-          },
-        },
-      }),
-    );
+    mockGetStartupRecoveryStateNative.mockResolvedValue({
+      protocolVersion: 1,
+      revision: 4,
+      phase: 'idle',
+      quarantinedHashes: ['hash-failed'],
+      pendingRecoveryEvents: [],
+    });
     const statusSpy = jest.fn();
 
     await expect(
@@ -920,6 +927,55 @@ describe('manager/downloadAndInstall', () => {
     expect(statusSpy).toHaveBeenCalledWith(
       '✅ Current bundle retained; selected update previously failed on this device',
     );
+  });
+
+  it('fails closed when native startup recovery cannot activate the candidate', async () => {
+    const consoleSpy = jest.spyOn(console, 'error').mockImplementation(() => undefined);
+    const hash = '5'.repeat(64);
+    mockActivateStartupCandidateNative.mockResolvedValueOnce(null);
+    mockCheckForUpdate.mockResolvedValue({
+      action: 'INSTALL',
+      upToDate: false,
+      channelName: 'General',
+      hash,
+      downloadUrl: 'https://cdn.example.com/no-recovery.zip',
+    });
+    mockInstallFromZip.mockResolvedValue({
+      bundlePath: `/mock/doc/bundle-drop/bundles/${hash}/main.jsbundle`,
+      metadataFromZip: {},
+    });
+
+    try {
+      await expect(downloadUpdate()).rejects.toMatchObject({
+        code: 'INSTALL_FAILED',
+        step: 'install',
+      });
+      expect(mockRollbackStartupBundleNative).not.toHaveBeenCalled();
+    } finally {
+      consoleSpy.mockRestore();
+    }
+  });
+
+  it('wraps native quarantine read failures as unknown install failures', async () => {
+    const consoleSpy = jest.spyOn(console, 'error').mockImplementation(() => undefined);
+    mockGetStartupRecoveryStateNative.mockRejectedValueOnce(new Error('native state unavailable'));
+    mockCheckForUpdate.mockResolvedValue({
+      action: 'INSTALL',
+      upToDate: false,
+      channelName: 'General',
+      hash: '6'.repeat(64),
+      downloadUrl: 'https://cdn.example.com/state-failure.zip',
+    });
+
+    try {
+      await expect(downloadUpdate()).rejects.toMatchObject({
+        code: 'UNKNOWN',
+        step: 'install',
+      });
+      expect(mockInstallFromZip).not.toHaveBeenCalled();
+    } finally {
+      consoleSpy.mockRestore();
+    }
   });
 
   it('rejects install decisions without a server-selected bundleHash before downloading', async () => {
@@ -954,12 +1010,13 @@ describe('manager/downloadAndInstall', () => {
     }
   });
 
-  it('wraps unexpected persistence errors as UNKNOWN failures', async () => {
+  it('rolls back native activation when bundle metadata persistence fails', async () => {
     const consoleSpy = jest.spyOn(console, 'error').mockImplementation(() => undefined);
     const statusSpy = jest.fn();
     const writeBundleInfoSpy = jest
-      .spyOn(bundleInfoModule, 'writeBundleInfo')
+      .spyOn(bundleInfoModule, 'writeBundleInfoDurably')
       .mockRejectedValueOnce(new Error('disk full'));
+    mockRollbackStartupBundleNative.mockRejectedValueOnce(new Error('rollback unavailable'));
 
     try {
       mockCheckForUpdate.mockResolvedValue({
@@ -978,11 +1035,12 @@ describe('manager/downloadAndInstall', () => {
 
       await expect(downloadUpdate(undefined, statusSpy)).rejects.toEqual(
         expect.objectContaining<Partial<BundleDropError>>({
-          code: 'UNKNOWN',
+          code: 'INSTALL_FAILED',
           step: 'install',
         }),
       );
-      expect(statusSpy).toHaveBeenCalledWith('❌ OTA update failed (UNKNOWN/install)');
+      expect(statusSpy).toHaveBeenCalledWith('❌ OTA update failed (INSTALL_FAILED/install)');
+      expect(mockRollbackStartupBundleNative).toHaveBeenCalledWith(false);
       expect(consoleSpy).toHaveBeenCalled();
     } finally {
       writeBundleInfoSpy.mockRestore();

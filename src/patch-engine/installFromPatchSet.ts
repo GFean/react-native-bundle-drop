@@ -2,7 +2,7 @@ import RNFS from '../native/fs';
 
 import { BUNDLE_DROP_ROOT, platform as devicePlatform } from '../context';
 import { ensureDir } from '../fs/fsUtils';
-import { readCurrentBundlePointer } from '../fs/bundlePointer';
+import { readCurrentBundleHash } from '../fs/bundlePointer';
 import { InstallPhaseError, isInstallPhaseError } from '../errors';
 import {
   BUNDLE_MANIFEST,
@@ -90,8 +90,8 @@ export async function installFromPatchSet(params: InstallFromPatchSetParams): Pr
   assertCanonicalBundleHash(baseHash, 'base hash');
   assertCanonicalBundleHash(targetHash, 'target hash');
 
-  const currentPointer = await readCurrentBundlePointer();
-  if (currentPointer?.hash !== baseHash) {
+  const currentHash = await readCurrentBundleHash();
+  if (currentHash !== baseHash) {
     throw new InstallPhaseError('install', new Error('Patch base hash does not match current bundle'));
   }
 

@@ -125,13 +125,14 @@ npx bundle-drop doctor
 Apps upgrading from an inline `runtimeDelivery` block or a direct Metro alias should
 remove that stale block and run `npx bundle-drop init` once to install the
 package-managed Metro wrapper. Inline delivery data is ignored: the validated
-generated bootstrap is the sole trust source. After that one-time migration, `sync`
+runtime-delivery lockfile is the sole trust source. After that one-time migration, `sync`
 is the narrow command for refreshing trust data.
 
-The generated bootstrap is not a secret and should be committed. Setup keeps the
+The runtime-delivery lockfile is not a secret and should be committed. Setup keeps the
 generated Metro wrapper, build receipts, and other transient `.bundle-drop` files
-ignored while allowing `.bundle-drop/runtime-delivery.generated.json` into source
-control.
+ignored while allowing `.bundle-drop/runtime-delivery.lock.json` into source
+control. Projects with the former `runtime-delivery.generated.json` filename remain
+readable; run `bundle-drop sync` to migrate and remove that legacy file.
 
 ### Manual setup without AI planning
 
@@ -189,9 +190,9 @@ npx bundle-drop sync
 npx bundle-drop doctor
 ```
 
-`sync` creates `.bundle-drop/runtime-delivery.generated.json`, recreates it if it or
+`sync` creates `.bundle-drop/runtime-delivery.lock.json`, recreates it if it or
 the entire `.bundle-drop` directory was deleted, and repairs the corresponding
-`.gitignore` rules. The bootstrap contains public identity and verification material,
+`.gitignore` rules. The lockfile contains public identity and verification material,
 not secrets, so commit it with the application.
 
 ## Initialize the Runtime
@@ -320,6 +321,30 @@ example, an iOS-only native change should bump `runtimeVersion.ios`; Android can
 its existing value. This makes the compatibility boundary explicit and prevents an
 update from reaching a binary that cannot run it.
 
+## Native Startup Recovery
+
+Bundle Drop records every OTA startup attempt in native storage before React Native
+receives the bundle path. If an attempt does not reach its configured health boundary,
+the next distinct app launch counts it as incomplete. The candidate is retried until
+`rollback.maxCrashCount` is reached, then quarantined locally and replaced with the
+previous native-proven healthy OTA bundle. If that bundle is missing, corrupt,
+incompatible, or locally revoked, startup falls back to the bundle embedded in the app.
+
+Automatic health waits for React content to appear and then applies
+`rollback.healthyAfterSec`. Apps with a stronger readiness boundary can opt into
+`healthCheckMode: 'manual'` and call `BundleDrop.reportHealthy()` after hydration,
+migrations, authentication bootstrap, or navigation setup completes. Health is committed
+against the exact native launch attempt, so a delayed callback from an older React runtime
+cannot approve a newer launch.
+
+Recovery is local and offline; it never waits for a network request during startup. With
+`maxCrashCount: 0`, launch-health counting and automatic crash-loop rollback are disabled,
+while integrity, runtime compatibility, quarantine, and locally persisted revocation checks
+still apply. Native startup recovery requires a binary built with the corresponding SDK
+`nativeVersion`; it cannot be added to an older installed binary through OTA JavaScript.
+Crashes after an attempt is healthy do not trigger this rollback path and should use normal
+crash reporting plus fix-forward or explicit rollback controls.
+
 ## Managed Runtime Delivery
 
 Runtime delivery is package-managed. `bundle.drop.config.js` stays focused on
@@ -330,14 +355,14 @@ a delivery-mode switch.
 `bundle-drop login` and `bundle-drop init` synchronize the trust bootstrap during
 setup. `bundle-drop sync` performs the same narrow operation later for repair or key
 rotation. Each command validates authenticated project credentials and writes the
-identity-bound `.bundle-drop/runtime-delivery.generated.json`. Metro confirms that
+identity-bound `.bundle-drop/runtime-delivery.lock.json`. Metro confirms that
 the bootstrap belongs to the same server, organization, and project before merging
 it into the runtime module. Malformed, copied, unsupported, or private-key-bearing
 data is rejected.
 
 Older apps with an inline `runtimeDelivery` block keep their ordinary project
 configuration, but the inline block is ignored and should be removed during
-migration. Only the identity-bound generated bootstrap can enable managed delivery.
+migration. Only the identity-bound runtime-delivery lockfile can enable managed delivery.
 If the server explicitly disables delivery for a project, synchronization removes a
 stale bootstrap and the SDK continues through the compatible `/ota/resolve` path.
 
@@ -529,7 +554,7 @@ Import the runtime API from `@gfean/react-native-bundle-drop`.
 | `BundleDrop.init(options)` | Initialize the runtime for the app process. |
 | `BundleDrop.setChannel(name)` / `setChannel` | Change the active channel for singleton actions. |
 | `BundleDrop.getChannelName()` / `getChannelName` | Read the active channel. |
-| `BundleDrop.reportHealthy()` / `reportHealthy` | Mark the running OTA candidate healthy for this device. |
+| `BundleDrop.reportHealthy()` / `reportHealthy` | In manual health mode, ask native recovery to mark the exact running OTA attempt healthy. |
 
 **`BundleDrop.init(options)`**
 
