@@ -49,6 +49,9 @@ describe('Expo native target isolation', () => {
     expect(barePodspec).toContain('Regenerate Bundle Drop runtime identity');
     expect(barePodspec).toContain('"${NODE_BINARY:-node}"');
     expect(barePodspec).not.toContain(':output_files');
+    expect(barePodspec).not.toContain('return nil unless File.file?(config_path)');
+    expect(barePodspec).toContain('"source" => "unconfigured"');
+    expect(barePodspec).toContain('FileUtils.mkdir_p(File.dirname(output_path))');
     expect(barePodspec).toContain('return nil if identity["source"] == "expo"');
     expect(bareAndroidBuild).toContain('BundleDropNativeIdentityCommandExecutor');
     expect(bareAndroidBuild).toContain('generateBundleDropNativeRuntimeIdentity');

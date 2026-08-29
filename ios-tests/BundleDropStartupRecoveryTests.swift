@@ -353,10 +353,10 @@ final class BundleDropStartupRecoveryTests: XCTestCase {
       healthyAfterSec: 0
     )
     let revokedAttempt = controller.selectStartupBundle()
-    XCTAssertTrue(try controller.setRevokedHashes([revoked.hash]))
+    try controller.setRevokedHashes([revoked.hash])
     XCTAssertFalse(controller.markHealthy(hash: revoked.hash, attemptId: revokedAttempt.attemptId!))
 
-    XCTAssertTrue(try controller.setRevokedHashes([]))
+    try controller.setRevokedHashes([])
     let identity = try makeBundle(contents: "identity")
     _ = try controller.activateCandidate(
       hash: identity.hash,
@@ -369,6 +369,16 @@ final class BundleDropStartupRecoveryTests: XCTestCase {
       makeController(binaryIdentity: "binary-2")
         .markHealthy(hash: identity.hash, attemptId: identityAttempt.attemptId!)
     )
+  }
+
+  func testRepeatedRevocationSetIsAnAcceptedNoop() throws {
+    let controller = makeController()
+    _ = try controller.snapshot()
+    let initialRevision = try readLedger().revision
+
+    try controller.setRevokedHashes([])
+
+    XCTAssertEqual(try readLedger().revision, initialRevision)
   }
 
   func testAdapterCapturesSelectedHashIndependentlyOfAttemptIdentity() {
@@ -607,7 +617,7 @@ final class BundleDropStartupRecoveryTests: XCTestCase {
       healthCheckMode: "auto",
       healthyAfterSec: 0
     )
-    XCTAssertTrue(try controller.setRevokedHashes([candidate.hash]))
+    try controller.setRevokedHashes([candidate.hash])
 
     let selection = controller.selectStartupBundle()
 

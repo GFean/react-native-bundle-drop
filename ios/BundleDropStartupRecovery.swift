@@ -522,17 +522,16 @@ final class BundleDropStartupRecoveryController {
     }
   }
 
-  func setRevokedHashes(_ hashes: [String]) throws -> Bool {
+  func setRevokedHashes(_ hashes: [String]) throws {
     try withLock {
       guard hashes.allSatisfy(Self.isCanonicalHash) else {
         throw BundleDropStartupRecoveryError.invalidHash
       }
       var ledger = try readLedgerImportingLegacyState()
       let normalized = Array(Set(hashes)).sorted()
-      guard normalized != ledger.revokedHashes else { return false }
+      guard normalized != ledger.revokedHashes else { return }
       ledger.revokedHashes = normalized
       try commit(&ledger)
-      return true
     }
   }
 

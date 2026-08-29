@@ -66,6 +66,7 @@ enum BundleDropStartupRecoveryAdapter {
 
   static func setRevokedHashes(_ hashes: [String]) throws -> Bool {
     try requireDefaultController().setRevokedHashes(hashes)
+    return true
   }
 
   static func acknowledgeRecovery(eventId: String) throws -> Bool {

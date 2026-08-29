@@ -1,4 +1,5 @@
 require "digest"
+require "fileutils"
 require "json"
 require "open3"
 require "shellwords"
@@ -8,8 +9,6 @@ bundle_drop_native_runtime_identity_resource = lambda do
 
   project_root = File.expand_path("..", Pod::Config.instance.installation_root.to_s)
   config_path = File.join(project_root, "bundle.drop.config.js")
-  return nil unless File.file?(config_path)
-
   writer_path = File.join(
     __dir__,
     "lib",
@@ -32,23 +31,39 @@ bundle_drop_native_runtime_identity_resource = lambda do
     "bundle-drop-build-identity.json"
   )
   output_path = File.join(__dir__, resource_path)
-  stdout, stderr, status = Open3.capture3(
-    ENV.fetch("NODE_BINARY", "node"),
-    writer_path,
-    "--project-root", project_root,
-    "--platform", "ios",
-    "--output", output_path
-  )
-  unless status.success?
-    detail = stderr.strip.empty? ? stdout.strip : stderr.strip
-    raise Pod::Informative,
-      "Bundle Drop could not generate the iOS runtime identity: #{detail}"
-  end
 
-  identity = JSON.parse(File.read(output_path))
-  return nil if identity["source"] == "expo"
-  unless identity["runtimeVersion"].is_a?(String) && !identity["runtimeVersion"].empty?
-    raise Pod::Informative, "Bundle Drop generated an invalid iOS runtime identity."
+  if File.file?(config_path)
+    stdout, stderr, status = Open3.capture3(
+      ENV.fetch("NODE_BINARY", "node"),
+      writer_path,
+      "--project-root", project_root,
+      "--platform", "ios",
+      "--output", output_path
+    )
+    unless status.success?
+      detail = stderr.strip.empty? ? stdout.strip : stderr.strip
+      raise Pod::Informative,
+        "Bundle Drop could not generate the iOS runtime identity: #{detail}"
+    end
+
+    identity = JSON.parse(File.read(output_path))
+    return nil if identity["source"] == "expo"
+    unless identity["runtimeVersion"].is_a?(String) && !identity["runtimeVersion"].empty?
+      raise Pod::Informative, "Bundle Drop generated an invalid iOS runtime identity."
+    end
+  else
+    # CocoaPods evaluates the podspec before `bundle-drop login` in the documented
+    # fresh-install flow. Keep the resource and build phase in the Pods project so
+    # the first native build can replace this inert placeholder after setup.
+    FileUtils.mkdir_p(File.dirname(output_path))
+    File.write(
+      output_path,
+      JSON.generate({
+        "schemaVersion" => 1,
+        "platform" => "ios",
+        "source" => "unconfigured"
+      }) + "\n"
+    )
   end
   resource_path
 end

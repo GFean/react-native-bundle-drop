@@ -53,6 +53,16 @@ describe('runtime-delivery/manifestVerifier', () => {
     expect(NativeModules.BundleDrop.setStartupRecoveryRevokedHashes).toHaveBeenCalledWith([]);
   });
 
+  it('accepts repeated verification when native accepts an unchanged revocation set', async () => {
+    await verifyRuntimeDeliveryManifest(serialize(), IDENTITY, { 'test-key-2026-08': KEY });
+
+    await expect(
+      verifyRuntimeDeliveryManifest(serialize(), IDENTITY, { 'test-key-2026-08': KEY }),
+    ).resolves.toEqual(expect.objectContaining({ revokedHashes: [] }));
+    expect(NativeModules.BundleDrop.setStartupRecoveryRevokedHashes).toHaveBeenNthCalledWith(1, []);
+    expect(NativeModules.BundleDrop.setStartupRecoveryRevokedHashes).toHaveBeenNthCalledWith(2, []);
+  });
+
   it('keeps revocations from other verified channels in the same runtime', async () => {
     const verifySignature = mockVerifyEs256Signature.getMockImplementation();
     mockVerifyEs256Signature.mockResolvedValue(true);

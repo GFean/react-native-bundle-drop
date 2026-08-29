@@ -379,12 +379,11 @@ internal class BundleDropStartupRecoveryController(
     true
   }
 
-  fun setRevokedHashes(hashes: Set<String>): Boolean = synchronized(STORAGE_LOCK) {
+  fun setRevokedHashes(hashes: Set<String>): Unit = synchronized(STORAGE_LOCK) {
     hashes.forEach(::requireHash)
     val ledger = readLedgerWithLegacyImport()
-    if (ledger.revokedHashes == hashes) return@synchronized false
+    if (ledger.revokedHashes == hashes) return@synchronized
     persist(ledger.copy(revokedHashes = hashes))
-    true
   }
 
   fun rollbackStartupBundle(forceEmbedded: Boolean): RollbackResult = synchronized(STORAGE_LOCK) {

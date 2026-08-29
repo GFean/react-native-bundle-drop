@@ -118,10 +118,8 @@ class BundleDropModule(reactContext: ReactApplicationContext) :
           add(hash)
         }
       }
-      promise.resolve(
-        BundleDropStartupRecovery.controller(reactApplicationContext)
-          .setRevokedHashes(values),
-      )
+      BundleDropStartupRecovery.controller(reactApplicationContext).setRevokedHashes(values)
+      promise.resolve(true)
     } catch (error: Exception) {
       promise.reject("ERR_STARTUP_RECOVERY_REVOKE", error.message, error)
     }
