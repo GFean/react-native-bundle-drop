@@ -51,13 +51,11 @@ const androidIdentity: ExpoBuildIdentity = {
 
 describe('exportProjectArtifact', () => {
   const roots: string[] = [];
-  const originalPackageRoot = process.env.BUNDLE_DROP_PACKAGE_ROOT_OVERRIDE;
 
   const fixture = (packageJson: Record<string, unknown> = {}) => {
     const root = createTempProjectDir();
     roots.push(root);
     fs.writeJsonSync(path.join(root, 'package.json'), packageJson);
-    process.env.BUNDLE_DROP_PACKAGE_ROOT_OVERRIDE = root;
     return root;
   };
 
@@ -90,8 +88,6 @@ describe('exportProjectArtifact', () => {
   });
 
   afterEach(() => {
-    if (originalPackageRoot === undefined) delete process.env.BUNDLE_DROP_PACKAGE_ROOT_OVERRIDE;
-    else process.env.BUNDLE_DROP_PACKAGE_ROOT_OVERRIDE = originalPackageRoot;
     for (const root of roots.splice(0)) removeTempDir(root);
   });
 
@@ -197,8 +193,6 @@ describe('exportProjectArtifact', () => {
     const root = fixture();
     const packageRoot = createTempProjectDir();
     roots.push(packageRoot);
-    process.env.BUNDLE_DROP_PACKAGE_ROOT_OVERRIDE = packageRoot;
-
     const artifact = await exportProjectArtifact({
       projectRoot: root,
       platform: 'ios',

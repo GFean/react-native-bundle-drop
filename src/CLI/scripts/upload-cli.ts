@@ -1,5 +1,5 @@
 import axios from 'axios';
-import { execSync } from 'child_process';
+import { spawnSync } from 'child_process';
 import FormData from 'form-data';
 import * as fs from 'fs';
 import * as path from 'path';
@@ -13,6 +13,8 @@ import {
   evaluateExpoConfig,
   resolveBundleDropRuntimeVersionAuthority,
 } from '../../expo';
+import { resolveModuleFrom, type ModuleResolver } from '../../scripts/resolveModule';
+import { assertMatchingServerOrigin } from '../serverUrl';
 
 const DOCS_INSTALLATION_URL = 'https://bundledrop.app/docs/installation';
 const DOCS_UPLOADING_URL = 'https://bundledrop.app/docs/uploading';
@@ -24,8 +26,44 @@ const BUNDLE_DROP_ARTIFACT_FILES = [
   'bundle-drop-result.json',
 ];
 
-const getPackageRoot = () =>
-  process.env.BUNDLE_DROP_PACKAGE_ROOT_OVERRIDE || path.resolve(__dirname, '..', '..', '..');
+type UploadOptions = {
+  plistFile?: string;
+  version?: string;
+  channel?: string;
+  buildGradlePath?: string;
+  releaseNotes?: string;
+  token?: string;
+  author?: string;
+  sourcemap?: boolean;
+  artifactDir?: string;
+  buildReceipt?: string;
+};
+
+type UploadDependencies = {
+  packageRoot: string;
+  spawnProcess: typeof spawnSync;
+  resolveModule: ModuleResolver;
+};
+
+const defaultUploadDependencies = (): UploadDependencies => ({
+  packageRoot: path.resolve(__dirname, '..', '..', '..'),
+  spawnProcess: spawnSync,
+  resolveModule: resolveModuleFrom,
+});
+
+const assertPathInside = (targetPath: string, parentPath: string, label: string) => {
+  const resolvedParent = path.resolve(parentPath);
+  const resolvedTarget = path.resolve(targetPath);
+  const relative = path.relative(resolvedParent, resolvedTarget);
+  const escapesParent =
+    relative === '..' ||
+    relative.startsWith(`..${path.sep}`) ||
+    path.isAbsolute(relative);
+  if (!escapesParent) {
+    return;
+  }
+  throw new Error(`${label} escaped its generated output directory: ${resolvedTarget}`);
+};
 
 const readPackageVersion = (packageRoot: string): string | undefined => {
   try {
@@ -105,9 +143,10 @@ const bareArtifactPaths = (
   };
 };
 
-export default async function upload(
+export async function runUpload(
   platform: string,
-  options: { plistFile?: string; version?: string; channel?: string; buildGradlePath?: string; releaseNotes?: string; token?: string; author?: string; sourcemap?: boolean; artifactDir?: string; buildReceipt?: string }
+  options: UploadOptions,
+  dependencies: UploadDependencies = defaultUploadDependencies(),
 ) {
   console.log(); // blank line
   log.info('🚀 React Native OTA Upload Initialized');
@@ -169,7 +208,24 @@ export default async function upload(
       );
       process.exit(1);
     }
-    token = JSON.parse(fs.readFileSync(authPath, 'utf-8')).token;
+    let storedAuth: { token?: string; serverUrl?: string; baseUrl?: string };
+    try {
+      storedAuth = JSON.parse(fs.readFileSync(authPath, 'utf-8'));
+    } catch {
+      log.error('❌ Failed to read CLI auth session. Run `bundle-drop login` again or pass --token.');
+      process.exit(1);
+    }
+    if (!storedAuth?.token) {
+      log.error('❌ CLI auth session is missing a token. Run `bundle-drop login` again or pass --token.');
+      process.exit(1);
+    }
+    try {
+      assertMatchingServerOrigin(serverUrl, storedAuth.serverUrl || storedAuth.baseUrl);
+    } catch (error) {
+      log.error(`❌ ${(error as Error).message}`);
+      process.exit(1);
+    }
+    token = storedAuth.token;
   }
 
   // Validate channel
@@ -279,7 +335,7 @@ export default async function upload(
   console.log();
 
   log.arrow(`Bundling ${platform} app...`);
-  const packageRoot = getPackageRoot();
+  const packageRoot = dependencies.packageRoot;
   const packageVersion = readPackageVersion(packageRoot);
   const compiledBundleScript = path.join(packageRoot, 'lib', 'scripts', 'bundle.js');
   const tsBundleScript = path.join(packageRoot, 'src', 'scripts', 'bundle.ts');
@@ -296,17 +352,28 @@ export default async function upload(
         buildIdentity: expoBuildIdentity,
       });
     } else {
-      const bundleCommand = fs.existsSync(compiledBundleScript)
-        ? `node "${compiledBundleScript}"`
-        : `ts-node "${tsBundleScript}"`;
-      const sourcemapArg = options.sourcemap ? ' --sourcemap' : '';
-      execSync(`${bundleCommand} ${platform}${sourcemapArg}`, {
+      const useCompiledScript = fs.existsSync(compiledBundleScript);
+      const script = useCompiledScript
+        ? compiledBundleScript
+        : dependencies.resolveModule('ts-node/dist/bin.js', [packageRoot, __dirname]);
+      const args = [
+        script,
+        ...(useCompiledScript ? [] : [tsBundleScript]),
+        platform,
+      ];
+      if (options.sourcemap) args.push('--sourcemap');
+      const result = dependencies.spawnProcess(process.execPath, args, {
         stdio: 'inherit',
+        shell: false,
         env: {
           ...process.env,
           BUNDLE_DROP_APP_VERSION: version,
         },
       });
+      if (result.error) throw result.error;
+      if (result.status !== 0) {
+        throw new Error(`Bundle process exited with status ${result.status}`);
+      }
     }
   } catch (error) {
     log.error(
@@ -433,6 +500,10 @@ export default async function upload(
     return;
   } finally {
     try {
+      const generatedRoot = isExpoProject
+        ? path.join(projectRoot, '.bundle-drop', 'artifacts')
+        : path.join(packageRoot, 'dist');
+      assertPathInside(artifact.outputDir, generatedRoot, 'Artifact output');
       const cleanupFiles = [
         artifact.zipPath,
         artifact.metadataPath,
@@ -445,11 +516,16 @@ export default async function upload(
         path.join(packageRoot, 'dist', `expo-export-${platform}`);
 
       for (const file of cleanupFiles) {
-        if (file && fs.existsSync(file)) fs.unlinkSync(file);
+        if (file) {
+          assertPathInside(file, artifact.outputDir, 'Artifact file');
+          if (fs.existsSync(file)) fs.unlinkSync(file);
+        }
       }
+      assertPathInside(assetsPath, artifact.outputDir, 'Artifact assets');
       if (fs.existsSync(assetsPath)) {
         fs.rmSync(assetsPath, { recursive: true, force: true });
       }
+      assertPathInside(expoExportDirectory, generatedRoot, 'Expo export');
       if (fs.existsSync(expoExportDirectory)) {
         fs.rmSync(expoExportDirectory, { recursive: true, force: true });
       }
@@ -463,4 +539,8 @@ export default async function upload(
       log.warn(`Cleanup failed: ${cleanupErr.message}`);
     }
   }
+}
+
+export default function upload(platform: string, options: UploadOptions) {
+  return runUpload(platform, options);
 }

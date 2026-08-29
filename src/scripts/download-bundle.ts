@@ -4,11 +4,13 @@ import axios from 'axios';
 import * as fs from 'fs';
 import * as path from 'path';
 
-const getPackageRoot = () =>
-  process.env.BUNDLE_DROP_PACKAGE_ROOT_OVERRIDE || path.resolve(__dirname, '..', '..');
-
-export async function runDownloadBundle(options?: { argv?: string[]; cwd?: string }) {
-  const outputDir = path.join(getPackageRoot(), 'dist');
+export async function runDownloadBundle(options?: {
+  argv?: string[];
+  cwd?: string;
+  packageRoot?: string;
+}) {
+  const packageRoot = options?.packageRoot || path.resolve(__dirname, '..', '..');
+  const outputDir = path.join(packageRoot, 'dist');
   const argv = options?.argv || process.argv;
   const platform = argv[2];
 

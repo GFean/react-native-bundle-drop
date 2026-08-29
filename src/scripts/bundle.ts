@@ -1,12 +1,13 @@
 #!/usr/bin/env node
 
-import { execSync } from 'child_process';
+import { spawnSync, type SpawnSyncOptions } from 'child_process';
 import * as fs from 'fs';
 import * as path from 'path';
 
 import { BUNDLE_MANIFEST } from '../manifest/bundleManifest';
 import { buildCanonicalArtifact } from './canonicalArtifact';
 import { findProjectRoot } from './projectRoot';
+import { resolveModuleFrom, type ModuleResolver } from './resolveModule';
 
 export { findProjectRoot };
 
@@ -14,8 +15,45 @@ const SENTRY_HERMES_OTA_DOCS_URL =
   'https://bundledrop.app/docs/observability#sentry-and-hermes-ota-builds';
 const SENTRY_DEBUG_ID_MARKERS = ['//# debugId=', 'sentry-dbid-'];
 
-const getPackageRoot = () =>
-  process.env.BUNDLE_DROP_PACKAGE_ROOT_OVERRIDE || path.resolve(__dirname, '..', '..');
+type SpawnProcess = typeof spawnSync;
+
+type BundleScriptOptions = {
+  platform?: string;
+  cwd?: string;
+  sourcemap?: boolean;
+  packageRoot?: string;
+  spawnProcess?: SpawnProcess;
+  resolveModule?: ModuleResolver;
+};
+
+const runProcess = (
+  spawnProcess: SpawnProcess,
+  executable: string,
+  args: string[],
+  options: SpawnSyncOptions,
+) => {
+  const result = spawnProcess(executable, args, {
+    ...options,
+    shell: false,
+  });
+  if (result.error) throw result.error;
+  if (result.status !== 0) {
+    const detail = typeof result.stderr === 'string' ? result.stderr.trim() : '';
+    throw new Error(detail || `${path.basename(executable)} exited with status ${result.status}`);
+  }
+  return result;
+};
+
+const assertGeneratedPath = (targetPath: string, outputDir: string): void => {
+  const relative = path.relative(path.resolve(outputDir), path.resolve(targetPath));
+  const escapesOutput =
+    relative === '..' ||
+    relative.startsWith(`..${path.sep}`) ||
+    path.isAbsolute(relative);
+  if (escapesOutput) {
+    throw new Error(`Generated artifact path escaped the package output directory: ${targetPath}`);
+  }
+};
 
 const readTextIfExists = (filePath: string): string | null => {
   if (!fs.existsSync(filePath)) return null;
@@ -62,9 +100,13 @@ const readIosProjectSettings = (projectRoot: string): string | null => {
   return contents.length ? contents.join('\n') : null;
 };
 
-const readHermesHelp = (hermescPath: string): string => {
+const readHermesHelp = (hermescPath: string, spawnProcess: SpawnProcess): string => {
   try {
-    return String(execSync(`"${hermescPath}" -help`, { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] }));
+    const result = runProcess(spawnProcess, hermescPath, ['-help'], {
+      encoding: 'utf8',
+      stdio: ['ignore', 'pipe', 'pipe'],
+    });
+    return String(result.stdout || '');
   } catch {
     return '';
   }
@@ -73,8 +115,12 @@ const readHermesHelp = (hermescPath: string): string => {
 const hermesHelpIncludesFlag = (help: string, flag: string): boolean =>
   new RegExp(`(?:^|\\n)\\s*${flag.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}(?:\\s|=)`).test(help);
 
-const buildHermesFlags = (hermescPath: string, generateSourceMap: boolean): string[] => {
-  const help = readHermesHelp(hermescPath);
+const buildHermesFlags = (
+  hermescPath: string,
+  generateSourceMap: boolean,
+  spawnProcess: SpawnProcess,
+): string[] => {
+  const help = readHermesHelp(hermescPath, spawnProcess);
   const flags = ['-emit-binary'];
 
   if (hermesHelpIncludesFlag(help, '-O')) {
@@ -176,8 +222,10 @@ const shouldCompileHermesBytecode = (
   return false;
 };
 
-export function runBundleScript(options?: { platform?: string; cwd?: string; sourcemap?: boolean }) {
-  const packageRoot = getPackageRoot();
+export function runBundleScript(options: BundleScriptOptions = {}) {
+  const packageRoot = options.packageRoot || path.resolve(__dirname, '..', '..');
+  const spawnProcess = options.spawnProcess || spawnSync;
+  const resolveModule = options.resolveModule || resolveModuleFrom;
   const platform = options?.platform || process.argv[2] || 'ios';
   if (!['ios', 'android'].includes(platform)) {
     console.error('❌ Please provide platform: ios or android');
@@ -222,8 +270,10 @@ export function runBundleScript(options?: { platform?: string; cwd?: string; sou
   const hermesEnabled = shouldCompileHermesBytecode(cfg, platform, projectRoot);
 
   [bundlePath, zipPath, metadataPath, manifestPath, sourceMapPath].forEach(file => {
+    assertGeneratedPath(file, outputDir);
     if (fs.existsSync(file)) fs.unlinkSync(file);
   });
+  assertGeneratedPath(assetsDir, outputDir);
   if (fs.existsSync(assetsDir)) fs.rmSync(assetsDir, { recursive: true, force: true });
 
   fs.mkdirSync(outputDir, { recursive: true });
@@ -231,16 +281,38 @@ export function runBundleScript(options?: { platform?: string; cwd?: string; sou
 
   console.log(`📦 Bundling React Native code for platform: ${platform}...`);
 
-  const sourcemapFlag = generateSourceMap ? ` \\\n  --sourcemap-output "${sourceMapPath}"` : '';
+  const reactNativePackageJson = resolveModule('react-native/package.json', [
+    projectRoot,
+    packageRoot,
+    __dirname,
+  ]);
+  const reactNativeCli = path.join(path.dirname(reactNativePackageJson), 'cli.js');
+  if (!fs.existsSync(reactNativeCli)) {
+    throw new Error(`React Native CLI entrypoint is missing: ${reactNativeCli}`);
+  }
+  const reactNativeArgs = [
+    reactNativeCli,
+    'bundle',
+    '--platform',
+    platform,
+    '--dev',
+    'false',
+    '--entry-file',
+    'index.js',
+    '--bundle-output',
+    bundlePath,
+    '--assets-dest',
+    assetsDir,
+    '--reset-cache',
+  ];
+  if (generateSourceMap) {
+    reactNativeArgs.push('--sourcemap-output', sourceMapPath);
+  }
 
-  execSync(
-    `npx react-native bundle \
-  --platform ${platform} \
-  --dev false \
-  --entry-file index.js \
-  --bundle-output "${bundlePath}" \
-  --assets-dest "${assetsDir}" \
-  --reset-cache${sourcemapFlag}`,
+  runProcess(
+    spawnProcess,
+    process.execPath,
+    reactNativeArgs,
     {
       stdio: 'inherit',
       env: {
@@ -270,8 +342,17 @@ export function runBundleScript(options?: { platform?: string; cwd?: string; sou
     const hbcPath = bundlePath + '.hbc';
     try {
       console.log(`🔥 Compiling to Hermes bytecode (${platform})...`);
-      const hermesFlags = buildHermesFlags(hermescPath, generateSourceMap).join(' ');
-      execSync(`"${hermescPath}" ${hermesFlags} -out "${hbcPath}" "${bundlePath}"`, { stdio: ['ignore', 'ignore', 'ignore'] });
+      const hermesFlags = buildHermesFlags(
+        hermescPath,
+        generateSourceMap,
+        spawnProcess,
+      );
+      runProcess(
+        spawnProcess,
+        hermescPath,
+        [...hermesFlags, '-out', hbcPath, bundlePath],
+        { stdio: ['ignore', 'ignore', 'ignore'] },
+      );
       promoteHermesBytecode(hbcPath, bundlePath);
       console.log('✅ Hermes bytecode compiled');
     } catch (e) {
@@ -287,8 +368,10 @@ export function runBundleScript(options?: { platform?: string; cwd?: string; sou
         if (fs.existsSync(composeScript)) {
           try {
             const composedPath = sourceMapPath + '.composed';
-            execSync(
-              `node "${composeScript}" "${sourceMapPath}" "${hermesMapPath}" -o "${composedPath}"`,
+            runProcess(
+              spawnProcess,
+              process.execPath,
+              [composeScript, sourceMapPath, hermesMapPath, '-o', composedPath],
               { stdio: ['ignore', 'ignore', 'ignore'] },
             );
             fs.renameSync(composedPath, sourceMapPath);

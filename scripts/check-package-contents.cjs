@@ -63,6 +63,8 @@ const blockedPathPatterns = [
   /(^|\/)lib\/CLI\/scripts\/aipowered\/(?:apply-plan|init-native-config)\.(?:js|d\.ts)\/?$/,
   /(^|\/)lib\/CLI\/scripts\/init-metro-config\.(?:js|d\.ts)\/?$/,
   /(^|\/)scripts\/harness(\/|$)/,
+  /(^|\/)scripts\/run-codeql-local\.cjs$/,
+  /(^|\/)security(\/|$)/,
   /(^|\/)src\/tests(\/|$)/,
   /\.tgz$/,
 ];
@@ -170,6 +172,9 @@ const expectedScripts = new Set([
   'test:expo:plugin',
   'package:check',
   'audit:production',
+  'codeql:local:fast',
+  'codeql:local:full',
+  'codeql:local:compare',
   'verify:quick',
   'verify:native',
   'verify:release',

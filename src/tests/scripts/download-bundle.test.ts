@@ -8,7 +8,7 @@ import { mockProcessExit } from '../utils/processExit';
 
 jest.mock('axios', () => require('../mocks/modules/axiosNode'));
 
-import { runDownloadBundle } from '../../scripts/download-bundle';
+import { runDownloadBundle as runDownloadBundleImplementation } from '../../scripts/download-bundle';
 
 describe('scripts/download-bundle', () => {
   let tempProjectDir = '';
@@ -18,6 +18,10 @@ describe('scripts/download-bundle', () => {
   let originalCwd = '';
   let consoleLogSpy: jest.SpyInstance;
   let consoleErrorSpy: jest.SpyInstance;
+
+  const runDownloadBundle = (
+    options: Parameters<typeof runDownloadBundleImplementation>[0] = {},
+  ) => runDownloadBundleImplementation({ ...options, packageRoot: tempPackageRoot });
 
   beforeEach(() => {
     tempProjectDir = createTempProjectDir();
@@ -29,7 +33,6 @@ describe('scripts/download-bundle', () => {
     consoleErrorSpy = jest.spyOn(console, 'error').mockImplementation(() => undefined);
     mockAxiosNodePost.mockReset();
     mockAxiosNodeGet.mockReset();
-    process.env.BUNDLE_DROP_PACKAGE_ROOT_OVERRIDE = tempPackageRoot;
     fs.rmSync(distDir, { recursive: true, force: true });
   });
 
@@ -40,7 +43,6 @@ describe('scripts/download-bundle', () => {
     fs.rmSync(tempPackageRoot, { recursive: true, force: true });
     process.argv = originalArgv;
     process.chdir(originalCwd);
-    delete process.env.BUNDLE_DROP_PACKAGE_ROOT_OVERRIDE;
     fs.rmSync(distDir, { recursive: true, force: true });
   });
 
@@ -262,7 +264,6 @@ describe('scripts/download-bundle', () => {
     const defaultDistDir = path.join(defaultPackageRoot, 'dist');
 
     try {
-      delete process.env.BUNDLE_DROP_PACKAGE_ROOT_OVERRIDE;
       fs.writeFileSync(
         path.join(tempProjectDir, 'bundle.drop.config.js'),
         `module.exports = {
@@ -276,7 +277,7 @@ describe('scripts/download-bundle', () => {
       process.chdir(tempProjectDir);
       mockAxiosNodePost.mockRejectedValue({ raw: 'failure payload' });
 
-      await expect(runDownloadBundle()).rejects.toMatchObject({ code: 1 });
+      await expect(runDownloadBundleImplementation()).rejects.toMatchObject({ code: 1 });
       expect(consoleErrorSpy).toHaveBeenCalledWith('❌ Download failed:', { raw: 'failure payload' });
       expect(fs.existsSync(defaultDistDir)).toBe(true);
     } finally {

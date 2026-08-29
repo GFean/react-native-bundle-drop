@@ -12,6 +12,7 @@ import { Socket } from 'net';
 import { hasExistingBundleDropConfig, initConfig } from './init-config';
 import { runPostInitPrompts } from './post-init';
 import { detectProjectType } from '../../expo';
+import { normalizeServerUrl } from '../serverUrl';
 
 type CliSessionResponse = {
   sessionId: string;
@@ -57,10 +58,7 @@ type AuthFilePayload = {
 const LOGIN_TIMEOUT_MS = 10 * 60 * 1000;
 const DOCS_MANUAL_SETUP_URL = 'https://bundledrop.app/docs/manual-setup';
 
-export const getBaseUrl = () =>
-  process.env.BUNDLE_DROP_SERVER_URL
-    ? process.env.BUNDLE_DROP_SERVER_URL.replace(/\/$/, '')
-    : 'https://api.bundledrop.app';
+export const getBaseUrl = () => normalizeServerUrl(process.env.BUNDLE_DROP_SERVER_URL);
 
 export const getClientName = () => {
   const hostname = os.hostname();
