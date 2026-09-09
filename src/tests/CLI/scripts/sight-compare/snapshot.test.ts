@@ -108,6 +108,38 @@ describe('Sight isolated Git snapshots', () => {
     expect(state(root)).toEqual(before);
   });
 
+  it.each(['canonical', 'alias'])('resolves baseline absolute links through a %s repository path after their targets were removed from current', async kind => {
+    const root = fixture();
+    const alias = path.join(directory(), 'repository');
+    fs.symlinkSync(root, alias, 'dir');
+    const linkRoot = kind === 'canonical' ? fs.realpathSync(root) : alias;
+    write(root, 'old/source.js', 'baseline source');
+    fs.symlinkSync(path.join(linkRoot, 'old'), path.join(root, 'linked-directory'));
+    fs.symlinkSync(path.join(linkRoot, 'linked-directory/source.js'), path.join(root, 'linked-source.js'));
+    git(root, ['add', '.']);
+    git(root, ['commit', '-m', 'baseline links']);
+    git(root, ['rm', '-r', 'old', 'linked-directory', 'linked-source.js']);
+    const before = state(root);
+    const snapshot = await capture(root, { compareRef: 'HEAD' });
+    expect(fs.readFileSync(path.join(snapshot.baselineRoot, 'linked-source.js'), 'utf8')).toBe('baseline source');
+    expect(fs.readlinkSync(path.join(snapshot.baselineRoot, 'linked-directory'))).toBe('old');
+    expect(fs.existsSync(path.join(snapshot.currentRoot, 'old'))).toBe(false);
+    expect(state(root)).toEqual(before);
+  });
+
+  it('still rejects external baseline links when the current checkout removed them', async () => {
+    const root = fixture();
+    const external = directory();
+    write(external, 'source.js');
+    fs.symlinkSync(path.join(external, 'source.js'), path.join(root, 'external.js'));
+    git(root, ['add', '.']);
+    git(root, ['commit', '-m', 'external baseline link']);
+    git(root, ['rm', 'external.js']);
+    const before = state(root);
+    await expect(capture(root, { compareRef: 'HEAD' })).rejects.toThrow('External symlink');
+    expect(state(root)).toEqual(before);
+  });
+
   it('copies explicitly included ignored files identically on both sides', async () => {
     const root = fixture();
     write(root, 'ignored/settings.json', '{"shared":true}');

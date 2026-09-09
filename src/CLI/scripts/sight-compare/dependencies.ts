@@ -82,7 +82,7 @@ function existingLocks(directory: string): string[] {
   return Object.values(lockfiles).flat().filter(file => fs.existsSync(path.join(directory, file)));
 }
 
-function validateLocalReferences(value: unknown, directory: string, snapshotRoot: string, localPackages: Set<string>): void {
+function validateLocalReferences(value: unknown, directory: string, snapshotRoot: string, localPackages: Set<string>, inputFiles: string[]): void {
   if (typeof value === 'string') {
     if (/^git\+file:/i.test(value)) {
       throw new Error('Local Git dependencies are not supported by Sight comparison.');
@@ -92,43 +92,45 @@ function validateLocalReferences(value: unknown, directory: string, snapshotRoot
       // Percent escapes are accepted by package managers in file URLs.
       const decoded = decodeURIComponent(local);
       if (decoded.startsWith('~')) throw new Error('Home-directory dependencies are outside the repository snapshot.');
-      recordLocalPackage(snapshotRoot, path.resolve(directory, decoded), localPackages);
+      recordLocalDependency(snapshotRoot, path.resolve(directory, decoded), localPackages, inputFiles);
     } else if (path.isAbsolute(value) || value.startsWith('./') || value.startsWith('../')) {
-      recordLocalPackage(snapshotRoot, path.resolve(directory, value), localPackages);
+      recordLocalDependency(snapshotRoot, path.resolve(directory, value), localPackages, inputFiles);
     }
     return;
   }
   if (value && typeof value === 'object') {
-    for (const child of Object.values(value)) validateLocalReferences(child, directory, snapshotRoot, localPackages);
+    for (const child of Object.values(value)) validateLocalReferences(child, directory, snapshotRoot, localPackages, inputFiles);
   }
 }
 
-function recordLocalPackage(snapshotRoot: string, target: string, localPackages: Set<string>): void {
-  const directory = confinedPath(snapshotRoot, target);
-  if (fs.existsSync(path.join(directory, 'package.json'))) {
-    localPackages.add(fs.realpathSync(directory));
+function recordLocalDependency(snapshotRoot: string, target: string, localPackages: Set<string>, inputFiles: string[]): void {
+  const localPath = confinedPath(snapshotRoot, target);
+  if (fs.existsSync(localPath) && fs.statSync(localPath).isFile()) {
+    inputFiles.push(localPath);
+  } else if (fs.existsSync(path.join(localPath, 'package.json'))) {
+    localPackages.add(fs.realpathSync(localPath));
   }
 }
 
-function inspectNpmLock(lockPath: string, snapshotRoot: string, localPackages: Set<string>): void {
+function inspectNpmLock(lockPath: string, snapshotRoot: string, localPackages: Set<string>, inputFiles: string[]): void {
   const installRoot = path.dirname(lockPath);
   const lock = JSON.parse(fs.readFileSync(lockPath, 'utf8')) as {
     packages?: Record<string, { link?: boolean; resolved?: string }>;
     dependencies?: unknown;
   };
   for (const [location, entry] of Object.entries(lock.packages || {})) {
-    recordLocalPackage(snapshotRoot, path.resolve(installRoot, location), localPackages);
+    recordLocalDependency(snapshotRoot, path.resolve(installRoot, location), localPackages, inputFiles);
     if (entry.link && typeof entry.resolved === 'string') {
-      recordLocalPackage(snapshotRoot, path.resolve(installRoot, entry.resolved), localPackages);
+      recordLocalDependency(snapshotRoot, path.resolve(installRoot, entry.resolved), localPackages, inputFiles);
     } else {
-      validateLocalReferences(entry.resolved, installRoot, snapshotRoot, localPackages);
+      validateLocalReferences(entry.resolved, installRoot, snapshotRoot, localPackages, inputFiles);
     }
   }
   const inspectDependencies = (dependencies: unknown): void => {
     if (!dependencies || typeof dependencies !== 'object') return;
     for (const dependency of Object.values(dependencies) as { resolved?: unknown; version?: unknown; dependencies?: unknown }[]) {
-      validateLocalReferences(dependency.resolved, installRoot, snapshotRoot, localPackages);
-      validateLocalReferences(dependency.version, installRoot, snapshotRoot, localPackages);
+      validateLocalReferences(dependency.resolved, installRoot, snapshotRoot, localPackages, inputFiles);
+      validateLocalReferences(dependency.version, installRoot, snapshotRoot, localPackages, inputFiles);
       inspectDependencies(dependency.dependencies);
     }
   };
@@ -260,7 +262,7 @@ export async function inspectDependencyPlan(
   workspaceDirectories = [...new Set(workspaceDirectories.map(directory => confinedPath(snapshotRoot, directory)))];
   if (!workspaceDirectories.includes(projectRoot)) throw new Error('The app is not a member of the detected package-manager workspace.');
   const localPackages = new Set(workspaceDirectories.map(directory => fs.realpathSync(directory)));
-  if (name === 'npm') inspectNpmLock(inputFiles[0], snapshotRoot, localPackages);
+  if (name === 'npm') inspectNpmLock(inputFiles[0], snapshotRoot, localPackages, inputFiles);
   const nodeRanges = new Set<string>();
   // Set iteration also visits local packages discovered in preceding manifests.
   for (const directory of localPackages) {
@@ -272,7 +274,7 @@ export async function inspectDependencyPlan(
       nodeRanges.add(nodeRange);
     }
     for (const dependencies of [workspace.dependencies, workspace.devDependencies, workspace.optionalDependencies, workspace.peerDependencies, workspace.resolutions, workspace.overrides, workspace.pnpm]) {
-      validateLocalReferences(dependencies, directory, snapshotRoot, localPackages);
+      validateLocalReferences(dependencies, directory, snapshotRoot, localPackages, inputFiles);
     }
     inputFiles.push(packageFile);
   }

@@ -45,6 +45,21 @@ function isWithin(root: string, candidate: string): boolean {
   return relative !== '..' && !relative.startsWith(`..${path.sep}`) && !path.isAbsolute(relative);
 }
 
+function baselineLinkTarget(repositoryRoot: string, baselineRoot: string, link: string): string | undefined {
+  if (isWithin(repositoryRoot, link)) return path.join(baselineRoot, path.relative(repositoryRoot, link));
+  // Recognize repository aliases (for example /var on macOS) without resolving
+  // the target against current files: it may exist only in the baseline.
+  let ancestor = path.dirname(link);
+  while (true) {
+    if (fs.existsSync(ancestor) && fs.realpathSync(ancestor) === repositoryRoot) {
+      return path.join(baselineRoot, path.relative(ancestor, link));
+    }
+    const parent = path.dirname(ancestor);
+    if (parent === ancestor) return undefined;
+    ancestor = parent;
+  }
+}
+
 function forbiddenPath(name: string): boolean {
   const parts = name.split('/');
   return parts.some(part => part === '.git' || part === 'node_modules' || part === '.pnp.cjs' || part === '.pnp.loader.mjs') ||
@@ -240,10 +255,12 @@ export async function createComparisonSnapshots(options: ComparisonSnapshotOptio
       const linkPath = path.join(baselineRoot, entry.name);
       if (!fs.lstatSync(linkPath).isSymbolicLink()) continue;
       const link = fs.readlinkSync(linkPath);
-      if (path.isAbsolute(link) && isWithin(repositoryRoot, fs.realpathSync(link))) {
-        const target = path.join(baselineRoot, path.relative(repositoryRoot, fs.realpathSync(link)));
+      const target = path.isAbsolute(link) ? baselineLinkTarget(repositoryRoot, baselineRoot, link) : undefined;
+      if (target !== undefined) {
         fs.unlinkSync(linkPath);
-        fs.symlinkSync(path.relative(path.dirname(linkPath), target), linkPath, fs.statSync(target).isDirectory() ? 'dir' : 'file');
+        // Normalize every link before validating their resolved baseline targets,
+        // so chains never follow another absolute link into the current checkout.
+        fs.symlinkSync(path.relative(path.dirname(linkPath), target), linkPath);
       }
     }
     copyFiles(frozenRoot, files.map(file => file.name), currentRoot, signal);

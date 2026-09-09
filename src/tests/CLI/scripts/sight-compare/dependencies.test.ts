@@ -248,7 +248,20 @@ describe('comparison dependency isolation', () => {
       'node_modules/local': { link: true, resolved: 'vendor/local' },
       'node_modules/registry': { resolved: 'https://registry.example/registry.tgz' },
     } });
-    expect((await inspect()).inputFiles).toContain(path.join(root, 'vendor/local/package.json'));
+    expect((await inspect()).inputFiles).toEqual(expect.arrayContaining([
+      path.join(root, 'vendor/local/package.json'), path.join(root, 'vendor/sdk.tgz'),
+    ]));
+  });
+  it('tracks manifest archive inputs and rejects archives modified by installation', async () => {
+    write('vendor/sdk.tgz', 'fixture archive');
+    write('package.json', { name: 'app', packageManager: 'npm@10.9.0', dependencies: { sdk: 'file:vendor/sdk.tgz' } });
+    const plan = await inspect();
+    expect(plan.inputFiles).toContain(path.join(root, 'vendor/sdk.tgz'));
+    run.mockImplementationOnce(async () => {
+      write('vendor/sdk.tgz', 'modified archive');
+      return { stdout: '', stderr: '', exitCode: 0 };
+    });
+    await expect(installDependencies(plan)).rejects.toThrow('modified a comparison input: vendor/sdk.tgz');
   });
   it('rejects a real npm lock with an external transitive prepare script before it can run', async () => {
     const outside = fs.mkdtempSync(path.join(os.tmpdir(), 'sight-outside-dependency-'));
