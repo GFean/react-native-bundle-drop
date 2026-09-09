@@ -23,6 +23,33 @@
   },
   "acceptedFindings": [
     {
+      "language": "javascript-typescript",
+      "ruleId": "js/path-injection",
+      "path": "src/CLI/scripts/sight-ota.ts",
+      "line": 118,
+      "messageSha256": "c00a435fca4f003c882557433dd6e852d59f97b52586ca941e11f6037140a0a2",
+      "count": 2,
+      "justification": "Read-only exists/stat probes of the caller's explicit REACT_NATIVE_OVERRIDE_HERMES_DIR, matching Expo compiler selection. Comparison mode resolves the selected executable's real path and rejects snapshot escapes before use; single mode intentionally supports the caller's local compiler override. No remote input selects this path."
+    },
+    {
+      "language": "javascript-typescript",
+      "ruleId": "js/command-line-injection",
+      "path": "src/CLI/scripts/sight-ota.ts",
+      "line": 192,
+      "messageSha256": "c6fefa543e4076106b8e4fb11e35e8af829a2d84ef0aa7e65a04ee4b92aacee5",
+      "count": 1,
+      "justification": "Reported source is Expo-only REACT_NATIVE_OVERRIDE_HERMES_DIR, while this compiler invocation is in the mutually exclusive bare-project branch. That dataflow cannot execute. The selected local compiler is also invoked with separate arguments and shell disabled."
+    },
+    {
+      "language": "javascript-typescript",
+      "ruleId": "js/command-line-injection",
+      "path": "src/scripts/bundle.ts",
+      "line": 35,
+      "messageSha256": "c6fefa543e4076106b8e4fb11e35e8af829a2d84ef0aa7e65a04ee4b92aacee5",
+      "count": 1,
+      "justification": "Reported flow enters the compiler-help probe through Sight's bare-only buildHermesFlags call using an Expo-only override source. These branches are mutually exclusive, so this dataflow cannot execute. The help probe uses separate arguments with shell disabled."
+    },
+    {
       "language": "c-cpp",
       "ruleId": "cpp/comparison-with-wider-type",
       "path": "third_party/xdelta/xdelta3/xdelta3.c",

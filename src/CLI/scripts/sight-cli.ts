@@ -2,9 +2,11 @@ import fs from 'fs';
 import path from 'path';
 import chalk from 'chalk';
 import prompts from 'prompts';
+import { buildBundleDropLogo } from '../logo';
 import { detectProjectType } from '../../expo';
 import type { MobilePlatform, ProjectType } from '../../expo';
-import { generateSightArtifacts, type SightArtifacts } from './sight-artifacts';
+import type { SightArtifacts } from './sight-artifacts';
+import { generateSightAnalysisArtifacts } from './sight-assets';
 import { openSightInBrowser, startSightSession } from './sight-session';
 
 const DEFAULT_SIGHT_URL = 'https://bundledrop.app/sight';
@@ -16,6 +18,9 @@ export type SightCommandOptions = {
   keep?: boolean;
   output?: string;
   entryFile?: string;
+  compare?: string;
+  fetch?: boolean;
+  include?: string[];
 };
 
 function detectAvailablePlatforms(projectRoot: string): MobilePlatform[] {
@@ -56,13 +61,15 @@ function printArtifactPaths(artifacts: SightArtifacts, heading: string): void {
   console.log(chalk.green(`\n${heading}`));
   console.log(`  Bundle:     ${artifacts.bundlePath}`);
   console.log(`  Source map: ${artifacts.sourceMapPath}`);
+  console.log(`  Assets:     ${artifacts.assetManifestPath}`);
 }
 
 function printManualInstructions(artifacts: SightArtifacts): void {
   printArtifactPaths(artifacts, 'Source files have been generated here:');
   console.log(
-    chalk.cyan(`\nOpen ${DEFAULT_SIGHT_URL} and attach both files for analysis.`),
+    chalk.cyan(`\nOpen ${DEFAULT_SIGHT_URL} and attach the bundle and source map for JavaScript analysis.`),
   );
+  console.log('analysis-assets.json is a local record. Run Sight with browser opening enabled to include assets through the CLI handoff.');
 }
 
 function removeTemporaryArtifacts(artifacts: SightArtifacts): void {
@@ -78,6 +85,14 @@ export async function runSightCommand(options: SightCommandOptions): Promise<voi
   if (options.projectType && !['expo', 'bare'].includes(options.projectType)) {
     throw new Error('--project-type must be expo or bare.');
   }
+  if (options.compare !== undefined) {
+    const { runSightComparison } = await import('./sight-compare/run');
+    await runSightComparison(options);
+    return;
+  }
+  if (options.fetch || options.include?.length) {
+    throw new Error('--fetch and --include require --compare <ref>.');
+  }
 
   const projectRoot = process.cwd();
   const projectType = detectProjectType({
@@ -86,11 +101,12 @@ export async function runSightCommand(options: SightCommandOptions): Promise<voi
   });
   const platform = await resolvePlatform(projectRoot, options.platform);
 
+  console.log(buildBundleDropLogo());
   console.log(chalk.bold.cyan('\nBundle Drop Sight'));
   console.log(chalk.gray(`Detected ${projectType === 'expo' ? 'Expo' : 'bare React Native'} project`));
   console.log(chalk.gray(`Generating a production ${platform} bundle and source map…`));
 
-  const artifacts = await generateSightArtifacts({
+  const artifacts = await generateSightAnalysisArtifacts({
     projectRoot,
     projectType,
     platform,
@@ -100,6 +116,7 @@ export async function runSightCommand(options: SightCommandOptions): Promise<voi
   });
   console.log(chalk.green(`✓ Generated ${platform} production bundle`));
   console.log(chalk.green('✓ Generated matching source map'));
+  console.log(chalk.green('✓ Inventoried emitted assets separately from JavaScript'));
 
   const shouldOpen = options.open === false
     ? false
@@ -134,7 +151,7 @@ export async function runSightCommand(options: SightCommandOptions): Promise<voi
     }
     await session.waitForTransfer();
     transferSucceeded = true;
-    console.log(chalk.green('✓ Bundle and source map loaded into Sight'));
+    console.log(chalk.green('✓ Bundle, source map and asset inventory loaded into Sight'));
   } finally {
     await session.close();
     if (transferSucceeded && !options.keep && !options.output) {

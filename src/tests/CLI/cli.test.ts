@@ -211,6 +211,13 @@ describe('CLI/cli', () => {
     );
   });
 
+  it('passes exact comparison ref and repeated local includes to Sight', async () => {
+    await parseCommand('sight', '--compare', 'origin/main', '--fetch', '--include', '.env.production', '--include', 'generated');
+    expect(mockRunSightCommand).toHaveBeenCalledWith(expect.objectContaining({
+      compare: 'origin/main', fetch: true, include: ['.env.production', 'generated'],
+    }), expect.anything());
+  });
+
   it('includes doctor in top-level and command-specific help', () => {
     const program = buildProgram();
     let topLevelHelp = '';

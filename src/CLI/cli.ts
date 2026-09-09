@@ -187,6 +187,10 @@ ${chalk.gray('CI/CD →')} ${chalk.underline.gray(DOCS_CI_CD_URL)}\n`,
 
   program
     .command('sight')
+    .option('--compare <ref>', 'Compare the working tree with an explicit Git baseline')
+    .option('--fetch', 'Refresh the explicitly named remote branch before comparing')
+    .option('--include <path>', 'Copy an ignored local input identically into both builds (repeatable)',
+      (value: string, previous: string[]) => [...previous, value], [])
     .option('--platform <platform>', 'Platform to analyze: ios or android')
     .option('--project-type <type>', 'Force project type: expo or bare')
     .option('--entry-file <path>', 'Override the React Native entry file')
@@ -202,6 +206,8 @@ ${chalk.bold('Examples:')}
   ${chalk.gray('bundle-drop sight --platform android')}
   ${chalk.gray('bundle-drop sight --platform ios --keep')}
   ${chalk.gray('bundle-drop sight --no-open --output ./sight-analysis')}
+  ${chalk.gray('bundle-drop sight --compare main --platform android')}
+  ${chalk.gray('bundle-drop sight --compare origin/main --fetch --include .env.production')}
 `,
     )
     .action(runSightCommand);

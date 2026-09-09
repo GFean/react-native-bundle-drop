@@ -115,7 +115,7 @@ const readHermesHelp = (hermescPath: string, spawnProcess: SpawnProcess): string
 const hermesHelpIncludesFlag = (help: string, flag: string): boolean =>
   new RegExp(`(?:^|\\n)\\s*${flag.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}(?:\\s|=)`).test(help);
 
-const buildHermesFlags = (
+export const buildHermesFlags = (
   hermescPath: string,
   generateSourceMap: boolean,
   spawnProcess: SpawnProcess,
@@ -159,7 +159,7 @@ const warnAboutSentryDebugId = (bundlePath: string, hermesEnabled: boolean) => {
   );
 };
 
-const detectHermesFromNativeProject = (projectRoot: string, platform: string): boolean | undefined => {
+export const detectHermesFromNativeProject = (projectRoot: string, platform: string): boolean | undefined => {
   if (platform === 'android') {
     return detectBoolean(
       [
@@ -200,7 +200,7 @@ const detectHermesFromNativeProject = (projectRoot: string, platform: string): b
   );
 };
 
-const shouldCompileHermesBytecode = (
+export const shouldCompileHermesBytecode = (
   cfg: Record<string, unknown>,
   platform: string,
   projectRoot: string,

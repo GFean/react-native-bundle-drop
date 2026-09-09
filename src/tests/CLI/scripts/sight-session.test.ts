@@ -30,14 +30,14 @@ type SessionConnection = {
   url: URL;
 };
 
-function sessionConnection(sightUrl: string): SessionConnection {
+function sessionConnection(sightUrl: string, version = 1): SessionConnection {
   const sightPageUrl = new URL(sightUrl);
   const encodedSession = sightPageUrl.hash.replace(/^#sight-session=/, '');
   const payload = JSON.parse(
     Buffer.from(encodedSession, 'base64url').toString('utf8'),
   ) as { version: number; port: number; token: string };
 
-  expect(payload.version).toBe(1);
+  expect(payload.version).toBe(version);
   expect(payload.port).toBeGreaterThan(0);
   expect(payload.token).toMatch(/^[a-f0-9]{64}$/);
 
@@ -137,6 +137,144 @@ describe('CLI/scripts/sight-session', () => {
     if (originalPlatform) {
       Object.defineProperty(process, 'platform', originalPlatform);
     }
+  });
+
+  it('transfers the v2 metadata sidecar and four role-specific files over authenticated loopback', async () => {
+    const metadataPath = path.join(tempDirectory, 'comparison.json');
+    fs.writeFileSync(metadataPath, '{"version":2,"mode":"compare"}');
+    const pair = { outputDirectory: tempDirectory, bundlePath, sourceMapPath, temporary: true };
+    const session = await startSightSession({
+      comparison: { outputDirectory: tempDirectory, metadataPath, baseline: pair, current: pair }, sightPageUrl,
+    });
+    sessions.push(session);
+    const connection = sessionConnection(session.sightUrl, 2);
+    const response = await requestLoopback(connection.url, {
+      headers: { Origin: connection.origin, Authorization: `Bearer ${connection.token}` },
+    });
+    await session.waitForTransfer();
+    expect(response.statusCode).toBe(200);
+    const body = response.body.toString('utf8');
+    for (const field of ['metadata', 'baselineBundle', 'baselineSourceMap', 'currentBundle', 'currentSourceMap']) {
+      expect(body.match(new RegExp(`name="${field}"`, 'g'))).toHaveLength(1);
+    }
+    expect(body).toContain('{"version":2,"mode":"compare"}');
+  });
+
+  it('rejects an already cancelled session before opening a socket', async () => {
+    const controller = new AbortController();
+    controller.abort(new Error('cancel before listen'));
+    await expect(startSightSession({
+      artifacts: { outputDirectory: tempDirectory, bundlePath, sourceMapPath, temporary: true },
+      sightPageUrl, signal: controller.signal,
+    })).rejects.toThrow('cancel before listen');
+  });
+
+  it('transfers an optional asset inventory without transferring asset binaries', async () => {
+    const metadataPath = path.join(tempDirectory, 'comparison.json');
+    const assetManifestPath = path.join(tempDirectory, 'comparison-assets.json');
+    const manifest = JSON.stringify({ version: 1, metric: 'emitted-asset-bytes', baseline: [], current: [] });
+    fs.writeFileSync(metadataPath, '{"version":2,"mode":"compare"}');
+    fs.writeFileSync(assetManifestPath, manifest);
+    fs.writeFileSync(path.join(tempDirectory, 'private-image.png'), 'NOT_TRANSFERRED_IMAGE_BYTES');
+    const pair = { outputDirectory: tempDirectory, bundlePath, sourceMapPath, temporary: true };
+    const session = await startSightSession({
+      comparison: { outputDirectory: tempDirectory, metadataPath, assetManifestPath, baseline: pair, current: pair }, sightPageUrl,
+    });
+    sessions.push(session);
+    const connection = sessionConnection(session.sightUrl, 2);
+    const response = await requestLoopback(connection.url, {
+      headers: { Origin: connection.origin, Authorization: `Bearer ${connection.token}` },
+    });
+    await session.waitForTransfer();
+    const body = response.body.toString('utf8');
+    expect(body.match(/name="assetManifest"/g)).toHaveLength(1);
+    expect(body).toContain('filename="comparison-assets.json"');
+    expect(body).toContain(manifest);
+    expect(body).not.toContain('NOT_TRANSFERRED_IMAGE_BYTES');
+  });
+
+  it('adds the optional single-analysis asset inventory while preserving the v1 descriptor', async () => {
+    const assetManifestPath = path.join(tempDirectory, 'analysis-assets.json');
+    const manifest = JSON.stringify({ version: 1, mode: 'analyze', metric: 'emitted-asset-bytes', artifacts: {}, assets: [] });
+    fs.writeFileSync(assetManifestPath, manifest);
+    const session = await startSightSession({
+      artifacts: { outputDirectory: tempDirectory, bundlePath, sourceMapPath, temporary: true, assetManifestPath }, sightPageUrl,
+    });
+    sessions.push(session);
+    const connection = sessionConnection(session.sightUrl, 1);
+    const response = await requestLoopback(connection.url, {
+      headers: { Origin: connection.origin, Authorization: `Bearer ${connection.token}` },
+    });
+    await session.waitForTransfer();
+    const body = response.body.toString('utf8');
+    for (const field of ['bundle', 'sourceMap', 'assetManifest']) expect(body.match(new RegExp(`name="${field}"`, 'g'))).toHaveLength(1);
+    expect(body).toContain('filename="analysis-assets.json"');
+    expect(body).toContain(manifest);
+    expect(body).not.toContain('name="metadata"');
+  });
+
+  it('rejects an oversized asset manifest before streaming it', async () => {
+    const metadataPath = path.join(tempDirectory, 'comparison.json');
+    const assetManifestPath = path.join(tempDirectory, 'comparison-assets.json');
+    fs.writeFileSync(metadataPath, '{}');
+    fs.writeFileSync(assetManifestPath, Buffer.alloc(4 * 1024 * 1024 + 1));
+    const pair = { outputDirectory: tempDirectory, bundlePath, sourceMapPath, temporary: true };
+    const session = await startSightSession({
+      comparison: { outputDirectory: tempDirectory, metadataPath, assetManifestPath, baseline: pair, current: pair }, sightPageUrl,
+    });
+    sessions.push(session);
+    const connection = sessionConnection(session.sightUrl, 2);
+    const waiting = expect(session.waitForTransfer()).rejects.toThrow('4 MiB');
+    await expect(requestLoopback(connection.url, {
+      headers: { Origin: connection.origin, Authorization: `Bearer ${connection.token}` },
+    })).rejects.toThrow();
+    await waiting;
+  });
+
+  it('cancels an open session and settles its transfer wait', async () => {
+    const controller = new AbortController();
+    const session = await startSightSession({
+      artifacts: { outputDirectory: tempDirectory, bundlePath, sourceMapPath, temporary: true },
+      sightPageUrl, signal: controller.signal,
+    });
+    sessions.push(session);
+    const waiting = expect(session.waitForTransfer()).rejects.toThrow('cancelled');
+    controller.abort();
+    await waiting;
+  });
+
+  it('handles cancellation arriving while the loopback listener is opening', async () => {
+    const controller = new AbortController();
+    const listen = http.Server.prototype.listen;
+    const spy = jest.spyOn(http.Server.prototype, 'listen').mockImplementation(function (this: http.Server, ...args: any[]) {
+      const result = (listen as any).apply(this, args);
+      this.once('listening', () => controller.abort());
+      return result;
+    } as any);
+    try {
+      const session = await startSightSession({
+        artifacts: { outputDirectory: tempDirectory, bundlePath, sourceMapPath, temporary: true },
+        sightPageUrl, signal: controller.signal,
+      });
+      sessions.push(session);
+      await expect(session.waitForTransfer()).rejects.toThrow('cancelled');
+    } finally { spy.mockRestore(); }
+  });
+
+  it('rejects oversized comparison metadata and closes the transfer', async () => {
+    const metadataPath = path.join(tempDirectory, 'comparison.json');
+    fs.writeFileSync(metadataPath, 'x'.repeat(64 * 1024 + 1));
+    const pair = { outputDirectory: tempDirectory, bundlePath, sourceMapPath, temporary: true };
+    const session = await startSightSession({
+      comparison: { outputDirectory: tempDirectory, metadataPath, baseline: pair, current: pair }, sightPageUrl,
+    });
+    sessions.push(session);
+    const connection = sessionConnection(session.sightUrl, 2);
+    const waiting = expect(session.waitForTransfer()).rejects.toThrow('64 KiB');
+    await expect(requestLoopback(connection.url, {
+      headers: { Origin: connection.origin, Authorization: `Bearer ${connection.token}` },
+    })).rejects.toThrow();
+    await waiting;
   });
 
   it.each([
