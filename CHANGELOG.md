@@ -5,6 +5,18 @@ All notable changes to this package are documented here.
 This project uses [Conventional Commits](https://www.conventionalcommits.org/) and
 [release-please](https://github.com/googleapis/release-please) to prepare releases.
 
+## [0.8.0](https://github.com/GFean/react-native-bundle-drop/compare/v0.7.0...v0.8.0) (2026-09-09)
+
+
+### Features
+
+* **sight:** add isolated Git comparison and OTA size analysis ([#37](https://github.com/GFean/react-native-bundle-drop/issues/37)) ([ce97cd7](https://github.com/GFean/react-native-bundle-drop/commit/ce97cd7d3c88be66c5b0ee9f6d2989e5e6e653a9))
+
+
+### Bug Fixes
+
+* **android:** support AGP 9 built-in Kotlin ([56d7e98](https://github.com/GFean/react-native-bundle-drop/commit/56d7e9821137382b9ff1175249e66b4f8223d84c))
+
 ## [0.7.0](https://github.com/GFean/react-native-bundle-drop/compare/v0.6.0...v0.7.0) (2026-08-29)
 
 
