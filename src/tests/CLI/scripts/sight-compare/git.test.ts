@@ -103,7 +103,10 @@ describe('Sight Git baseline selection', () => {
     await expect(inspectComparisonRepository(local, 'main', { fetch: true })).rejects.toThrow('explicit configured remote');
     await expect(inspectComparisonRepository(local, 'upstream/main~1', { fetch: true })).rejects.toThrow('failed');
     await expect(inspectComparisonRepository(local, 'upstream/missing', { fetch: true })).rejects.toThrow('failed');
-    git(local, ['remote', 'add', 'upstream/team', remote]);
+    // Newer Git rejects overlapping names in `remote add`, but existing configs
+    // can still contain them. Preserve coverage of that ambiguous legacy layout.
+    git(local, ['config', 'remote.upstream/team.url', remote]);
+    git(local, ['config', 'remote.upstream/team.fetch', '+refs/heads/*:refs/remotes/upstream/team/*']);
     await expect(inspectComparisonRepository(local, 'upstream/team/main', { fetch: true })).rejects.toThrow('explicit configured remote');
   });
 
