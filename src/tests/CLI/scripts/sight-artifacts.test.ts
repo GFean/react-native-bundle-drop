@@ -127,6 +127,21 @@ describe('CLI/scripts/sight-artifacts', () => {
     installSpawn();
   });
 
+  it.each(['bare', 'expo'] as const)('emits comparison assets into an explicit private destination for %s', async projectType => {
+    const root = fixture();
+    if (projectType === 'bare') writeBareModules(root);
+    else writeExpoModules(root);
+    fs.writeFileSync(path.join(root, 'index.js'), 'module.exports = {};');
+    const assetsDirectory = path.join(root, 'private-assets');
+    const result = rememberGeneratedDirectory(await generateSightArtifacts({
+      projectRoot: root, projectType, platform: 'ios', entryFile: 'index.js', assetsDirectory,
+    }));
+    const args = mockSpawn.mock.calls[0][1] as string[];
+    expect(args[args.indexOf('--assets-dest') + 1]).toBe(assetsDirectory);
+    expect(fs.statSync(assetsDirectory).isDirectory()).toBe(true);
+    expect(fs.existsSync(path.join(result.outputDirectory, 'assets'))).toBe(false);
+  });
+
   afterEach(() => {
     for (const directory of generatedDirectories.splice(0)) {
       fs.rmSync(directory, { recursive: true, force: true });
@@ -270,6 +285,20 @@ describe('CLI/scripts/sight-artifacts', () => {
       'true',
     ]);
     expect(args).not.toContain('--bytecode');
+  });
+
+  it.each(['bare', 'expo'] as const)('uses the correct comparison source-map convention for %s', async projectType => {
+    const root = fixture();
+    if (projectType === 'bare') writeBareModules(root);
+    else writeExpoModules(root);
+    fs.writeFileSync(path.join(root, 'index.js'), 'console.log(1);');
+    rememberGeneratedDirectory(await generateSightArtifacts({
+      projectRoot: root, projectType, platform: 'ios', entryFile: 'index.js', sourceMapRoot: root,
+    }));
+    const args = mockSpawn.mock.calls[0][1];
+    expect(args).toEqual(expect.arrayContaining(['--reset-cache', '--max-workers', '2', '--minify', 'true']));
+    if (projectType === 'bare') expect(args).toEqual(expect.arrayContaining(['--sourcemap-sources-root', root]));
+    else expect(args).not.toContain('--sourcemap-sources-root');
   });
 
   it('uses an explicit Expo entry without resolving @expo/config/paths', async () => {

@@ -5,6 +5,8 @@ import http from 'http';
 import path from 'path';
 import type { AddressInfo, Socket } from 'net';
 import type { SightArtifacts } from './sight-artifacts';
+import type { ComparisonArtifacts } from './sight-compare/types';
+import { MAX_ASSET_MANIFEST_BYTES } from './sight-compare/assets';
 
 const SESSION_TIMEOUT_MS = 5 * 60 * 1000;
 const LOOPBACK_HOST = '127.0.0.1';
@@ -15,14 +17,20 @@ export type SightSession = {
   close: () => Promise<void>;
 };
 
-type StartSightSessionOptions = {
+type StartSightSessionOptions = ({
   artifacts: SightArtifacts;
+  comparison?: never;
+} | {
+  artifacts?: never;
+  comparison: ComparisonArtifacts;
+}) & {
   sightPageUrl: string;
   timeoutMs?: number;
+  signal?: AbortSignal;
 };
 
-function sessionFragment(port: number, token: string): string {
-  const payload = Buffer.from(JSON.stringify({ version: 1, port, token }), 'utf8')
+function sessionFragment(port: number, token: string, version: 1 | 2): string {
+  const payload = Buffer.from(JSON.stringify({ version, port, token }), 'utf8')
     .toString('base64url');
   return `sight-session=${payload}`;
 }
@@ -47,10 +55,8 @@ function writeFilePart(
     const input = fs.createReadStream(filePath);
     const cleanup = () => signal.removeEventListener('abort', abort);
     const abort = () => {
-      const reason = signal.reason instanceof Error
-        ? signal.reason
-        : new Error('Sight closed the local artifact transfer.');
-      input.destroy(reason);
+      // This private transfer controller is always aborted with an Error below.
+      input.destroy(signal.reason as Error);
     };
 
     input.once('error', error => {
@@ -71,7 +77,6 @@ function writeFilePart(
 function closeServer(
   server: http.Server,
   sockets: Set<Socket>,
-  force = false,
 ): Promise<void> {
   return new Promise(resolve => {
     if (!server.listening) {
@@ -79,9 +84,7 @@ function closeServer(
       return;
     }
     server.close(() => resolve());
-    if (force) {
-      sockets.forEach(socket => socket.destroy());
-    }
+    sockets.forEach(socket => socket.destroy());
   });
 }
 
@@ -109,9 +112,12 @@ export function openSightInBrowser(url: string): Promise<void> {
 
 export async function startSightSession({
   artifacts,
+  comparison,
   sightPageUrl,
   timeoutMs = SESSION_TIMEOUT_MS,
+  signal,
 }: StartSightSessionOptions): Promise<SightSession> {
+  signal?.throwIfAborted();
   const pageUrl = new URL(sightPageUrl);
   const isOfficialSightPage =
     pageUrl.origin === 'https://bundledrop.app' && pageUrl.pathname === '/sight';
@@ -135,6 +141,8 @@ export async function startSightSession({
     settleTransfer = resolve;
     rejectTransfer = reject;
   });
+  // Cancellation can arrive before the caller starts waiting for the transfer.
+  void transfer.catch(() => undefined);
 
   const server = http.createServer(async (request, response) => {
     const origin = request.headers.origin;
@@ -183,7 +191,7 @@ export async function startSightSession({
       );
       transferAbort.abort(error);
       rejectTransfer?.(error);
-      void closeServer(server, sockets, true);
+      void closeServer(server, sockets);
     };
     request.once('aborted', rejectPrematureClose);
     response.once('close', rejectPrematureClose);
@@ -198,25 +206,38 @@ export async function startSightSession({
     });
 
     try {
-      await writeFilePart(
-        response,
-        multipartHeader(boundary, 'bundle', artifacts.bundlePath),
-        artifacts.bundlePath,
-        transferAbort.signal,
-      );
-      response.write('\r\n');
-      await writeFilePart(
-        response,
-        multipartHeader(boundary, 'sourceMap', artifacts.sourceMapPath),
-        artifacts.sourceMapPath,
-        transferAbort.signal,
-      );
+      const files = comparison
+        ? [
+            ['baselineBundle', comparison.baseline.bundlePath],
+            ['baselineSourceMap', comparison.baseline.sourceMapPath],
+            ['currentBundle', comparison.current.bundlePath],
+            ['currentSourceMap', comparison.current.sourceMapPath],
+          ]
+        : [['bundle', artifacts.bundlePath], ['sourceMap', artifacts.sourceMapPath]];
+      const assetManifestPath = comparison?.assetManifestPath ?? artifacts?.assetManifestPath;
+      if (assetManifestPath) {
+        if (fs.statSync(assetManifestPath).size > MAX_ASSET_MANIFEST_BYTES) {
+          throw new Error('Sight asset manifest exceeds 4 MiB.');
+        }
+        files.push(['assetManifest', assetManifestPath]);
+      }
+      if (comparison) {
+        const metadata = fs.readFileSync(comparison.metadataPath);
+        if (metadata.length > 64 * 1024) throw new Error('Sight comparison metadata exceeds 64 KiB.');
+        response.write(`--${boundary}\r\nContent-Disposition: form-data; name="metadata"\r\nContent-Type: application/json\r\n\r\n`);
+        response.write(metadata);
+        response.write('\r\n');
+      }
+      for (const [field, filePath] of files) {
+        await writeFilePart(response, multipartHeader(boundary, field, filePath), filePath, transferAbort.signal);
+        response.write('\r\n');
+      }
       response.once('finish', () => {
         request.removeListener('aborted', rejectPrematureClose);
         response.removeListener('close', rejectPrematureClose);
         settleTransfer?.();
       });
-      response.end(`\r\n--${boundary}--\r\n`);
+      response.end(`--${boundary}--\r\n`);
     } catch (error) {
       response.destroy(error instanceof Error ? error : undefined);
       rejectTransfer?.(
@@ -236,17 +257,30 @@ export async function startSightSession({
 
   const timeout = setTimeout(() => {
     rejectTransfer?.(new Error('Timed out waiting for Bundle Drop Sight to load the generated files.'));
-    void closeServer(server, sockets, true);
+    void closeServer(server, sockets);
   }, timeoutMs);
   timeout.unref();
-  void transfer.finally(() => clearTimeout(timeout)).catch(() => undefined);
-
   const address = server.address() as AddressInfo;
-  pageUrl.hash = sessionFragment(address.port, token);
+  const abort = () => {
+    rejectTransfer?.(new Error('Sight comparison cancelled during local transfer.'));
+    void closeServer(server, sockets);
+  };
+  signal?.addEventListener('abort', abort, { once: true });
+  if (signal?.aborted) abort();
+  const clearSession = () => {
+    clearTimeout(timeout);
+    signal?.removeEventListener('abort', abort);
+  };
+  void transfer.finally(clearSession).catch(() => undefined);
+
+  pageUrl.hash = sessionFragment(address.port, token, comparison ? 2 : 1);
 
   return {
     sightUrl: pageUrl.toString(),
     waitForTransfer: () => transfer,
-    close: () => closeServer(server, sockets),
+    close: () => {
+      clearSession();
+      return closeServer(server, sockets);
+    },
   };
 }

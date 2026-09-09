@@ -12,6 +12,7 @@ export type SightArtifacts = {
   bundlePath: string;
   sourceMapPath: string;
   temporary: boolean;
+  assetManifestPath?: string;
 };
 
 export type GenerateSightArtifactsOptions = {
@@ -21,6 +22,13 @@ export type GenerateSightArtifactsOptions = {
   output?: string;
   keep?: boolean;
   entryFile?: string;
+  /** Comparison builds supply an isolated, cancellable process runner. */
+  runCommand?: (projectRoot: string, cliPath: string, args: string[]) => Promise<void>;
+  sourceMapRoot?: string;
+  /** Opt-in destination for emitted assets; callers own its lifecycle. */
+  assetsDirectory?: string;
+  /** Environment for the default project-local bundler process. */
+  env?: NodeJS.ProcessEnv;
 };
 
 type SourceMap = {
@@ -130,11 +138,12 @@ function runMetroCommand(
   projectRoot: string,
   cliPath: string,
   args: string[],
+  env: NodeJS.ProcessEnv,
 ): Promise<void> {
   return new Promise((resolve, reject) => {
     const child = spawn(process.execPath, [cliPath, ...args], {
       cwd: projectRoot,
-      env: { ...process.env, NODE_ENV: 'production' },
+      env: { ...env, NODE_ENV: 'production' },
       stdio: 'inherit',
     });
 
@@ -225,6 +234,10 @@ export async function generateSightArtifacts({
   output,
   keep = false,
   entryFile: explicitEntryFile,
+  env = process.env,
+  runCommand = (root, command, args) => runMetroCommand(root, command, args, env),
+  sourceMapRoot,
+  assetsDirectory,
 }: GenerateSightArtifactsOptions): Promise<SightArtifacts> {
   const absoluteProjectRoot = path.resolve(projectRoot);
   const { outputDirectory, temporary } = ensureOutputDirectory(
@@ -234,16 +247,23 @@ export async function generateSightArtifacts({
   );
   const bundlePath = path.join(outputDirectory, `main.${platform}.jsbundle`);
   const sourceMapPath = `${bundlePath}.map`;
+  const comparisonArguments = sourceMapRoot
+    ? [
+        ...(projectType === 'bare' ? ['--sourcemap-sources-root', sourceMapRoot] : []),
+        '--reset-cache', '--max-workers', '2',
+      ]
+    : [];
 
   try {
+    if (assetsDirectory) fs.mkdirSync(assetsDirectory, { recursive: true, mode: 0o700 });
     if (projectType === 'expo') {
       const cliPath = resolveExpoModule(absoluteProjectRoot, '@expo/cli');
       const entryFile = explicitEntryFile
         ? path.resolve(absoluteProjectRoot, explicitEntryFile)
         : resolveExpoEntryFile(absoluteProjectRoot, platform);
-      const assetsDirectory = path.join(outputDirectory, 'assets');
-      fs.mkdirSync(assetsDirectory, { recursive: true, mode: 0o755 });
-      await runMetroCommand(absoluteProjectRoot, cliPath, [
+      const expoAssetsDirectory = assetsDirectory ?? path.join(outputDirectory, 'assets');
+      fs.mkdirSync(expoAssetsDirectory, { recursive: true, mode: 0o755 });
+      await runCommand(absoluteProjectRoot, cliPath, [
         'export:embed',
         '--platform',
         platform,
@@ -254,16 +274,17 @@ export async function generateSightArtifacts({
         '--sourcemap-output',
         sourceMapPath,
         '--assets-dest',
-        assetsDirectory,
+        expoAssetsDirectory,
         '--dev',
         'false',
         '--minify',
         'true',
+        ...comparisonArguments,
       ]);
     } else {
       const cliPath = resolveProjectModule(absoluteProjectRoot, 'react-native/cli.js');
       const entryFile = resolveBareEntryFile(absoluteProjectRoot, explicitEntryFile);
-      await runMetroCommand(absoluteProjectRoot, cliPath, [
+      await runCommand(absoluteProjectRoot, cliPath, [
         'bundle',
         '--platform',
         platform,
@@ -275,6 +296,9 @@ export async function generateSightArtifacts({
         bundlePath,
         '--sourcemap-output',
         sourceMapPath,
+        ...(sourceMapRoot ? ['--minify', 'true'] : []),
+        ...(assetsDirectory ? ['--assets-dest', assetsDirectory] : []),
+        ...comparisonArguments,
       ]);
     }
 

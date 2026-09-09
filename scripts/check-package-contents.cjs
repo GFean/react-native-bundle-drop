@@ -6,6 +6,11 @@ const os = require('os');
 const path = require('path');
 
 const projectRoot = process.cwd();
+const { checkCliIsolation } = require('./check-cli-isolation.cjs');
+checkCliIsolation(projectRoot, [
+  'lib/index.js', 'lib/bootstrap.js', 'lib/index.d.ts', 'lib/metro.js', 'lib/metro.d.ts', 'app.plugin.js',
+  'src/index.tsx', 'src/bootstrap.ts', 'src/metro.ts',
+]);
 const npmCache = path.join(os.tmpdir(), 'bundle-drop-npm-pack-cache');
 
 const pack = spawnSync('npm', ['pack', '--dry-run', '--json', '--ignore-scripts'], {
@@ -113,6 +118,9 @@ const requiredFiles = [
   'lib/CLI/scripts/sight-artifacts.js',
   'lib/CLI/scripts/sight-cli.js',
   'lib/CLI/scripts/sight-session.js',
+  'lib/CLI/scripts/sight-compare/run.js',
+  'lib/CLI/scripts/sight-compare/snapshot.js',
+  'lib/CLI/scripts/sight-compare/metadata.js',
   'lib/CLI/scripts/expo/write-build-receipt.js',
   'lib/CLI/scripts/expo/write-eas-build-receipt.js',
   'lib/CLI/scripts/native/write-runtime-identity.js',
@@ -264,5 +272,5 @@ if (contentLeaks.length > 0) {
 }
 
 console.log(
-  `npm package check passed: ${packResult.entryCount} files, ${packResult.unpackedSize} unpacked bytes.`,
+  `npm package check passed: ${packResult.entryCount} files, ${packResult.size} packed bytes, ${packResult.unpackedSize} unpacked bytes.`,
 );

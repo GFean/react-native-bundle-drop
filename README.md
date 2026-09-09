@@ -43,6 +43,8 @@ runtime identity. Native changes still require a new App Store or Play Store bui
 - **Runtime gating** — updates only reach compatible native binaries.
 - **Observability metadata** — bundle hashes and source maps keep crash reports attributable to the correct release.
 - **CI/CD support** — upload with a Personal Access Token from any pipeline.
+- **Bundle Drop Sight** — inspect JavaScript bundle sizes locally, including
+  working-tree comparisons against a Git baseline.
 
 ## Compatibility
 
@@ -86,6 +88,219 @@ cd ios && pod install
 
 React Native autolinking handles the package on both platforms. The setup command
 adds the app-entry integration that allows a Release build to start an installed OTA.
+
+## Bundle Drop Sight
+
+Sight analyzes production JavaScript bundles and emitted assets in your browser. It
+does not require a Bundle Drop account, OTA project configuration, login, or native
+integration. Run it from the app directory containing `package.json`:
+
+```bash
+npx bundle-drop sight --platform android
+npx bundle-drop sight --compare main --platform android
+npx bundle-drop sight --compare origin/main --fetch --platform ios
+```
+
+The first command analyzes the current app using its installed dependencies and
+includes emitted assets through the automatic CLI handoff.
+`--compare` builds both an explicit Git baseline and a captured copy of your current
+working tree. Both builds run locally, including when the baseline is a remote
+tracking branch. Sight compares **raw UTF-8 bytes in minified JavaScript** and uses
+source maps to attribute changes to packages and files. Both CLI modes include a
+**Bundled assets** breakdown for files emitted by the same Metro/Expo build, such as
+images and fonts. Assets do not change the JavaScript totals or treemap.
+
+**Bundle Drop OTA size** measures a locally generated full OTA archive using Bundle Drop's
+canonical packaging. Each revision uses its own JavaScript engine configuration:
+Hermes is compiled with project-local tooling when enabled. JavaScript attribution
+and raw asset sizes remain separate; they are not bytecode attribution.
+
+Measurement adds compilation and archive compression after the JavaScript build, once
+per side in a comparison. Expo's Hermes path also performs a separate bytecode
+export to preserve its upload-specific minification behavior. It requires a resolvable app/runtime identity. When that
+identity or required compiler is unavailable, Sight keeps the JavaScript and asset
+analysis and marks the OTA measurement unavailable with a reason. It never fills in
+an estimated archive size. Comparing this metric requires Bundle Drop to be configured
+on both branches with a resolvable app/runtime identity. The archive describes the selected Sight entry and build
+environment; upload overrides or different inputs can produce another size.
+
+Asset sizes count each emitted output file once, including emitted density variants.
+Identical contents at different output paths count separately; a changed hash at the
+same path is a change even when the byte size is unchanged. Only emitted files are
+counted, not every asset in the repository. Native-only resources and network-loaded
+assets are outside this measurement. The OTA archive includes delivery metadata and asset
+manifests, and excludes source maps. It is not APK/IPA size. File size changes do
+not measure startup time or memory use.
+
+No native app build is needed for asset analysis or comparison. The existing JavaScript bundling
+step emits the files into private temporary directories; the CLI records relative
+output paths, byte lengths, and SHA-256 hashes, then removes the emitted asset copies.
+Only the inventory is passed to Sight, with no image previews or binary asset uploads.
+This collection code stays in the CLI and adds no runtime dependencies or mobile SDK
+code.
+
+The CLI transfers the generated files to Sight through a short-lived loopback
+session. Source code, bundles, source maps, and comparison metadata are not uploaded
+to Bundle Drop servers. Loading the Sight web page still needs browser access to
+`bundledrop.app`.
+
+### Comparison options
+
+| Option | Behavior |
+| --- | --- |
+| `--compare <ref>` | Resolve a branch, tag, or commit to an immutable baseline commit before building. |
+| `--fetch` | Refresh the explicitly named remote branch, such as `origin/main`, using ordinary Git credentials. Requires `--compare`. |
+| `--platform ios\|android` | Compare one platform per invocation. If ambiguous, interactive use prompts; noninteractive use requires the flag. |
+| `--project-type bare\|expo` | Override project detection consistently for both sides. |
+| `--entry-file <path>` | Choose an app-relative entry file that must exist in both snapshots. |
+| `--include <path>` | Copy an extra local file or directory identically into both snapshots; repeat for multiple inputs. |
+| `--no-open` | Keep the generated files and print manual browser instructions. |
+| `--keep` | Keep the comparison files after a successful browser transfer. |
+| `--output <path>` | Write persistent output to an empty directory. |
+
+Without `--fetch`, Sight uses locally available refs and does not contact a Git
+remote. `main` is never silently substituted with `origin/main`. Explicit refresh
+requires a configured remote branch; use normal Git commands first to obtain a
+missing tag, commit, or additional shallow history. Sight neither requests nor
+stores repository credentials.
+
+### What each side builds
+
+The current snapshot contains tracked working-tree contents, including uncommitted
+edits and deletions, plus nonignored untracked files. Ignored inputs such as local
+environment files are excluded unless explicitly included:
+
+```bash
+npx bundle-drop sight --compare main --platform android \
+  --include .env.production --include local-build-config
+```
+
+Included paths must stay inside the repository. They cannot overwrite files
+tracked on either side or supply dependency manifests, lockfiles, or installed
+dependencies. The same captured contents are added to both sides, so the baseline
+remains a comparison under the same explicitly supplied local configuration.
+
+Sight creates private temporary Git worktrees for the two builds. Both have a
+detached `HEAD`: baseline points at the resolved baseline commit, and current
+points at your original `HEAD` with captured working-tree files overlaid. Your
+original staging partition is not reproduced; scripts that distinguish staged
+from unstaged changes, or depend on an attached branch name, may behave differently.
+Sight does not switch, stash, reset, or stage your original checkout.
+
+The private repository has independent object storage and preserves the captured
+local branch/tag/remote-tracking refs and available history. `git rev-parse HEAD`
+and ancestry queries use each side's own commit. `git describe` evaluates the
+captured tags from that commit; these are today's locally available refs, not
+their historical state at the baseline date. Missing shallow history or tags may
+change its output, and Sight does not fetch them implicitly. Branch-name queries
+observe detached HEAD; the original branch label is metadata only.
+
+`git describe --dirty` reflects each private worktree, including explicit includes
+and build-script changes. Original dirty status is recorded separately. Builds
+depending on attached branches or staging partitions must accommodate these
+semantics through their existing configuration/environment. Sight verifies pinned
+HEADs and refs around build phases and rejects mutations that invalidate provenance.
+It rechecks captured files, modes, symlinks, HEAD, and index for observed concurrent
+changes; the copy is not an atomic filesystem snapshot.
+
+Both sides use the same Node executable, platform, production/minification settings,
+and logical entrypoint. Each revision retains its own dependencies and bundler
+configuration. Sight records framework/package-manager versions and warns when
+relevant inputs differ. A framework upgrade or configuration change can legitimately
+affect the result. Required environment variables must be available to both builds;
+there is no automatic fallback from a failed build to the other revision's output.
+
+### Dependencies and supported repository layouts
+
+Comparison installs fresh dependencies for each side from its own lockfile. It
+supports npm, pnpm, Yarn Classic, and modern Yarn with `nodeLinker: node-modules`.
+An exact `packageManager` declaration must match the available executable; tracked
+`yarnPath` configurations are honored. Without a declaration, a unique lockfile
+family selects the available manager and its actual version is recorded. Sight
+does not automatically download package-manager binaries or change a lockfile to
+make installation succeed.
+
+Dependency installation can access package registries and execute project lifecycle
+scripts. Existing script policies are preserved. For declared `engines.node` ranges,
+Sight uses the installed `npm` executable to check a temporary dependency-free
+manifest with an offline, script-disabled dry run before the real installs. This
+check also requires npm when the project uses Yarn or pnpm. Build/configuration
+scripts execute as ordinary local processes; the temporary worktrees are not a
+security sandbox for untrusted project code.
+
+Apps in a single npm, Yarn, or pnpm workspace root can use other packages inside
+the same Git repository. Installation runs at the workspace root; bundling runs
+from the app directory. Nested/ambiguous workspace roots, nested app lockfiles,
+external local dependencies or symlinks, Bun, and Plug'n'Play installations are not
+supported. npm workspaces require a v2 or newer lockfile. Unresolved Git conflicts,
+sparse/partial clones, required Git submodules, Git LFS/checkout filters, and tracked
+`node_modules` are also unsupported. There is no comparison build or dependency-tree
+cache in this version.
+
+Actual workspace frozen installs have been verified on macOS arm64 with Node
+22.13.0 using npm 10.9.2, pnpm 11.24.0, Yarn 1.22.22, and Yarn 3.8.3. These installer
+checks cover a registry dependency, a local workspace dependency, lifecycle scripts,
+and unchanged manifests/lockfiles. Real comparisons were also verified with npm
+10.9.2, React Native 0.83.1, and Expo 55.0.0: dirty source capture, package additions,
+identical inputs, and automatic browser attribution after source cleanup.
+An Expo Router 55.0.18 app also passed a real comparison using `expo-router/entry`.
+Windows/Linux hosts and full framework builds with pnpm or Yarn remain unverified;
+the installer checks alone do not establish those combinations.
+
+### Keeping files and opening Sight manually
+
+```bash
+npx bundle-drop sight --platform android --no-open --output ./sight-analysis
+npx bundle-drop sight --compare main --platform android \
+  --no-open --output ./sight-comparison
+```
+
+Single analysis keeps a bundle/source-map pair and `analysis-assets.json`, a local
+record of emitted paths, sizes, hashes, and the exact bundle/map hashes. The automatic
+CLI handoff verifies this binding before including assets in the analysis.
+
+Comparison output contains `baseline/` and `current/` bundle/source-map pairs plus
+`comparison.json` and `comparison-assets.json` as local records. Automatic CLI
+loading verifies these files and includes Git labels, build context, and asset
+sizes. The browser does not expose metadata or inventory upload controls.
+
+For a manual JavaScript-only comparison, open
+[Bundle Drop Sight](https://bundledrop.app/sight), select Compare, and attach the
+four bundle/map files. Manual Analyze still takes one bundle and its matching map;
+manual Compare still takes two pairs. Neither requires the Bundle Drop SDK or extra
+JSON files. Git labels and asset sizes appear only through the CLI handoff. Changing
+a file after a CLI handoff clears its comparison context.
+
+Comparison metadata remains limited to 64 KiB. Each asset inventory is limited to
+4 MiB and 10,000 files per build; oversized inventories fail explicitly
+instead of producing partial totals. Inventory paths are output-relative and are
+never opened by the browser.
+
+Temporary worktrees and dependencies are removed after success, failure, or
+cancellation. Completed files from either CLI mode are retained when browser handoff
+fails; the CLI prints their location, and comparisons also print the diagnostics
+directory. `--keep`, `--no-open`, and `--output` retain the requested artifacts,
+including the local asset record. A failure before complete artifacts
+exist removes owned temporary output; explicitly requested output directories are
+kept for inspection.
+
+The metadata contains local temporary source roots so unchanged source maps remain
+attributable after cleanup. Sight excludes those roots from displayed/exported
+provenance and analytics. Manual file loading uses ordinary JavaScript comparison
+behavior without the CLI source-path context.
+
+Removal failures report the owned directory for manual recovery. An uncatchable
+termination, such as a forced process kill or power loss, can leave temporary
+`bundle-drop-sight-*` directories. After confirming the invocation and its build
+processes have stopped, remove only those reported/identified temporary directories;
+keep completed comparison output if it is still needed.
+
+On macOS/Linux, Sight stops ordinary child process groups before removing the
+worktrees, including background children left after a command exits. On Windows,
+cancellation uses `taskkill` for the active process tree, but this version has no
+Job Object containment: background descendants can survive if their parent has
+already exited. Scripts that deliberately detach into a separate process group
+also fall outside process-group cleanup.
 
 ## First-Time Setup
 

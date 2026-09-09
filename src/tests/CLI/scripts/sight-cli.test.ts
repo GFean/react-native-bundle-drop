@@ -7,6 +7,11 @@ const mockDetectProjectType = jest.fn();
 const mockGenerateSightArtifacts = jest.fn();
 const mockOpenSightInBrowser = jest.fn();
 const mockStartSightSession = jest.fn();
+const mockRunSightComparison = jest.fn();
+
+jest.mock('../../../CLI/scripts/sight-compare/run', () => ({
+  runSightComparison: (...args: unknown[]) => mockRunSightComparison(...args),
+}));
 
 jest.mock('prompts', () => ({
   __esModule: true,
@@ -18,12 +23,16 @@ jest.mock('../../../expo', () => ({
 jest.mock('../../../CLI/scripts/sight-artifacts', () => ({
   generateSightArtifacts: (...args: unknown[]) => mockGenerateSightArtifacts(...args),
 }));
+jest.mock('../../../CLI/scripts/sight-ota', () => ({
+  measureSightOta: async () => ({ status: 'available', engine: 'hermes', bundleBytes: 100, zipBytes: 800 }),
+}));
 jest.mock('../../../CLI/scripts/sight-session', () => ({
   openSightInBrowser: (...args: unknown[]) => mockOpenSightInBrowser(...args),
   startSightSession: (...args: unknown[]) => mockStartSightSession(...args),
 }));
 
 import { runSightCommand } from '../../../CLI/scripts/sight-cli';
+import { buildBundleDropLogo } from '../../../CLI/logo';
 
 describe('CLI/scripts/sight-cli', () => {
   let projectRoot: string;
@@ -33,6 +42,18 @@ describe('CLI/scripts/sight-cli', () => {
   const waitForTransfer = jest.fn();
   const close = jest.fn();
 
+  it('routes comparison before inspecting or building the original project', async () => {
+    const options = { compare: 'main', platform: 'ios' as const, include: ['.env'], fetch: false };
+    await runSightCommand(options);
+    expect(mockRunSightComparison).toHaveBeenCalledWith(options);
+    expect(mockDetectProjectType).not.toHaveBeenCalled();
+    expect(mockGenerateSightArtifacts).not.toHaveBeenCalled();
+  });
+
+  it.each([{ fetch: true }, { include: ['.env'] }])('rejects comparison-only flags without a baseline: %j', async options => {
+    await expect(runSightCommand(options)).rejects.toThrow('require --compare');
+  });
+
   beforeEach(() => {
     projectRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'bundle-drop-sight-cli-project-'));
     outputDirectory = fs.mkdtempSync(path.join(os.tmpdir(), 'bundle-drop-sight-cli-output-'));
@@ -40,11 +61,13 @@ describe('CLI/scripts/sight-cli', () => {
     consoleLogSpy = jest.spyOn(console, 'log').mockImplementation(() => undefined);
     mockPrompts.mockReset();
     mockDetectProjectType.mockReset().mockReturnValue('bare');
-    mockGenerateSightArtifacts.mockReset().mockResolvedValue({
-      outputDirectory,
-      bundlePath: path.join(outputDirectory, 'main.ios.jsbundle'),
-      sourceMapPath: path.join(outputDirectory, 'main.ios.jsbundle.map'),
-      temporary: true,
+    mockGenerateSightArtifacts.mockReset().mockImplementation(async ({ assetsDirectory, platform }) => {
+      const bundlePath = path.join(outputDirectory, `main.${platform}.jsbundle`);
+      const sourceMapPath = bundlePath + '.map';
+      fs.writeFileSync(bundlePath, 'console.log("bundle");');
+      fs.writeFileSync(sourceMapPath, '{"version":3,"sources":[],"mappings":""}');
+      fs.writeFileSync(path.join(assetsDirectory, 'image.png'), 'asset bytes');
+      return { outputDirectory, bundlePath, sourceMapPath, temporary: true };
     });
     mockOpenSightInBrowser.mockReset().mockResolvedValue(undefined);
     waitForTransfer.mockReset().mockResolvedValue(undefined);
@@ -70,6 +93,9 @@ describe('CLI/scripts/sight-cli', () => {
 
     await runSightCommand({ platform: 'ios', entryFile: 'src/index.ts' });
 
+    expect(consoleLogSpy.mock.calls[0][0]).toBe(buildBundleDropLogo());
+    expect(consoleLogSpy.mock.calls[1][0]).toContain('Bundle Drop Sight');
+
     expect(mockDetectProjectType).toHaveBeenCalledWith({
       projectRoot,
       explicitType: undefined,
@@ -81,6 +107,9 @@ describe('CLI/scripts/sight-cli', () => {
       output: undefined,
       keep: undefined,
       entryFile: 'src/index.ts',
+      assetsDirectory: expect.stringContaining('bundle-drop-sight-assets-'),
+      runCommand: expect.any(Function),
+      env: expect.objectContaining({ NODE_ENV: 'production', BUNDLE_DROP_OTA_BUILD: '1' }),
     });
     expect(mockStartSightSession).toHaveBeenCalledWith({
       artifacts: expect.objectContaining({ outputDirectory }),
@@ -106,9 +135,10 @@ describe('CLI/scripts/sight-cli', () => {
     );
     expect(consoleLogSpy).toHaveBeenCalledWith(
       expect.stringContaining(
-        'Open https://bundledrop.app/sight and attach both files for analysis.',
+        'Open https://bundledrop.app/sight and attach the bundle and source map for JavaScript analysis.',
       ),
     );
+    expect(consoleLogSpy).toHaveBeenCalledWith(expect.stringContaining('analysis-assets.json is a local record.'));
   });
 
   it('treats --no-open as the manual flow without prompting', async () => {
@@ -119,6 +149,12 @@ describe('CLI/scripts/sight-cli', () => {
     expect(mockGenerateSightArtifacts).toHaveBeenCalledWith(
       expect.objectContaining({ platform: 'android' }),
     );
+    expect(JSON.parse(fs.readFileSync(path.join(outputDirectory, 'analysis-assets.json'), 'utf8'))).toMatchObject({
+      version: 1, mode: 'analyze', metric: 'emitted-asset-bytes',
+      artifacts: { bundle: { path: 'main.android.jsbundle' }, sourceMap: { path: 'main.android.jsbundle.map' } },
+      assets: [{ path: 'image.png', bytes: 11 }],
+    });
+    expect(fs.existsSync(mockGenerateSightArtifacts.mock.calls[0][0].assetsDirectory)).toBe(false);
   });
 
   it('prompts for an ambiguous platform and accepts Android', async () => {
@@ -182,6 +218,7 @@ describe('CLI/scripts/sight-cli', () => {
     );
 
     expect(fs.existsSync(outputDirectory)).toBe(true);
+    expect(fs.existsSync(path.join(outputDirectory, 'analysis-assets.json'))).toBe(true);
     expect(consoleLogSpy).toHaveBeenCalledWith(
       expect.stringContaining('Source files have been generated here:'),
     );
