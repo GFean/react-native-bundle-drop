@@ -169,16 +169,16 @@
     "@xmldom/xmldom@^0.8.8": "0.8.13"
   },
   "dependencies": {
-    "adm-zip": "^0.6.0",
-    "axios": "^1.19.0",
-    "chalk": "4",
-    "commander": "^7.2.0",
-    "diff": "^9.0.0",
-    "figures": "3",
-    "form-data": "^4.0.6",
-    "fs-extra": "^11.4.0",
-    "plist": "^3.1.1",
-    "prompts": "^2.4.2"
+    "adm-zip": "0.6.1",
+    "axios": "1.20.0",
+    "chalk": "4.1.2",
+    "commander": "7.2.0",
+    "diff": "9.0.0",
+    "figures": "3.2.0",
+    "form-data": "4.0.6",
+    "fs-extra": "11.4.0",
+    "plist": "3.1.1",
+    "prompts": "2.4.2"
   },
   "publishConfig": {
     "access": "public"
