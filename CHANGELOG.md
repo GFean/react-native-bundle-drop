@@ -5,6 +5,13 @@ All notable changes to this package are documented here.
 This project uses [Conventional Commits](https://www.conventionalcommits.org/) and
 [release-please](https://github.com/googleapis/release-please) to prepare releases.
 
+## [0.8.1](https://github.com/GFean/react-native-bundle-drop/compare/v0.8.0...v0.8.1) (2026-09-13)
+
+
+### Bug Fixes
+
+* **deps:** pin production dependencies and update adm-zip ([#40](https://github.com/GFean/react-native-bundle-drop/issues/40)) ([2cbb2b6](https://github.com/GFean/react-native-bundle-drop/commit/2cbb2b67b36ede1a934cc53862d82ce0044d4bfa))
+
 ## [0.8.0](https://github.com/GFean/react-native-bundle-drop/compare/v0.7.0...v0.8.0) (2026-09-09)
 
 
