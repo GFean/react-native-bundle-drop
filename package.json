@@ -59,7 +59,7 @@
   "devDependencies": {
     "@types/adm-zip": "^0.5.8",
     "@types/jest": "^29.5.14",
-    "@types/node": "^24.13.4",
+    "@types/node": "^24.13.5",
     "@types/react": "^18.2.66",
     "@types/react-native": "^0.73.0",
     "expo-autolinking-sdk55": "npm:expo-modules-autolinking@55.0.8",
