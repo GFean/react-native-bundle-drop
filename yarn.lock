@@ -654,13 +654,13 @@ __metadata:
     "@types/react-native": ^0.73.0
     adm-zip: 0.6.1
     axios: 1.20.0
-    chalk: 6.0.0
-    commander: 15.0.0
+    chalk: 4.1.2
+    commander: 14.0.3
     diff: 9.0.0
     expo-autolinking-sdk55: "npm:expo-modules-autolinking@55.0.8"
     expo-autolinking-sdk56: "npm:expo-modules-autolinking@56.0.9"
     expo-autolinking-sdk57: "npm:expo-modules-autolinking@57.0.2"
-    figures: 6.1.0
+    figures: 3.2.0
     form-data: 4.0.6
     fs-extra: 11.4.0
     jest: ^29.7.0
@@ -2057,14 +2057,7 @@ __metadata:
   languageName: node
   linkType: hard
 
-"chalk@npm:6.0.0":
-  version: 6.0.0
-  resolution: "chalk@npm:6.0.0"
-  checksum: d7f2d436a04357b3905ef253befc175e3cab68c4731bbbef40eb412d1dea2d5e853995364cdaf8c67fd0e84d051e767c089898788866136119c8664aae1a06bb
-  languageName: node
-  linkType: hard
-
-"chalk@npm:^4.0.0, chalk@npm:^4.1.0, chalk@npm:^4.1.2":
+"chalk@npm:4.1.2, chalk@npm:^4.0.0, chalk@npm:^4.1.0, chalk@npm:^4.1.2":
   version: 4.1.2
   resolution: "chalk@npm:4.1.2"
   dependencies:
@@ -2257,10 +2250,10 @@ __metadata:
   languageName: node
   linkType: hard
 
-"commander@npm:15.0.0":
-  version: 15.0.0
-  resolution: "commander@npm:15.0.0"
-  checksum: e8aaa24591ae09389e83320431d47b44d9b03abe754586b689020b6bb6fc950a0089e9379099efa2e63b6b7c0e1e216bcf6b485754da7a54a74840077f3c6d2b
+"commander@npm:14.0.3":
+  version: 14.0.3
+  resolution: "commander@npm:14.0.3"
+  checksum: b8440159124aefbb02784a8996cd0481d8ce503d8d3cd413f4289d06db7e912c36b511277c2faba62f59152dd9ff79239d75e3b9400d9402851878994201d429
   languageName: node
   linkType: hard
 
@@ -2608,6 +2601,13 @@ __metadata:
   languageName: node
   linkType: hard
 
+"escape-string-regexp@npm:^1.0.5":
+  version: 1.0.5
+  resolution: "escape-string-regexp@npm:1.0.5"
+  checksum: 6092fda75c63b110c706b6a9bfde8a612ad595b628f0bd2147eea1d3406723020810e591effc7db1da91d80a71a737a313567c5abb3813e8d9c71f4aa595b410
+  languageName: node
+  linkType: hard
+
 "escape-string-regexp@npm:^2.0.0":
   version: 2.0.0
   resolution: "escape-string-regexp@npm:2.0.0"
@@ -2802,12 +2802,12 @@ __metadata:
   languageName: node
   linkType: hard
 
-"figures@npm:6.1.0":
-  version: 6.1.0
-  resolution: "figures@npm:6.1.0"
+"figures@npm:3.2.0":
+  version: 3.2.0
+  resolution: "figures@npm:3.2.0"
   dependencies:
-    is-unicode-supported: ^2.0.0
-  checksum: 35c81239d4fa40b75c2c7c010833b0bc8861c27187e4c9388fca1d9731103ec9989b70ee3b664ef426ddd9abe02ec5f4fd973424aa8c6fd3ea5d3bf57a2d01b4
+    escape-string-regexp: ^1.0.5
+  checksum: 85a6ad29e9aca80b49b817e7c89ecc4716ff14e3779d9835af554db91bac41c0f289c418923519392a1e582b4d10482ad282021330cd045bb7b80c84152f2a2b
   languageName: node
   linkType: hard
 
@@ -3411,13 +3411,6 @@ __metadata:
   version: 0.1.0
   resolution: "is-unicode-supported@npm:0.1.0"
   checksum: a2aab86ee7712f5c2f999180daaba5f361bdad1efadc9610ff5b8ab5495b86e4f627839d085c6530363c6d6d4ecbde340fb8e54bdb83da4ba8e0865ed5513c52
-  languageName: node
-  linkType: hard
-
-"is-unicode-supported@npm:^2.0.0":
-  version: 2.1.0
-  resolution: "is-unicode-supported@npm:2.1.0"
-  checksum: f254e3da6b0ab1a57a94f7273a7798dd35d1d45b227759f600d0fa9d5649f9c07fa8d3c8a6360b0e376adf916d151ec24fc9a50c5295c58bae7ca54a76a063f9
   languageName: node
   linkType: hard
 

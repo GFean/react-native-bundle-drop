@@ -54,11 +54,11 @@ runtime identity. Native changes still require a new App Store or Play Store bui
 | Bare React Native | React Native 0.71 and newer |
 | Platforms | iOS and Android |
 | Architectures | Legacy architecture and New Architecture |
-| Node.js | 22.12.0 or newer |
+| Node.js | 20.19.4 or newer |
 | React | 17 or newer |
 
-Node 20 is no longer supported. The Node requirement applies to installation of
-the package, including projects that use only the mobile SDK. Development and
+The Node requirement applies to installation of the package, including projects
+that use only the mobile SDK. Development and
 package builds use Node 22.13.0, as specified in `.nvmrc`.
 
 Run `bundle-drop --help` to browse commands grouped into Setup, Analysis,

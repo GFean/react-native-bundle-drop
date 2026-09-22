@@ -5,7 +5,8 @@ tests, and implementation changes are welcome.
 
 ## Before You Start
 
-- Use Node.js 20.19.4 or newer.
+- Use Node.js 22.13.0 for development, matching `.nvmrc`. The package requires
+  Node.js 20.19.4 or newer.
 - Search existing issues before opening a new one.
 - Use [GitHub Discussions](https://github.com/GFean/react-native-bundle-drop/discussions)
   for questions and early-stage ideas.
@@ -21,6 +22,7 @@ major feature, architectural change, breaking change, or backend-contract change
 Install dependencies and build the package:
 
 ```bash
+nvm use
 corepack yarn install
 yarn build
 ```

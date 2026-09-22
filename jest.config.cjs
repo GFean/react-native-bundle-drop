@@ -17,7 +17,7 @@ module.exports = {
     }],
   },
   transformIgnorePatterns: [
-    '/node_modules/(?!(commander|chalk|figures|is-unicode-supported|plist)/)',
+    '/node_modules/(?!(plist)/)',
   ],
   moduleNameMapper: {
     '^(\\.{1,2}/.*)\\.js$': '$1',
