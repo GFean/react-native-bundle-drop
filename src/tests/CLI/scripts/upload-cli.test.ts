@@ -461,6 +461,41 @@ describe('CLI/scripts/upload-cli', () => {
     );
   });
 
+  it('uses an explicit iOS version without reading a supplied plist', async () => {
+    writeConfig(`module.exports = {
+      serverUrl: 'https://api.example.com', org: { slug: 'alpha-org' }, project: { slug: 'demo-app' },
+      runtimeVersion: { ios: '1.0.0' },
+    };`);
+    prepareDist('ios');
+    await upload('ios', {
+      version: '3.4.5', plistFile: path.join(tempProjectDir, 'missing.plist'),
+      channel: 'Beta', token: 'override-token',
+    });
+    expect(formInstances[0].entries).toContainEqual({ name: 'version', value: '3.4.5' });
+  });
+
+  it.each(['<integer>123</integer>', '<string/>', '<string> </string>', '<dict/>'])
+    ('rejects invalid iOS version metadata before bundling: %s', async value => {
+      const exitSpy = mockProcessExit();
+      try {
+        writeConfig(`module.exports = {
+          serverUrl: 'https://api.example.com', org: { slug: 'alpha-org' }, project: { slug: 'demo-app' },
+          runtimeVersion: { ios: '1.0.0' },
+        };`);
+        const plistFile = path.join(tempProjectDir, 'Info.plist');
+        fs.writeFileSync(plistFile, `<plist><dict><key>CFBundleShortVersionString</key>${value}</dict></plist>`);
+        await expect(upload('ios', { plistFile, channel: 'Beta', token: 'override-token' }))
+          .rejects.toMatchObject({ code: 1 });
+        expect(mockLog.error).toHaveBeenCalledWith(
+          '❌ Failed to parse Info.plist: CFBundleShortVersionString must be a non-empty string.',
+        );
+        expect(mockExecSync).not.toHaveBeenCalled();
+        expect(mockAxiosNodePost).not.toHaveBeenCalled();
+      } finally {
+        exitSpy.mockRestore();
+      }
+    });
+
   it('rejects uploads when the manifest runtimeVersion is missing', async () => {
     const exitSpy = mockProcessExit();
 

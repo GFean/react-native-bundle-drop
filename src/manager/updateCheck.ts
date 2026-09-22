@@ -110,7 +110,8 @@ async function readResolveContext(channelName: string): Promise<RuntimeDeliveryR
     getOrCreateInstallId(),
     getFailedBundleHashes(),
   ]);
-  const supportsXdelta = await import('../native/fs')
+  const supportsXdelta = await Promise.resolve()
+    .then(() => require('../native/fs') as typeof import('../native/fs'))
     .then(module => module.default.supportsXdelta())
     .catch(() => false);
   return {

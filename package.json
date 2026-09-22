@@ -38,6 +38,8 @@
     "clean": "rimraf lib dist",
     "build": "npm run clean && tsc -p tsconfig.build.json && node scripts/make-cli-executable.js",
     "test": "jest --runInBand",
+    "typecheck": "tsc --noEmit -p tsconfig.json",
+    "test:cli:compat": "node scripts/check-cli-compatibility.cjs",
     "test:coverage": "jest --runInBand --coverage",
     "coverage:check": "node scripts/check-coverage-thresholds.cjs",
     "coverage:gate": "yarn test:coverage && yarn coverage:check",
@@ -50,7 +52,7 @@
     "codeql:local:fast": "node scripts/run-codeql-local.cjs fast",
     "codeql:local:full": "node scripts/run-codeql-local.cjs full",
     "codeql:local:compare": "node scripts/run-codeql-local.cjs compare",
-    "verify:quick": "yarn build && yarn coverage:gate && yarn test:expo:plugin && yarn package:check",
+    "verify:quick": "yarn typecheck && yarn build && yarn coverage:gate && yarn test:expo:plugin && yarn package:check",
     "verify:native": "yarn test:android && yarn test:ios",
     "verify:release": "yarn verify:quick && yarn verify:native && yarn audit:production",
     "prepack": "npm run build",
@@ -162,7 +164,7 @@
     }
   },
   "engines": {
-    "node": ">=20.19.4"
+    "node": ">=22.12.0"
   },
   "resolutions": {
     "diff@^4.0.1": "4.0.4",
@@ -171,13 +173,13 @@
   "dependencies": {
     "adm-zip": "0.6.1",
     "axios": "1.20.0",
-    "chalk": "4.1.2",
-    "commander": "7.2.0",
+    "chalk": "6.0.0",
+    "commander": "15.0.0",
     "diff": "9.0.0",
-    "figures": "3.2.0",
+    "figures": "6.1.0",
     "form-data": "4.0.6",
     "fs-extra": "11.4.0",
-    "plist": "3.1.1",
+    "plist": "5.0.0",
     "prompts": "2.4.2"
   },
   "publishConfig": {

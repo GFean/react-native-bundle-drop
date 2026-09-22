@@ -58,8 +58,16 @@ describe('CLI/cli', () => {
   let homedirSpy: jest.SpyInstance;
   let consoleLogSpy: jest.SpyInstance;
 
-  const parseCommand = async (...args: string[]) => {
+  const buildTestProgram = (write: (value: string) => void = () => undefined) => {
     const program = buildProgram();
+    for (const command of [program, ...program.commands]) {
+      command.exitOverride().configureOutput({ writeOut: write, writeErr: write });
+    }
+    return program;
+  };
+
+  const parseCommand = async (...args: string[]) => {
+    const program = buildTestProgram();
     await program.parseAsync(['node', 'bundle-drop', ...args]);
   };
 
@@ -162,7 +170,8 @@ describe('CLI/cli', () => {
       error = caught as Error;
     }
 
-    expect(error?.message).toBe('--project-type must be expo or bare.');
+    expect(error?.message).toContain("argument 'unknown' is invalid");
+    expect(error?.message).toContain('Allowed choices are expo, bare.');
     expect(error?.message).not.toContain('Manual setup');
     expect(mockInitConfig).not.toHaveBeenCalled();
     expect(mockRunPostInitPrompts).not.toHaveBeenCalled();
@@ -176,11 +185,12 @@ describe('CLI/cli', () => {
     }));
 
     await expect(parseCommand('doctor', '--platform', 'web')).rejects.toThrow(
-      '--platform must be ios or android',
+      'Allowed choices are ios, android.',
     );
     await expect(parseCommand('doctor', '--project-type', 'unknown')).rejects.toThrow(
-      '--project-type must be expo or bare',
+      'Allowed choices are expo, bare.',
     );
+    expect(mockRunDoctor).toHaveBeenCalledTimes(1);
   });
 
   it('routes Sight options to the local analysis command', async () => {
@@ -218,6 +228,67 @@ describe('CLI/cli', () => {
     }), expect.anything());
   });
 
+  it('preserves default browser opening and ignores legacy extra arguments after the option terminator', async () => {
+    await parseCommand('sight', '--', '--no-open', 'wrapper-argument');
+
+    expect(mockRunSightCommand).toHaveBeenCalledWith(
+      expect.objectContaining({ open: true, include: [] }),
+      expect.anything(),
+    );
+    await parseCommand('upload', 'ios', 'wrapper-argument', '--version', '1.2.3');
+    expect(mockUpload).toHaveBeenCalledWith(
+      'ios', expect.objectContaining({ version: '1.2.3' }), expect.anything(),
+    );
+  });
+
+  it('preserves paths and release notes passed as individual shell arguments', async () => {
+    await parseCommand(
+      'upload', 'ios', '--plist-file', './ios/My App/Info.plist',
+      '--release-notes', 'Fix login\nKeep the existing session.',
+    );
+
+    expect(mockUpload).toHaveBeenCalledWith('ios', expect.objectContaining({
+      plistFile: './ios/My App/Info.plist',
+      releaseNotes: 'Fix login\nKeep the existing session.',
+    }), expect.anything());
+  });
+
+  it.each([
+    ['upload'],
+    ['eas-receipt', '--build-id', 'build-123'],
+    ['eas-receipt', 'ios'],
+    ['sight', '--compare'],
+  ])('rejects incomplete command arguments before running an action: %s', async (...args) => {
+    await expect(parseCommand(...args)).rejects.toMatchObject({ exitCode: 1 });
+    expect(mockUpload).not.toHaveBeenCalled();
+    expect(mockWriteEasBuildReceipt).not.toHaveBeenCalled();
+    expect(mockRunSightCommand).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    { args: ['sigth'], suggestion: 'sight' },
+    { args: ['sight', '--platfrom', 'ios'], suggestion: '--platform' },
+  ])('suggests corrections without running an action for $args', async ({ args, suggestion }) => {
+    let output = '';
+    const program = buildTestProgram(value => { output += value; });
+
+    await expect(program.parseAsync(['node', 'bundle-drop', ...args])).rejects.toMatchObject({ exitCode: 1 });
+    expect(output).toContain(`Did you mean ${suggestion}?`);
+    expect(output).toContain('Run "bundle-drop <command> --help" for usage.');
+    expect(mockRunSightCommand).not.toHaveBeenCalled();
+  });
+
+  it.each(['-v', '--cli-version'])('keeps %s separate from the upload app version', async flag => {
+    let output = '';
+    const program = buildTestProgram(value => { output += value; });
+
+    await expect(program.parseAsync(['node', 'bundle-drop', flag])).rejects.toMatchObject({
+      code: 'commander.version', exitCode: 0,
+    });
+    expect(output.trim()).toBe(program.version());
+    expect(mockUpload).not.toHaveBeenCalled();
+  });
+
   it('includes doctor in top-level and command-specific help', () => {
     const program = buildProgram();
     let topLevelHelp = '';
@@ -228,6 +299,14 @@ describe('CLI/cli', () => {
     expect(topLevelHelp).toContain('bundle-drop sight');
     expect(topLevelHelp).not.toContain('init-native');
     expect(topLevelHelp).not.toContain('init-metro');
+    expect(topLevelHelp).not.toContain('Available Commands:');
+    expect(topLevelHelp).toContain('React Native Bundle Drop CLI');
+    for (const heading of ['Setup:', 'Analysis:', 'Releases:', 'Account:']) {
+      expect(topLevelHelp).toContain(heading);
+    }
+    for (const name of ['init', 'sync', 'doctor', 'sight', 'upload', 'eas-receipt', 'login', 'logout', 'whoami']) {
+      expect(topLevelHelp).toMatch(new RegExp(`\\b${name}\\b`));
+    }
 
     const doctorCommand = program.commands.find(command => command.name() === 'doctor');
     expect(doctorCommand).toBeDefined();
@@ -272,7 +351,8 @@ describe('CLI/cli', () => {
         'web',
         '--build-id',
         '11111111-1111-4111-8111-111111111111',
-      )).rejects.toThrow('platform must be ios or android');
+      )).rejects.toThrow('Allowed choices are ios, android.');
+      expect(mockWriteEasBuildReceipt).toHaveBeenCalledTimes(1);
     } finally {
       cwdSpy.mockRestore();
     }
@@ -749,6 +829,26 @@ describe('CLI/cli', () => {
     } finally {
       consoleErrorSpy.mockRestore();
       process.exitCode = originalExitCode;
+    }
+  });
+
+  it('uses process arguments and reports non-Error command rejections as failures', async () => {
+    const consoleErrorSpy = jest.spyOn(console, 'error').mockImplementation(() => undefined);
+    const originalArgv = process.argv;
+    const originalExitCode = process.exitCode;
+    process.argv = ['node', 'bundle-drop', 'login'];
+    mockLogin.mockRejectedValueOnce('Authentication was cancelled.');
+
+    try {
+      await runCli();
+
+      expect(mockLogin).toHaveBeenCalledTimes(1);
+      expect(consoleErrorSpy).toHaveBeenCalledWith('❌ Authentication was cancelled.');
+      expect(process.exitCode).toBe(1);
+    } finally {
+      process.argv = originalArgv;
+      process.exitCode = originalExitCode;
+      consoleErrorSpy.mockRestore();
     }
   });
 

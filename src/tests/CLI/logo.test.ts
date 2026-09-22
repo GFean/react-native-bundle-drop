@@ -37,4 +37,14 @@ describe('buildBundleDropLogo', () => {
   it('keeps the mono silhouette to block glyphs and whitespace only', () => {
     expect(BUNDLE_DROP_LOGO_MONO).toMatch(/^[\s\u2580\u2584\u2588]+$/);
   });
+
+  it('renders a plain logo when terminal colors are disabled', () => {
+    chalk.level = 0;
+
+    const logo = buildBundleDropLogo();
+
+    expect(logo).toContain(BUNDLE_DROP_LOGO_MONO);
+    expect(logo).toContain('React Native Bundle Drop CLI');
+    expect(logo).not.toContain('\u001b[');
+  });
 });

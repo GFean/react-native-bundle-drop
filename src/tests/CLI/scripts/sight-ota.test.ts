@@ -2,7 +2,6 @@ import childProcess from 'child_process';
 import fs from 'fs';
 import os from 'os';
 import path from 'path';
-import plist from 'plist';
 import { measureInstalledSightOta, measureSightOta, type MeasureSightOtaOptions } from '../../../CLI/scripts/sight-ota';
 import { resolveExpoBuildIdentity } from '../../../expo/buildIdentity';
 import { runComparisonProcess } from '../../../CLI/scripts/sight-compare/process';
@@ -14,6 +13,7 @@ jest.mock('../../../CLI/scripts/sight-compare/process', () => ({
 }));
 
 const magic = Buffer.from([0xc6, 0x1f, 0xbc, 0x03, 0xc1, 0x03, 0x19, 0x1f]);
+const xmlPlist = (fields: string): string => `<plist version="1.0"><dict>${fields}</dict></plist>`;
 
 describe('Sight local OTA measurements', () => {
   let root: string;
@@ -123,7 +123,9 @@ describe('Sight local OTA measurements', () => {
   it.each(['literal', 'variable', 'mixed', 'unresolved', 'non-string', 'missing', 'empty-project', 'invalid-setting'])('handles iOS version identity %s conservatively', async scenario => {
     options.platform = 'ios';
     if (scenario !== 'missing') {
-      write(path.join(root, 'ios/App/Info.plist'), plist.build({ CFBundleShortVersionString: scenario === 'literal' ? '1.2.3' : scenario === 'non-string' ? 123 : '$(MARKETING_VERSION)' }));
+      const version = scenario === 'non-string' ? '<integer>123</integer>'
+        : `<string>${scenario === 'literal' ? '1.2.3' : '$(MARKETING_VERSION)'}</string>`;
+      write(path.join(root, 'ios/App/Info.plist'), xmlPlist(`<key>CFBundleShortVersionString</key>${version}`));
       fs.mkdirSync(path.join(root, 'ios/Pods'));
       write(path.join(root, 'ios/note.txt'), 'not a project');
       fs.mkdirSync(path.join(root, 'ios/Empty.xcodeproj'));
@@ -139,29 +141,44 @@ describe('Sight local OTA measurements', () => {
     options.platform = 'ios';
     fs.mkdirSync(path.join(root, 'ios'));
     expect((await measureInstalledSightOta(options)).status).toBe('unavailable');
-    write(path.join(root, 'ios/Info.plist'), plist.build({ CFBundleShortVersionString: '1.0.0' }));
-    write(path.join(root, 'ios/Other/Info.plist'), plist.build({ CFBundleShortVersionString: '2.0.0' }));
+    write(path.join(root, 'ios/Info.plist'), xmlPlist('<key>CFBundleShortVersionString</key><string>1.0.0</string>'));
+    write(path.join(root, 'ios/Other/Info.plist'), xmlPlist('<key>CFBundleShortVersionString</key><string>2.0.0</string>'));
     expect((await measureInstalledSightOta(options)).status).toBe('unavailable');
+  });
+
+  it.each([
+    ['OpenStep', '{ CFBundleShortVersionString = "1.2.3"; }'],
+    ['binary', Buffer.from('bplist00\0\0')],
+    ['array', '<plist><array/></plist>'],
+    ['empty version', '<plist><dict><key>CFBundleShortVersionString</key><string/></dict></plist>'],
+  ])('keeps unsupported iOS metadata unavailable: %s', async (_name, contents) => {
+    options.platform = 'ios';
+    write(path.join(root, 'ios/App/Info.plist'), contents);
+    expect(await measureInstalledSightOta(options)).toEqual({
+      status: 'unavailable',
+      reason: 'The native ios app version could not be resolved unambiguously for Bundle Drop OTA packaging.',
+    });
+    expect(fs.existsSync(path.join(options.workDirectory, 'bundle-ios.zip'))).toBe(false);
   });
 
   it('uses the application version rather than test and extension plist versions', async () => {
     options.platform = 'ios';
-    write(path.join(root, 'ios/App/Info.plist'), plist.build({ CFBundlePackageType: 'APPL', CFBundleShortVersionString: '4.7.9' }));
-    write(path.join(root, 'ios/AppTests/Info.plist'), plist.build({ CFBundlePackageType: 'BNDL', CFBundleShortVersionString: '2.7.71' }));
-    write(path.join(root, 'ios/WalletExtension/Info.plist'), plist.build({ NSExtension: { NSExtensionPointIdentifier: 'wallet' } }));
-    write(path.join(root, 'ios/WalletExtensionAuth/Info.plist'), plist.build({ NSExtension: { NSExtensionPointIdentifier: 'wallet-auth' } }));
+    write(path.join(root, 'ios/App/Info.plist'), xmlPlist('<key>CFBundlePackageType</key><string>APPL</string><key>CFBundleShortVersionString</key><string>4.7.9</string>'));
+    write(path.join(root, 'ios/AppTests/Info.plist'), xmlPlist('<key>CFBundlePackageType</key><string>BNDL</string><key>CFBundleShortVersionString</key><string>2.7.71</string>'));
+    write(path.join(root, 'ios/WalletExtension/Info.plist'), xmlPlist('<key>NSExtension</key><dict><key>NSExtensionPointIdentifier</key><string>wallet</string></dict>'));
+    write(path.join(root, 'ios/WalletExtensionAuth/Info.plist'), xmlPlist('<key>NSExtension</key><dict><key>NSExtensionPointIdentifier</key><string>wallet-auth</string></dict>'));
     expect((await measureInstalledSightOta(options)).status).toBe('available');
     const manifest = JSON.parse(fs.readFileSync(path.join(options.workDirectory, 'bundle-manifest.json'), 'utf8'));
     expect(manifest.version).toBe('4.7.9');
 
-    write(path.join(root, 'ios/AnotherApp/Info.plist'), plist.build({ CFBundlePackageType: 'APPL', CFBundleShortVersionString: '5.0.0' }));
+    write(path.join(root, 'ios/AnotherApp/Info.plist'), xmlPlist('<key>CFBundlePackageType</key><string>APPL</string><key>CFBundleShortVersionString</key><string>5.0.0</string>'));
     expect((await measureInstalledSightOta(options)).status).toBe('unavailable');
   });
 
   it('does not use test or extension versions when an application plist is absent', async () => {
     options.platform = 'ios';
-    write(path.join(root, 'ios/Tests/Info.plist'), plist.build({ CFBundlePackageType: 'BNDL', CFBundleShortVersionString: '1.0.0' }));
-    write(path.join(root, 'ios/Extension/Info.plist'), plist.build({ NSExtension: {}, CFBundleShortVersionString: '1.0.0' }));
+    write(path.join(root, 'ios/Tests/Info.plist'), xmlPlist('<key>CFBundlePackageType</key><string>BNDL</string><key>CFBundleShortVersionString</key><string>1.0.0</string>'));
+    write(path.join(root, 'ios/Extension/Info.plist'), xmlPlist('<key>NSExtension</key><dict/><key>CFBundleShortVersionString</key><string>1.0.0</string>'));
     expect((await measureInstalledSightOta(options)).status).toBe('unavailable');
   });
 

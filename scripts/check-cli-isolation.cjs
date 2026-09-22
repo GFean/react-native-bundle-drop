@@ -4,8 +4,9 @@ const path = require('path');
 const ts = require('typescript');
 
 const forbidden = /(?:^|\/)CLI\/scripts\/sight-(?:compare(?:\/|$)|(?:artifacts|assets|ota|session|cli)\.)/;
+const cliDependencies = new Set(['chalk', 'commander', 'figures', 'plist']);
 
-function relativeModules(file) {
+function importedModules(file) {
   const source = ts.createSourceFile(file, fs.readFileSync(file, 'utf8'), ts.ScriptTarget.Latest, true);
   const modules = [];
   function visit(node) {
@@ -22,7 +23,7 @@ function relativeModules(file) {
     ts.forEachChild(node, visit);
   }
   visit(source);
-  return modules.filter(name => name.startsWith('.'));
+  return modules;
 }
 
 function checkCliIsolation(root, entries) {
@@ -30,14 +31,22 @@ function checkCliIsolation(root, entries) {
   function visit(file, chain) {
     if (visited.has(file)) return;
     const relative = path.relative(root, file).split(path.sep).join('/');
-    if (forbidden.test(relative)) throw new Error(`Sight CLI code is reachable from an SDK/tooling entrypoint: ${[...chain, relative].join(' -> ')}`);
+    const sight = forbidden.test(relative);
+    if (sight || relative.includes('CLI/utils/read-xml-plist.')) throw new Error(`${sight ? 'Sight CLI' : 'CLI'} code is reachable from an SDK/tooling entrypoint: ${[...chain, relative].join(' -> ')}`);
     visited.add(file);
-    for (const name of relativeModules(file)) {
+    for (const name of importedModules(file)) {
+      if (cliDependencies.has(name.split('/')[0])) {
+        throw new Error(`CLI dependency is reachable from an SDK/tooling entrypoint: ${[...chain, relative, name].join(' -> ')}`);
+      }
+      if (!name.startsWith('.')) continue;
       const base = path.resolve(path.dirname(file), name);
+      const stem = base.replace(/\.[cm]?js$/, '');
       const declaration = file.endsWith('.d.ts');
       const candidates = declaration
-        ? [base + '.d.ts', path.join(base, 'index.d.ts'), base]
-        : [base + '.js', base + '.cjs', base + '.mjs', base + '.ts', base + '.tsx', path.join(base, 'index.js'), path.join(base, 'index.ts'), path.join(base, 'index.tsx'), base];
+        ? [stem + '.d.ts', path.join(base, 'index.d.ts'), base]
+        : /\.tsx?$/.test(file)
+          ? [stem + '.ts', stem + '.tsx', base, path.join(base, 'index.ts'), path.join(base, 'index.tsx'), path.join(base, 'index.js')]
+          : [base, base + '.js', base + '.cjs', base + '.mjs', path.join(base, 'index.js')];
       const resolved = candidates.find(candidate => fs.existsSync(candidate) && fs.statSync(candidate).isFile());
       if (resolved && /\.(?:[cm]?js|tsx?)$/.test(resolved)) visit(resolved, [...chain, relative]);
     }
@@ -53,5 +62,5 @@ if (require.main === module) {
     'lib/index.js', 'lib/bootstrap.js', 'lib/index.d.ts', 'lib/metro.js', 'lib/metro.d.ts', 'app.plugin.js',
     'src/index.tsx', 'src/bootstrap.ts', 'src/metro.ts',
   ]);
-  console.log(`CLI isolation check passed: ${modules.length} SDK/tooling modules inspected; no Sight comparison imports.`);
+  console.log(`CLI isolation check passed: ${modules.length} SDK/tooling modules inspected; no Sight or CLI dependency imports.`);
 }
