@@ -2,7 +2,7 @@ import { spawnSync } from 'child_process';
 import fs from 'fs';
 import path from 'path';
 import { createRequire } from 'module';
-import plist from 'plist';
+import { readXmlPlist } from '../utils/read-xml-plist';
 import { resolveExpoBuildIdentity } from '../../expo/buildIdentity';
 import { validateExpoExportOutput } from '../../expo/exportValidation';
 import type { MobilePlatform, ProjectType } from '../../expo';
@@ -61,7 +61,7 @@ function iosVersion(options: MeasureSightOtaOptions, value: unknown): string | u
 }
 
 /** Only literal, unambiguous native versions are used; no native build configuration is executed. */
-function bareAppVersion(options: MeasureSightOtaOptions): string | undefined {
+async function bareAppVersion(options: MeasureSightOtaOptions): Promise<string | undefined> {
   if (options.platform === 'android') {
     const files = ['build.gradle', 'build.gradle.kts'].map(name => path.join(options.projectRoot, 'android', 'app', name)).filter(file => fs.existsSync(file));
     if (files.length !== 1) return undefined;
@@ -76,14 +76,16 @@ function bareAppVersion(options: MeasureSightOtaOptions): string | undefined {
   for (const item of fs.readdirSync(ios, { withFileTypes: true })) {
     if (item.isDirectory() && !['Pods', 'build'].includes(item.name)) candidates.push(path.join(ios, item.name, 'Info.plist'));
   }
-  const documents = candidates.filter(file => fs.existsSync(file)).map(file =>
-    plist.parse(fs.readFileSync(insideSnapshot(options, file), 'utf8')) as Record<string, unknown>);
-  const applications = documents.filter(document => document.CFBundlePackageType === 'APPL');
+  const documents = await Promise.all(candidates.filter(file => fs.existsSync(file)).map(file =>
+    readXmlPlist(insideSnapshot(options, file))));
+  const applications = documents.filter(document =>
+    Object.prototype.hasOwnProperty.call(document, 'CFBundlePackageType') && document.CFBundlePackageType === 'APPL');
   // Test bundles and extensions have their own versions, unrelated to the app's OTA identity.
   // Older app plists may omit the package type; use those only when no explicit app exists.
   const appDocuments = applications.length > 0 ? applications : documents.filter(document =>
-    document.CFBundlePackageType === undefined && document.NSExtension === undefined);
-  const versions = appDocuments.map(document => iosVersion(options, document.CFBundleShortVersionString));
+    !Object.prototype.hasOwnProperty.call(document, 'CFBundlePackageType') && !Object.prototype.hasOwnProperty.call(document, 'NSExtension'));
+  const versions = appDocuments.map(document => iosVersion(options,
+    Object.prototype.hasOwnProperty.call(document, 'CFBundleShortVersionString') ? document.CFBundleShortVersionString : undefined));
   if (!versions.length || !versions.every(concreteVersion) || new Set(versions).size !== 1) return undefined;
   return versions[0] as string;
 }
@@ -146,11 +148,11 @@ export async function measureInstalledSightOta(options: MeasureSightOtaOptions):
         return unavailable(`Bundle Drop has no runtime version configured for ${options.platform}. Set runtimeVersion.${options.platform} in bundle.drop.config.js.`);
       }
       reason = `The native ${options.platform} app version could not be resolved unambiguously for Bundle Drop OTA packaging.`;
-      const version = bareAppVersion(options);
+      const version = await bareAppVersion(options);
       if (!version) return unavailable(reason);
       appVersion = version;
       runtimeVersion = runtime;
-      hermes = shouldCompileHermesBytecode(config, options.platform, options.projectRoot);
+      hermes = shouldCompileHermesBytecode(config, options.platform, options.projectRoot, options.snapshotRoot);
     }
     const bundlePath = path.join(options.workDirectory, 'main.jsbundle');
     let assetsDirectory = options.assetsDirectory;

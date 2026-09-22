@@ -3,9 +3,9 @@ import { spawnSync } from 'child_process';
 import FormData from 'form-data';
 import * as fs from 'fs';
 import * as path from 'path';
-import * as plist from 'plist';
 
 import { log, startLoadingStatus } from '../utils/ui';
+import { readXmlPlist } from '../utils/read-xml-plist';
 import { resolveIosPlistVersion } from '../../scripts/resolve-ios-version';
 import {
   assertExpoUpdatesDoesNotOwnStartup,
@@ -292,12 +292,16 @@ export async function runUpload(
       }
 
       try {
-        const plistContent = fs.readFileSync(options.plistFile, 'utf-8');
-        const parsed = plist.parse(plistContent) as any;
-        const rawVersion: string | undefined = parsed.CFBundleShortVersionString;
-        if (!rawVersion) {
+        const parsed = await readXmlPlist(options.plistFile);
+        const rawVersion = Object.prototype.hasOwnProperty.call(parsed, 'CFBundleShortVersionString')
+          ? parsed.CFBundleShortVersionString
+          : undefined;
+        if (rawVersion === undefined) {
           log.error('❌ Could not find CFBundleShortVersionString in plist');
           process.exit(1);
+        }
+        if (typeof rawVersion !== 'string' || !rawVersion.trim()) {
+          throw new Error('CFBundleShortVersionString must be a non-empty string.');
         }
         const resolved = resolveIosPlistVersion(rawVersion, projectRoot);
         if (!resolved) {

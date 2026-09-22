@@ -8,6 +8,7 @@ import { BUNDLE_MANIFEST } from '../manifest/bundleManifest';
 import { buildCanonicalArtifact } from './canonicalArtifact';
 import { findProjectRoot } from './projectRoot';
 import { resolveModuleFrom, type ModuleResolver } from './resolveModule';
+import { detectImplicitIosHermes } from './iosHermesDefault';
 
 export { findProjectRoot };
 
@@ -204,6 +205,7 @@ export const shouldCompileHermesBytecode = (
   cfg: Record<string, unknown>,
   platform: string,
   projectRoot: string,
+  snapshotRoot?: string,
 ): boolean => {
   const explicit =
     readPlatformSetting(cfg.hermesBytecode, platform) ??
@@ -213,6 +215,8 @@ export const shouldCompileHermesBytecode = (
 
   const detected = detectHermesFromNativeProject(projectRoot, platform);
   if (detected !== undefined) return detected;
+
+  if (platform === 'ios' && detectImplicitIosHermes(projectRoot, snapshotRoot)) return true;
 
   if (explicit === 'auto') {
     console.warn(

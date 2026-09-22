@@ -1242,8 +1242,21 @@ describe('manager/updateCheck', () => {
     });
   });
 
-  it('advertises asset-only when native xdelta support probing fails', async () => {
-    mockSupportsXdelta.mockRejectedValueOnce(new Error('native bridge unavailable'));
+  it('does not probe native patch capabilities when the update module is loaded', () => {
+    jest.isolateModules(() => {
+      const { mockSupportsXdelta: probe } = require('../mocks/native/fs');
+      require('../../manager/updateCheck');
+      expect(probe).not.toHaveBeenCalled();
+    });
+  });
+
+  it.each([
+    ['available', () => Promise.resolve(true), ['xdelta3-vcdiff', 'asset-only-v1']],
+    ['unavailable', () => Promise.resolve(false), ['asset-only-v1']],
+    ['synchronous native error', () => { throw new Error('native bridge unavailable'); }, ['asset-only-v1']],
+    ['rejected native promise', () => Promise.reject(new Error('native bridge unavailable')), ['asset-only-v1']],
+  ] as const)('advertises the supported patch algorithms after probing: %s', async (_scenario, probe, algorithms) => {
+    mockSupportsXdelta.mockImplementationOnce(probe);
     setMockFile(INSTALL_ID_PATH, 'install-no-xdelta');
     mockPostOtaResolve.mockResolvedValue({
       data: {
@@ -1252,14 +1265,18 @@ describe('manager/updateCheck', () => {
       },
     } as never);
 
-    await checkForUpdate('General');
+    const check = checkForUpdate('General');
+    expect(mockSupportsXdelta).not.toHaveBeenCalled();
+    expect(mockPostOtaResolve).not.toHaveBeenCalled();
+    await expect(check).resolves.toMatchObject({ action: 'NOOP', upToDate: true });
+    expect(mockSupportsXdelta).toHaveBeenCalledTimes(1);
 
     expect(mockPostOtaResolve).toHaveBeenCalledWith(
       'bundle-drop-app',
       expect.objectContaining({
         transport: {
           manifestVersion: 1,
-          patchAlgorithms: ['asset-only-v1'],
+          patchAlgorithms: algorithms,
           supportsContentAddressedAssets: true,
         },
       }),

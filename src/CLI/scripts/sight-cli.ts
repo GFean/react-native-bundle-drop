@@ -86,7 +86,7 @@ export async function runSightCommand(options: SightCommandOptions): Promise<voi
     throw new Error('--project-type must be expo or bare.');
   }
   if (options.compare !== undefined) {
-    const { runSightComparison } = await import('./sight-compare/run');
+    const { runSightComparison } = await import('./sight-compare/run.js');
     await runSightComparison(options);
     return;
   }

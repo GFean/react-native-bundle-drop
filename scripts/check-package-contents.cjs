@@ -171,6 +171,8 @@ const expectedScripts = new Set([
   'clean',
   'build',
   'test',
+  'typecheck',
+  'test:cli:compat',
   'test:coverage',
   'coverage:check',
   'coverage:gate',

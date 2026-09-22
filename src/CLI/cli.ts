@@ -2,7 +2,7 @@
 
 import axios from 'axios';
 import chalk from 'chalk';
-import { Command } from 'commander';
+import { Argument, Command, Option } from 'commander';
 import fs from 'fs';
 import os from 'os';
 import path from 'path';
@@ -155,7 +155,11 @@ export const buildProgram = () => {
 
   program
     .name('bundle-drop')
-    .version(pkg.version || '0.0.0', '-v, --cli-version', 'Show CLI version');
+    .version(pkg.version || '0.0.0', '-v, --cli-version', 'Show CLI version')
+    // Preserve the CLI's existing handling of extra arguments in shell wrappers.
+    .allowExcessArguments(true)
+    .configureHelp({ styleTitle: title => chalk.bold.cyan(title) })
+    .showHelpAfterError('Run "bundle-drop <command> --help" for usage.');
 
   program.addHelpText('beforeAll', logo);
 
@@ -163,7 +167,6 @@ export const buildProgram = () => {
     'before',
     `
 ${chalk.magentaBright('Ship OTA Updates with Confidence\n')}
-${chalk.bold.cyan('Available Commands:')}
 `,
   );
 
@@ -187,6 +190,7 @@ ${chalk.gray('CI/CD →')} ${chalk.underline.gray(DOCS_CI_CD_URL)}\n`,
 
   program
     .command('sight')
+    .helpGroup('Analysis:')
     .option('--compare <ref>', 'Compare the working tree with an explicit Git baseline')
     .option('--fetch', 'Refresh the explicitly named remote branch before comparing')
     .option('--include <path>', 'Copy an ignored local input identically into both builds (repeatable)',
@@ -214,6 +218,7 @@ ${chalk.bold('Examples:')}
 
   program
     .command('upload <platform>')
+    .helpGroup('Releases:')
     .option('--plist-file <path>', 'Path to Info.plist for iOS')
     .option(
       '--version <version>',
@@ -246,6 +251,7 @@ ${chalk.gray('CI/CD docs →')} ${chalk.underline.gray(DOCS_CI_CD_URL)}
 
   program
     .command('logout')
+    .helpGroup('Account:')
     .description('Log out of the CLI')
     .action(() => {
       const tokenPath = getTokenPath();
@@ -260,13 +266,15 @@ ${chalk.gray('CI/CD docs →')} ${chalk.underline.gray(DOCS_CI_CD_URL)}
 
   program
     .command('login')
+    .helpGroup('Account:')
     .description('Log in to the CLI')
     .action(() => require('../CLI/scripts/login-cli').default());
 
   program
     .command('init')
+    .helpGroup('Setup:')
     .option('--token <token>', 'Personal Access Token (alternative to `bundle-drop login`)')
-    .option('--project-type <type>', 'Force project type: expo or bare')
+    .addOption(new Option('--project-type <type>', 'Force project type: expo or bare').choices(['expo', 'bare']))
     .option('--dry-run', 'Preview setup and AI context without changing files')
     .option(
       '--migrate-code-push',
@@ -285,9 +293,6 @@ ${chalk.gray('CI/CD docs →')} ${chalk.underline.gray(DOCS_CI_CD_URL)}
       prebuild?: boolean;
       yes?: boolean;
     }) => {
-      if (options.projectType && !['expo', 'bare'].includes(options.projectType)) {
-        throw new Error('--project-type must be expo or bare.');
-      }
       if (options.token) {
         const { detectProjectType } = require('../expo');
         const projectType = detectProjectType({
@@ -417,6 +422,7 @@ ${chalk.gray('CI/CD docs →')} ${chalk.underline.gray(DOCS_CI_CD_URL)}
 
   program
     .command('sync')
+    .helpGroup('Setup:')
     .option('--token <token>', 'Personal Access Token (alternative to `bundle-drop login`)')
     .option('--dry-run', 'Validate and preview bootstrap synchronization without writing')
     .description('Refresh the package-managed runtime delivery bootstrap')
@@ -461,8 +467,9 @@ ${chalk.gray('CI/CD docs →')} ${chalk.underline.gray(DOCS_CI_CD_URL)}
 
   program
     .command('doctor')
-    .option('--platform <platform>', 'Limit checks to ios or android')
-    .option('--project-type <type>', 'Force project type: expo or bare')
+    .helpGroup('Setup:')
+    .addOption(new Option('--platform <platform>', 'Limit checks to ios or android').choices(['ios', 'android']))
+    .addOption(new Option('--project-type <type>', 'Force project type: expo or bare').choices(['expo', 'bare']))
     .description('Validate Bundle Drop setup, runtime identity, and OTA startup ownership')
     .addHelpText(
       'after',
@@ -474,17 +481,13 @@ ${chalk.bold('Examples:')}
 `,
     )
     .action(async (options: { platform?: 'ios' | 'android'; projectType?: ProjectType }) => {
-      if (options.platform && !['ios', 'android'].includes(options.platform)) {
-        throw new Error('--platform must be ios or android.');
-      }
-      if (options.projectType && !['expo', 'bare'].includes(options.projectType)) {
-        throw new Error('--project-type must be expo or bare.');
-      }
       await require('./scripts/doctor').runDoctor(options);
     });
 
   program
-    .command('eas-receipt <platform>')
+    .command('eas-receipt')
+    .helpGroup('Releases:')
+    .addArgument(new Argument('<platform>', 'Platform of the finished EAS build').choices(['ios', 'android']))
     .requiredOption('--build-id <id>', 'Exact finished EAS application build ID')
     .option('--output <path>', 'Receipt path; defaults under .bundle-drop')
     .description('Create an authenticated Expo build receipt from official EAS metadata')
@@ -492,9 +495,6 @@ ${chalk.bold('Examples:')}
       platform: string,
       options: { buildId: string; output?: string },
     ) => {
-      if (platform !== 'ios' && platform !== 'android') {
-        throw new Error('eas-receipt platform must be ios or android.');
-      }
       const receiptPath = await require('./scripts/expo/write-eas-build-receipt')
         .writeEasBuildReceipt({
           projectRoot: process.cwd(),
@@ -507,6 +507,7 @@ ${chalk.bold('Examples:')}
 
   program
     .command('whoami')
+    .helpGroup('Account:')
     .description('Show currently logged in user')
     .action(() => {
       const authState = readStoredAuthData();

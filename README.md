@@ -57,6 +57,15 @@ runtime identity. Native changes still require a new App Store or Play Store bui
 | Node.js | 20.19.4 or newer |
 | React | 17 or newer |
 
+The Node requirement applies to installation of the package, including projects
+that use only the mobile SDK. Development and
+package builds use Node 22.13.0, as specified in `.nvmrc`.
+
+Run `bundle-drop --help` to browse commands grouped into Setup, Analysis,
+Releases, and Account. Existing command names and flags remain unchanged.
+For iOS metadata, `--plist-file` and Sight accept XML Info.plist files; binary
+and OpenStep property lists are not supported.
+
 ## Installation
 
 ### Expo
@@ -114,6 +123,15 @@ images and fonts. Assets do not change the JavaScript totals or treemap.
 canonical packaging. Each revision uses its own JavaScript engine configuration:
 Hermes is compiled with project-local tooling when enabled. JavaScript attribution
 and raw asset sizes remain separate; they are not bytecode attribution.
+
+Bare iOS upload and Sight honor explicit Bundle Drop and native Hermes settings first.
+For the standard React Native **0.81.x** template, they also recognize the installed
+React Native helpers' implicit Hermes default when those helpers match the verified
+0.81.5 files. This conservative fallback is skipped
+for custom engine configuration, community JSC indicators, or unfamiliar templates
+and versions. For a custom project, set `hermesBytecode: { ios: true }` (or `false`
+for JavaScript) in `bundle.drop.config.js` to match the engine in your native app.
+The fallback does not evaluate Ruby or change your Podfile.
 
 Measurement adds compilation and archive compression after the JavaScript build, once
 per side in a comparison. Expo's Hermes path also performs a separate bytecode
