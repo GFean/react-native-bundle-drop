@@ -649,7 +649,7 @@ __metadata:
   dependencies:
     "@types/adm-zip": ^0.5.8
     "@types/jest": ^29.5.14
-    "@types/node": ^24.19.0
+    "@types/node": ^24.19.1
     "@types/react": ^18.2.66
     "@types/react-native": ^0.73.0
     adm-zip: 0.6.1
@@ -1501,12 +1501,12 @@ __metadata:
   languageName: node
   linkType: hard
 
-"@types/node@npm:^24.19.0":
-  version: 24.19.0
-  resolution: "@types/node@npm:24.19.0"
+"@types/node@npm:^24.19.1":
+  version: 24.19.1
+  resolution: "@types/node@npm:24.19.1"
   dependencies:
     undici-types: ">=7.24.0 <7.24.7"
-  checksum: 17381039ae34c5a34fc78b28614c5ecc66bd7092df93a235ea74b77ffa313f0e757373d23f9567dfe7f1cdb52a94260583f7f654919ec086cf7fe19e60e30294
+  checksum: 2d3a555fe260fa741213a4e2450336337bdebf476091a6a5996dc7edab2e3b44252c8e64ff1026f020499123d86a42120881f70417723feb6d91ed0ae94bcea5
   languageName: node
   linkType: hard
 
