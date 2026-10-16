@@ -3,7 +3,9 @@ import { spawnSync } from 'child_process';
 import FormData from 'form-data';
 import * as fs from 'fs';
 import * as path from 'path';
+import { performance } from 'perf_hooks';
 
+import { buildBundleDropLogo } from '../logo';
 import { log, startLoadingStatus } from '../utils/ui';
 import { readXmlPlist } from '../utils/read-xml-plist';
 import { resolveIosPlistVersion } from '../../scripts/resolve-ios-version';
@@ -14,7 +16,7 @@ import {
   resolveBundleDropRuntimeVersionAuthority,
 } from '../../expo';
 import { resolveModuleFrom, type ModuleResolver } from '../../scripts/resolveModule';
-import { assertMatchingServerOrigin } from '../serverUrl';
+import { assertMatchingServerOrigin, DEFAULT_SERVER_URL, normalizeServerUrl } from '../serverUrl';
 
 const DOCS_INSTALLATION_URL = 'https://bundledrop.app/docs/installation';
 const DOCS_UPLOADING_URL = 'https://bundledrop.app/docs/uploading';
@@ -32,6 +34,7 @@ type UploadOptions = {
   channel?: string;
   buildGradlePath?: string;
   releaseNotes?: string;
+  releaseNotesFile?: string;
   token?: string;
   author?: string;
   sourcemap?: boolean;
@@ -43,13 +46,52 @@ type UploadDependencies = {
   packageRoot: string;
   spawnProcess: typeof spawnSync;
   resolveModule: ModuleResolver;
+  nowMs?: () => number;
 };
 
 const defaultUploadDependencies = (): UploadDependencies => ({
   packageRoot: path.resolve(__dirname, '..', '..', '..'),
   spawnProcess: spawnSync,
   resolveModule: resolveModuleFrom,
+  nowMs: () => performance.now(),
 });
+
+const MAX_RELEASE_NOTES_LENGTH = 2000;
+const STAGING_SERVER_URL = 'https://api-staging.bundledrop.app';
+
+const dashboardProjectUrl = (
+  serverUrl: string,
+  orgSlug: string,
+  projectSlug: string,
+): string | null => {
+  const projectPath = `/organizations/${encodeURIComponent(orgSlug)}/projects/${encodeURIComponent(projectSlug)}`;
+  const normalizedServerUrl = normalizeServerUrl(serverUrl);
+  if (normalizedServerUrl === DEFAULT_SERVER_URL) {
+    return `https://developer.bundledrop.app${projectPath}`;
+  }
+  if (normalizedServerUrl === STAGING_SERVER_URL) {
+    return `https://develop.bundle-drop-web.pages.dev${projectPath}`;
+  }
+  return null;
+};
+
+const elapsedMs = (startMs: number, endMs: number): number => Math.round(endMs - startMs);
+
+const formatSeconds = (milliseconds: number): string => `${(milliseconds / 1000).toFixed(1)}s`;
+
+const errorMessage = (error: unknown): string => error instanceof Error ? error.message : String(error);
+
+const warnAfterUpload = (message: string): void => {
+  try {
+    log.warn(message);
+  } catch {
+    try {
+      process.stderr.write(`Warning: ${message}\n`);
+    } catch {
+      // Output is unavailable, but the server upload still succeeded.
+    }
+  }
+};
 
 const assertPathInside = (targetPath: string, parentPath: string, label: string) => {
   const resolvedParent = path.resolve(parentPath);
@@ -143,17 +185,80 @@ const bareArtifactPaths = (
   };
 };
 
+const cleanupUploadArtifacts = (
+  artifact: UploadArtifactPaths,
+  projectRoot: string,
+  packageRoot: string,
+  platform: string,
+  isExpoProject: boolean,
+): void => {
+  const generatedRoot = isExpoProject
+    ? path.join(projectRoot, '.bundle-drop', 'artifacts')
+    : path.join(packageRoot, 'dist');
+  assertPathInside(artifact.outputDir, generatedRoot, 'Artifact output');
+
+  const cleanupFiles = [
+    artifact.zipPath,
+    artifact.metadataPath,
+    artifact.manifestPath,
+    artifact.bundlePath,
+    artifact.sourceMapPath,
+  ];
+  for (const file of cleanupFiles) {
+    if (!file) continue;
+    assertPathInside(file, artifact.outputDir, 'Artifact file');
+    if (fs.existsSync(file)) fs.unlinkSync(file);
+  }
+
+  const assetsPath = path.join(artifact.outputDir, 'assets');
+  assertPathInside(assetsPath, artifact.outputDir, 'Artifact assets');
+  if (fs.existsSync(assetsPath)) fs.rmSync(assetsPath, { recursive: true, force: true });
+
+  const expoExportDirectory = artifact.expoExportDirectory ??
+    path.join(packageRoot, 'dist', `expo-export-${platform}`);
+  assertPathInside(expoExportDirectory, generatedRoot, 'Expo export');
+  if (fs.existsSync(expoExportDirectory)) {
+    fs.rmSync(expoExportDirectory, { recursive: true, force: true });
+  }
+};
+
 export async function runUpload(
   platform: string,
   options: UploadOptions,
   dependencies: UploadDependencies = defaultUploadDependencies(),
 ) {
+  const nowMs = dependencies.nowMs ?? (() => performance.now());
+  const commandStartMs = nowMs();
   console.log(); // blank line
   log.info('🚀 React Native OTA Upload Initialized');
 
   const projectRoot = process.cwd();
   const artifactDir = options.artifactDir ? path.resolve(options.artifactDir) : undefined;
   prepareArtifactDirForRun(artifactDir);
+  if (options.releaseNotes !== undefined && options.releaseNotesFile !== undefined) {
+    log.error('❌ Use either --release-notes or --release-notes-file, not both.');
+    process.exit(1);
+  }
+
+  let releaseNotes = options.releaseNotes;
+  if (options.releaseNotesFile !== undefined) {
+    const notesPath = path.resolve(projectRoot, options.releaseNotesFile);
+    try {
+      releaseNotes = fs.readFileSync(notesPath, 'utf8');
+    } catch (error) {
+      log.error(`❌ Cannot read release notes file ${notesPath}: ${errorMessage(error)}`);
+      process.exit(1);
+    }
+    if (!releaseNotes?.trim()) {
+      log.error(`❌ Release notes file is empty: ${notesPath}`);
+      process.exit(1);
+    }
+  }
+  if (releaseNotes && releaseNotes.length > MAX_RELEASE_NOTES_LENGTH) {
+    log.warn(`Release notes too long (${releaseNotes.length}); truncating to ${MAX_RELEASE_NOTES_LENGTH} chars.`);
+    releaseNotes = releaseNotes.slice(0, MAX_RELEASE_NOTES_LENGTH);
+  }
+
   const configPath = path.resolve(projectRoot, 'bundle.drop.config.js');
   //eslint-disable-next-line
   const authPath = path.join(require('os').homedir(), '.bundle-drop', 'auth.json');
@@ -196,6 +301,7 @@ export async function runUpload(
     );
     process.exit(1);
   }
+  const dashboardUrl = dashboardProjectUrl(serverUrl, orgSlug, projectSlug);
 
   // Resolve auth token: --token flag takes priority over auth.json
   let token = options.token;
@@ -242,12 +348,6 @@ export async function runUpload(
   let version: string | undefined = options.version;
   let expoBuildIdentity: import('../../expo').ExpoBuildIdentity | undefined;
   const buildGradlePath = options.buildGradlePath || (options as any).buildgradlePath;
-  let releaseNotes = options.releaseNotes;
-  const MAX_NOTES = 2000;
-  if (releaseNotes && releaseNotes.length > MAX_NOTES) {
-    log.warn(`Release notes too long (${releaseNotes.length}); truncating to ${MAX_NOTES} chars.`);
-    releaseNotes = releaseNotes.slice(0, MAX_NOTES);
-  }
 
   const parseAndroidVersionFromGradle = (filePath: string) => {
     if (!fs.existsSync(filePath)) {
@@ -338,7 +438,9 @@ export async function runUpload(
   log.label('App Version', version);
   console.log();
 
+  console.log(buildBundleDropLogo());
   log.arrow(`Bundling ${platform} app...`);
+  const bundlingStartMs = nowMs();
   const packageRoot = dependencies.packageRoot;
   const packageVersion = readPackageVersion(packageRoot);
   const compiledBundleScript = path.join(packageRoot, 'lib', 'scripts', 'bundle.js');
@@ -400,6 +502,8 @@ export async function runUpload(
     log.error(`❌ Bundle ZIP not found at: ${artifact.zipPath}`);
     process.exit(1);
   }
+  const zipSizeBytes = fs.statSync(artifact.zipPath).size;
+  const bundlingAndPackagingMs = elapsedMs(bundlingStartMs, nowMs());
 
   // Build form data
   const form = new FormData();
@@ -421,7 +525,9 @@ export async function runUpload(
   form.append('file', fs.createReadStream(artifact.zipPath));
 
   const uploadLoader = startLoadingStatus('Uploading bundle to server');
-  let uploadSucceeded = false;
+  const uploadStartMs = nowMs();
+  let uploadMs = 0;
+  let responseData: Record<string, unknown> = {};
   try {
     const res = await axios.post(`${serverUrl}/bundle/upload`, form, {
       headers: {
@@ -431,117 +537,123 @@ export async function runUpload(
       maxContentLength: Infinity,
       maxBodyLength: Infinity,
     });
-
-    const hasSourceMap = options.sourcemap && artifact.sourceMapPath &&
-      fs.existsSync(artifact.sourceMapPath);
-    const result: Record<string, unknown> = {
-      platform,
-      appVersion: version,
-      channel,
-      orgSlug,
-      projectSlug,
-      runtimeVersion: res.data?.runtimeVersion ?? runtimeVersion ?? null,
-      packageVersion: res.data?.packageVersion ?? packageVersion ?? null,
-      bundleId: res.data?.bundleId ?? null,
-      bundleVersion: res.data?.bundleVersion ?? null,
-      bundleVersionLabel: res.data?.bundleVersionLabel ?? null,
-      hash: res.data?.hash ?? null,
-      releaseNotes: releaseNotes ?? null,
-      author: options.author ?? null,
-    };
-
-    if (artifactDir) {
-      try {
-        fs.mkdirSync(artifactDir, { recursive: true });
-        if (fs.existsSync(artifact.bundlePath)) {
-          fs.copyFileSync(artifact.bundlePath, path.join(artifactDir, 'main.jsbundle'));
-          result.bundlePath = path.join(artifactDir, 'main.jsbundle');
-        }
-        if (hasSourceMap && artifact.sourceMapPath) {
-          fs.copyFileSync(artifact.sourceMapPath, path.join(artifactDir, 'main.jsbundle.map'));
-          result.sourceMapPath = path.join(artifactDir, 'main.jsbundle.map');
-        }
-      } catch (copyErr: any) {
-        log.warn(`Upload succeeded but artifact copy failed: ${copyErr.message}`);
-      }
-    }
-
-    uploadLoader.stop();
-    log.success(`✅ Upload complete`);
-    if (result.bundleVersion != null) log.label('Bundle Version', `${result.bundleVersion}`);
-    if (result.bundleVersionLabel) log.label('Bundle Label', `${result.bundleVersionLabel}`);
-    if (result.hash) log.label('Hash', `${result.hash}`);
-
-    const resultDir = artifactDir ?? artifact.outputDir;
-    if (!fs.existsSync(resultDir)) fs.mkdirSync(resultDir, { recursive: true });
-    const resultPath = path.join(resultDir, 'bundle-drop-result.json');
-    fs.writeFileSync(resultPath, JSON.stringify(result, null, 2));
-    log.label('Result file', resultPath);
-
-    if (artifactDir) {
-      log.label('Artifact dir', artifactDir);
-    }
-    uploadSucceeded = true;
+    uploadMs = elapsedMs(uploadStartMs, nowMs());
+    responseData = res.data ?? {};
   } catch (err: any) {
-    uploadLoader.stop();
     const uploadError = stringifyUploadError(err);
-    writeArtifactResult(artifactDir, {
-      success: false,
-      status: 'failed',
-      error: uploadError,
-      platform,
-      appVersion: version,
-      channel,
-      orgSlug,
-      projectSlug,
-      runtimeVersion,
-      packageVersion: packageVersion ?? null,
-      releaseNotes: releaseNotes ?? null,
-      author: options.author ?? null,
-    });
+    try {
+      writeArtifactResult(artifactDir, {
+        success: false,
+        status: 'failed',
+        error: uploadError,
+        platform,
+        appVersion: version,
+        channel,
+        orgSlug,
+        projectSlug,
+        runtimeVersion,
+        packageVersion: packageVersion ?? null,
+        releaseNotes: releaseNotes ?? null,
+        author: options.author ?? null,
+      });
+    } catch (writeError) {
+      log.warn(`Could not write failed upload result: ${errorMessage(writeError)}`);
+    }
     log.error(`Upload failed: ${uploadError}`);
     process.exitCode = 1;
+    try {
+      cleanupUploadArtifacts(artifact, projectRoot, packageRoot, platform, isExpoProject);
+    } catch (cleanupError) {
+      log.warn(`Cleanup failed: ${errorMessage(cleanupError)}`);
+    }
     return;
   } finally {
     try {
-      const generatedRoot = isExpoProject
-        ? path.join(projectRoot, '.bundle-drop', 'artifacts')
-        : path.join(packageRoot, 'dist');
-      assertPathInside(artifact.outputDir, generatedRoot, 'Artifact output');
-      const cleanupFiles = [
-        artifact.zipPath,
-        artifact.metadataPath,
-        artifact.manifestPath,
-        artifact.bundlePath,
-        artifact.sourceMapPath,
-      ];
-      const assetsPath = path.join(artifact.outputDir, 'assets');
-      const expoExportDirectory = artifact.expoExportDirectory ??
-        path.join(packageRoot, 'dist', `expo-export-${platform}`);
-
-      for (const file of cleanupFiles) {
-        if (file) {
-          assertPathInside(file, artifact.outputDir, 'Artifact file');
-          if (fs.existsSync(file)) fs.unlinkSync(file);
-        }
-      }
-      assertPathInside(assetsPath, artifact.outputDir, 'Artifact assets');
-      if (fs.existsSync(assetsPath)) {
-        fs.rmSync(assetsPath, { recursive: true, force: true });
-      }
-      assertPathInside(expoExportDirectory, generatedRoot, 'Expo export');
-      if (fs.existsSync(expoExportDirectory)) {
-        fs.rmSync(expoExportDirectory, { recursive: true, force: true });
-      }
-
-      if (uploadSucceeded) {
-        console.log();
-        log.success('🎉 Done! Bundle uploaded and cleaned.');
-        console.log();
-      }
-    } catch (cleanupErr: any) {
-      log.warn(`Cleanup failed: ${cleanupErr.message}`);
+      uploadLoader.stop();
+    } catch (loaderError) {
+      warnAfterUpload(`Could not stop upload status: ${errorMessage(loaderError)}`);
     }
+  }
+
+  const hasSourceMap = Boolean(options.sourcemap && artifact.sourceMapPath &&
+    fs.existsSync(artifact.sourceMapPath));
+  const result: Record<string, unknown> = {
+    platform,
+    appVersion: version,
+    channel,
+    orgSlug,
+    projectSlug,
+    runtimeVersion: responseData.runtimeVersion ?? runtimeVersion ?? null,
+    packageVersion: responseData.packageVersion ?? packageVersion ?? null,
+    bundleId: responseData.bundleId ?? null,
+    bundleVersion: responseData.bundleVersion ?? null,
+    bundleVersionLabel: responseData.bundleVersionLabel ?? null,
+    hash: responseData.hash ?? null,
+    releaseNotes: releaseNotes ?? null,
+    author: options.author ?? null,
+    zipSizeBytes,
+    bundlingAndPackagingMs,
+    uploadMs,
+    dashboardUrl,
+  };
+
+  if (artifactDir) {
+    try {
+      fs.mkdirSync(artifactDir, { recursive: true });
+      if (fs.existsSync(artifact.bundlePath)) {
+        fs.copyFileSync(artifact.bundlePath, path.join(artifactDir, 'main.jsbundle'));
+        result.bundlePath = path.join(artifactDir, 'main.jsbundle');
+      }
+      if (hasSourceMap && artifact.sourceMapPath) {
+        fs.copyFileSync(artifact.sourceMapPath, path.join(artifactDir, 'main.jsbundle.map'));
+        result.sourceMapPath = path.join(artifactDir, 'main.jsbundle.map');
+      }
+    } catch (copyError) {
+      warnAfterUpload(`Upload succeeded but artifact copy failed: ${errorMessage(copyError)}`);
+    }
+  }
+
+  try {
+    cleanupUploadArtifacts(artifact, projectRoot, packageRoot, platform, isExpoProject);
+  } catch (cleanupError) {
+    warnAfterUpload(`Cleanup failed: ${errorMessage(cleanupError)}`);
+  }
+
+  const totalMs = elapsedMs(commandStartMs, nowMs());
+  result.totalMs = totalMs;
+  const resultDir = artifactDir ?? artifact.outputDir;
+  const resultPath = path.join(resultDir, 'bundle-drop-result.json');
+  let resultWritten = false;
+  try {
+    if (!fs.existsSync(resultDir)) fs.mkdirSync(resultDir, { recursive: true });
+    fs.writeFileSync(resultPath, JSON.stringify(result, null, 2));
+    resultWritten = true;
+  } catch (writeError) {
+    warnAfterUpload(`Upload succeeded but local result writing failed: ${errorMessage(writeError)}`);
+  }
+
+  try {
+    const summary = [
+      `  Organization / project: ${orgSlug} / ${projectSlug}`,
+      `  Channel / platform: ${channel} / ${platform}`,
+      `  App / runtime: ${version} / ${result.runtimeVersion}`,
+      ...(result.bundleVersion != null ? [`  Bundle version: ${result.bundleVersion}`] : []),
+      ...(result.bundleVersionLabel ? [`  Bundle label: ${result.bundleVersionLabel}`] : []),
+      ...(result.hash ? [`  Hash: ${result.hash}`] : []),
+      `  Uploaded ZIP: ${zipSizeBytes} bytes`,
+      `  Source map: ${!options.sourcemap ? 'not requested' : !hasSourceMap ? 'not generated' :
+        result.sourceMapPath ? `generated; retained at ${result.sourceMapPath}` : 'generated; not retained'}`,
+      ...(result.bundlePath ? [`  Retained bundle: ${result.bundlePath}`] : []),
+      `  Timings: bundle/package ${formatSeconds(bundlingAndPackagingMs)} · upload ${formatSeconds(uploadMs)} · total ${formatSeconds(totalMs)}`,
+      ...(resultWritten ? [`  Result file: ${resultPath}`] : []),
+      `  Dashboard: ${dashboardUrl ?? 'unavailable for this server'}`,
+    ];
+    console.log();
+    log.success('Upload complete.');
+    console.log(summary.join('\n'));
+    console.log();
+  } catch (summaryError) {
+    warnAfterUpload(`Upload succeeded but summary rendering failed: ${errorMessage(summaryError)}`);
   }
 }
 

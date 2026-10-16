@@ -678,6 +678,23 @@ npx bundle-drop upload ios --plist-file ios/Info.plist --channel develop
 Add `--sourcemap` to produce source maps for error tracking. In CI/CD, pass a
 Personal Access Token with `--token <PAT>` instead of using an interactive login.
 
+To attach multiline Markdown release notes, save them in a file and pass its path
+relative to the project directory:
+
+```bash
+npx bundle-drop upload android --channel develop --release-notes-file ./release-notes.md
+```
+
+`--release-notes "<text>"` remains available for inline notes. Use only one notes
+option per upload. Notes longer than 2,000 characters are truncated with a
+warning. After a successful upload, the CLI prints the bundle identity, ZIP size,
+source-map and retained-artifact status, bundling/packaging and upload timings,
+and a project dashboard link for the exact production or staging API. Custom
+servers show the dashboard as unavailable; the CLI has no verified dashboard
+origin for them.
+The summary confirms the upload; channel publishing and rollout still control
+delivery.
+
 ## Update Policies
 
 `policy` controls what happens after Bundle Drop hydrates its local state on startup:
