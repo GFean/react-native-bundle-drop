@@ -368,14 +368,22 @@ describe('CLI/scripts/upload-cli', () => {
 
   it('rejects conflicting inline and file release notes before bundling', async () => {
     const exitSpy = mockProcessExit();
+    const artifactDir = path.join(tempPackageRoot, 'ci-artifacts');
+    fs.mkdirSync(artifactDir, { recursive: true });
+    fs.writeFileSync(path.join(artifactDir, 'main.jsbundle'), 'old-bundle', 'utf8');
+    fs.writeFileSync(path.join(artifactDir, 'main.jsbundle.map'), 'old-map', 'utf8');
+    fs.writeFileSync(path.join(artifactDir, 'bundle-drop-result.json'), '{"success":true}', 'utf8');
     try {
       prepareAndroidUpload();
       await expect(upload('android', {
         version: '1.2.3', channel: 'develop', token: 'token',
-        releaseNotes: 'Inline notes', releaseNotesFile: './missing.md',
+        releaseNotes: 'Inline notes', releaseNotesFile: './missing.md', artifactDir,
       })).rejects.toMatchObject({ code: 1 });
 
       expect(mockLog.error).toHaveBeenCalledWith(expect.stringMatching(/release.notes.*both|both.*release.notes/i));
+      for (const name of ['main.jsbundle', 'main.jsbundle.map', 'bundle-drop-result.json']) {
+        expect(fs.existsSync(path.join(artifactDir, name))).toBe(false);
+      }
       expect(mockExecSync).not.toHaveBeenCalled();
       expect(mockAxiosNodePost).not.toHaveBeenCalled();
     } finally {
@@ -389,14 +397,18 @@ describe('CLI/scripts/upload-cli', () => {
     ['empty file', './empty.md'],
   ])('rejects an unreadable or empty release notes file before bundling: %s', async (_case, notesPath) => {
     const exitSpy = mockProcessExit();
+    const artifactDir = path.join(tempPackageRoot, 'ci-artifacts');
+    fs.mkdirSync(artifactDir, { recursive: true });
+    fs.writeFileSync(path.join(artifactDir, 'bundle-drop-result.json'), '{"success":true}', 'utf8');
     try {
       prepareAndroidUpload();
       fs.writeFileSync(path.join(tempProjectDir, 'empty.md'), ' \n\t', 'utf8');
       await expect(upload('android', {
-        version: '1.2.3', channel: 'develop', token: 'token', releaseNotesFile: notesPath,
+        version: '1.2.3', channel: 'develop', token: 'token', releaseNotesFile: notesPath, artifactDir,
       })).rejects.toMatchObject({ code: 1 });
 
       expect(mockLog.error).toHaveBeenCalledWith(expect.stringMatching(/release.notes.file/i));
+      expect(fs.existsSync(path.join(artifactDir, 'bundle-drop-result.json'))).toBe(false);
       expect(mockExecSync).not.toHaveBeenCalled();
       expect(mockAxiosNodePost).not.toHaveBeenCalled();
     } finally {

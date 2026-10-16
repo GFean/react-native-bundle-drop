@@ -233,6 +233,8 @@ export async function runUpload(
   log.info('🚀 React Native OTA Upload Initialized');
 
   const projectRoot = process.cwd();
+  const artifactDir = options.artifactDir ? path.resolve(options.artifactDir) : undefined;
+  prepareArtifactDirForRun(artifactDir);
   if (options.releaseNotes !== undefined && options.releaseNotesFile !== undefined) {
     log.error('❌ Use either --release-notes or --release-notes-file, not both.');
     process.exit(1);
@@ -257,8 +259,6 @@ export async function runUpload(
     releaseNotes = releaseNotes.slice(0, MAX_RELEASE_NOTES_LENGTH);
   }
 
-  const artifactDir = options.artifactDir ? path.resolve(options.artifactDir) : undefined;
-  prepareArtifactDirForRun(artifactDir);
   const configPath = path.resolve(projectRoot, 'bundle.drop.config.js');
   //eslint-disable-next-line
   const authPath = path.join(require('os').homedir(), '.bundle-drop', 'auth.json');
