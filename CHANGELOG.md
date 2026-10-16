@@ -5,6 +5,13 @@ All notable changes to this package are documented here.
 This project uses [Conventional Commits](https://www.conventionalcommits.org/) and
 [release-please](https://github.com/googleapis/release-please) to prepare releases.
 
+## [0.10.0](https://github.com/GFean/react-native-bundle-drop/compare/v0.9.0...v0.10.0) (2026-10-16)
+
+
+### Features
+
+* **cli:** improve upload feedback and release notes ([#52](https://github.com/GFean/react-native-bundle-drop/issues/52)) ([4f4640f](https://github.com/GFean/react-native-bundle-drop/commit/4f4640f897245b9b47fe020801a40eebfe081f36))
+
 ## [0.9.0](https://github.com/GFean/react-native-bundle-drop/compare/v0.8.1...v0.9.0) (2026-09-22)
 
 
