@@ -253,6 +253,27 @@ describe('CLI/cli', () => {
     }), expect.anything());
   });
 
+  it('passes a release notes file path to the upload action', async () => {
+    await parseCommand(
+      'upload', 'android', '--channel', 'develop',
+      '--release-notes-file', './notes for release.md',
+    );
+
+    expect(mockUpload).toHaveBeenCalledWith('android', expect.objectContaining({
+      channel: 'develop',
+      releaseNotesFile: './notes for release.md',
+    }), expect.anything());
+  });
+
+  it('shows the release notes file option in upload help', async () => {
+    const output: string[] = [];
+    const program = buildTestProgram(value => output.push(value));
+
+    await expect(program.parseAsync(['node', 'bundle-drop', 'upload', '--help']))
+      .rejects.toMatchObject({ code: 'commander.helpDisplayed' });
+    expect(output.join('')).toContain('--release-notes-file <path>');
+  });
+
   it.each([
     ['upload'],
     ['eas-receipt', '--build-id', 'build-123'],

@@ -19,6 +19,7 @@ const mockResolveExpoUploadIdentity = jest.fn();
 const mockExportProjectArtifact = jest.fn();
 const mockDetectProjectType = jest.fn();
 const mockEvaluateExpoConfig = jest.fn();
+const mockStopLoadingStatus = jest.fn();
 const mockLog = {
   info: jest.fn(),
   success: jest.fn(),
@@ -61,7 +62,7 @@ jest.mock('form-data', () => ({
 }));
 jest.mock('../../../CLI/utils/ui', () => ({
   log: mockLog,
-  startLoadingStatus: () => ({ stop: jest.fn() }),
+  startLoadingStatus: () => ({ stop: mockStopLoadingStatus }),
 }));
 jest.mock('../../../CLI/scripts/expo/build-receipt', () => ({
   resolveExpoUploadIdentity: (...args: unknown[]) => mockResolveExpoUploadIdentity(...args),
@@ -80,6 +81,7 @@ jest.mock('../../../expo', () => ({
 }));
 
 import uploadWithDefaultDependencies, { runUpload } from '../../../CLI/scripts/upload-cli';
+import { buildBundleDropLogo } from '../../../CLI/logo';
 
 describe('CLI/scripts/upload-cli', () => {
   const originalCwd = process.cwd();
@@ -97,9 +99,11 @@ describe('CLI/scripts/upload-cli', () => {
   const upload = (
     platform: string,
     options: Parameters<typeof runUpload>[1],
+    nowMs?: () => number,
   ) => runUpload(platform, options, {
     packageRoot: tempPackageRoot,
     spawnProcess: require('child_process').spawnSync,
+    nowMs,
     resolveModule: moduleId => {
       if (moduleId !== 'ts-node/dist/bin.js') throw new Error(`Unexpected module: ${moduleId}`);
       return path.join(tempPackageRoot, 'test-tools', 'ts-node.js');
@@ -124,6 +128,23 @@ describe('CLI/scripts/upload-cli', () => {
       JSON.stringify({ token, serverUrl: 'https://api.example.com' }),
       'utf8',
     );
+  };
+
+  const prepareAndroidUpload = (
+    serverUrl = 'https://api.example.com',
+    orgSlug = 'alpha-org',
+    projectSlug = 'demo-app',
+    dashboardUrl?: string,
+  ) => {
+    writeConfig(`module.exports = {
+      serverUrl: '${serverUrl}',
+      ${dashboardUrl === undefined ? '' : `dashboardUrl: ${JSON.stringify(dashboardUrl)},`}
+      org: { slug: '${orgSlug}' },
+      project: { slug: '${projectSlug}' },
+      runtimeVersion: { android: '1.0.0', ios: '1.0.0' },
+    };`);
+    prepareDist('android', '2.0.0');
+    mockAxiosNodePost.mockResolvedValue({ data: {} });
   };
 
   const prepareDist = (platform: 'ios' | 'android', runtimeVersion = '2.0.0') => {
@@ -217,6 +238,7 @@ describe('CLI/scripts/upload-cli', () => {
         : 'bare';
     });
     mockEvaluateExpoConfig.mockReset().mockReturnValue({ exp: {} });
+    mockStopLoadingStatus.mockReset();
     Object.values(mockLog).forEach(mockFn => mockFn.mockReset());
     formInstances.length = 0;
     process.exitCode = undefined;
@@ -342,6 +364,240 @@ describe('CLI/scripts/upload-cli', () => {
     expect(fs.existsSync(path.join(distDir, 'main.jsbundle'))).toBe(false);
     expect(fs.existsSync(path.join(distDir, 'assets'))).toBe(false);
     expect(fs.existsSync(path.join(distDir, 'expo-export-android'))).toBe(false);
+  });
+
+  it('rejects conflicting inline and file release notes before bundling', async () => {
+    const exitSpy = mockProcessExit();
+    try {
+      prepareAndroidUpload();
+      await expect(upload('android', {
+        version: '1.2.3', channel: 'develop', token: 'token',
+        releaseNotes: 'Inline notes', releaseNotesFile: './missing.md',
+      })).rejects.toMatchObject({ code: 1 });
+
+      expect(mockLog.error).toHaveBeenCalledWith(expect.stringMatching(/release.notes.*both|both.*release.notes/i));
+      expect(mockExecSync).not.toHaveBeenCalled();
+      expect(mockAxiosNodePost).not.toHaveBeenCalled();
+    } finally {
+      exitSpy.mockRestore();
+    }
+  });
+
+  it.each([
+    ['missing file', './missing.md'],
+    ['directory instead of file', '.'],
+    ['empty file', './empty.md'],
+  ])('rejects an unreadable or empty release notes file before bundling: %s', async (_case, notesPath) => {
+    const exitSpy = mockProcessExit();
+    try {
+      prepareAndroidUpload();
+      fs.writeFileSync(path.join(tempProjectDir, 'empty.md'), ' \n\t', 'utf8');
+      await expect(upload('android', {
+        version: '1.2.3', channel: 'develop', token: 'token', releaseNotesFile: notesPath,
+      })).rejects.toMatchObject({ code: 1 });
+
+      expect(mockLog.error).toHaveBeenCalledWith(expect.stringMatching(/release.notes.file/i));
+      expect(mockExecSync).not.toHaveBeenCalled();
+      expect(mockAxiosNodePost).not.toHaveBeenCalled();
+    } finally {
+      exitSpy.mockRestore();
+    }
+  });
+
+  it('preserves multiline release notes read relative to the invoking project', async () => {
+    prepareAndroidUpload();
+    const notes = '# Android update\n\n- Fix login\n- Keep the existing session.\n';
+    fs.mkdirSync(path.join(tempProjectDir, 'release'), { recursive: true });
+    fs.writeFileSync(path.join(tempProjectDir, 'release', 'notes.md'), notes, 'utf8');
+
+    await upload('android', {
+      version: '1.2.3', channel: 'develop', token: 'token',
+      releaseNotesFile: './release/notes.md',
+    });
+
+    expect(formInstances[0].entries).toContainEqual({ name: 'releaseNotes', value: notes });
+    const result = JSON.parse(fs.readFileSync(path.join(distDir, 'bundle-drop-result.json'), 'utf8'));
+    expect(result.releaseNotes).toBe(notes);
+  });
+
+  it('applies the inline release note length policy to file contents', async () => {
+    prepareAndroidUpload();
+    const notes = `# Notes\n${'a'.repeat(2010)}\n`;
+    fs.writeFileSync(path.join(tempProjectDir, 'notes.md'), notes, 'utf8');
+
+    await upload('android', {
+      version: '1.2.3', channel: 'develop', token: 'token', releaseNotesFile: './notes.md',
+    });
+
+    expect(formInstances[0].entries).toContainEqual({
+      name: 'releaseNotes', value: notes.slice(0, 2000),
+    });
+    expect(mockLog.warn).toHaveBeenCalledWith(expect.stringContaining('truncating to 2000 chars'));
+  });
+
+  it('summarizes returned bundle identity, real ZIP bytes, artifacts, and timings after upload', async () => {
+    prepareAndroidUpload();
+    const zipBytes = Buffer.from([0, 1, 2, 3, 255]);
+    fs.writeFileSync(path.join(distDir, 'bundle-android.zip'), zipBytes);
+    fs.writeFileSync(path.join(distDir, 'main.jsbundle.map'), 'source-map', 'utf8');
+    const artifactDir = path.join(tempPackageRoot, 'ci-artifacts');
+    mockAxiosNodePost.mockResolvedValue({ data: {
+      bundleId: 'bundle-123', bundleVersion: 12, bundleVersionLabel: 'v12',
+      hash: 'returned-hash', runtimeVersion: '2.0.0',
+    } });
+    mockExecSync.mockImplementation(() => {
+      expect(consoleLogSpy).toHaveBeenCalledWith(buildBundleDropLogo());
+      return '';
+    });
+
+    await upload('android', {
+      version: '1.2.3', channel: 'develop', token: 'token', sourcemap: true, artifactDir,
+    });
+
+    const result = JSON.parse(fs.readFileSync(path.join(artifactDir, 'bundle-drop-result.json'), 'utf8'));
+    expect(result).toEqual(expect.objectContaining({
+      orgSlug: 'alpha-org', projectSlug: 'demo-app', channel: 'develop', platform: 'android',
+      appVersion: '1.2.3', runtimeVersion: '2.0.0',
+      bundleVersion: 12, bundleVersionLabel: 'v12', hash: 'returned-hash',
+      zipSizeBytes: zipBytes.length,
+      sourceMapPath: path.join(artifactDir, 'main.jsbundle.map'),
+    }));
+    for (const key of ['bundlingAndPackagingMs', 'uploadMs', 'totalMs']) {
+      expect(result[key]).toEqual(expect.any(Number));
+      expect(result[key]).toBeGreaterThanOrEqual(0);
+    }
+    expect(result.totalMs).toBeGreaterThanOrEqual(result.uploadMs);
+    expect(result.totalMs).toBeGreaterThanOrEqual(result.bundlingAndPackagingMs);
+    expect(mockLog.success).toHaveBeenCalledWith(expect.stringContaining('Upload complete'));
+    const displayed = [
+      ...mockLog.label.mock.calls.flat(),
+      ...mockLog.success.mock.calls.flat(),
+      ...consoleLogSpy.mock.calls.flat(),
+    ].join('\n');
+    for (const value of ['alpha-org', 'demo-app', 'develop', 'android', '1.2.3', '2.0.0',
+      'v12', 'returned-hash']) {
+      expect(displayed).toContain(value);
+    }
+    expect(displayed).toMatch(/(5 B|5 bytes)/i);
+    expect(displayed).toContain(path.join(artifactDir, 'main.jsbundle.map'));
+  });
+
+  it('links an exact staging API upload to the staging project page with encoded slugs', async () => {
+    const dashboardUrl =
+      'https://develop.bundle-drop-web.pages.dev/organizations/alpha%20org/projects/demo%2Fapp';
+    prepareAndroidUpload('https://api-staging.bundledrop.app', 'alpha org', 'demo/app');
+
+    await upload('android', { version: '1.2.3', channel: 'develop', token: 'token' });
+
+    const result = JSON.parse(fs.readFileSync(path.join(distDir, 'bundle-drop-result.json'), 'utf8'));
+    expect(result.dashboardUrl).toBe(dashboardUrl);
+    expect(consoleLogSpy.mock.calls.flat().join(' ')).toContain(result.dashboardUrl);
+  });
+
+  it('links staging uploads without a configured dashboard URL', async () => {
+    prepareAndroidUpload('https://api-staging.bundledrop.app');
+
+    await upload('android', { version: '1.2.3', channel: 'develop', token: 'token' });
+
+    const result = JSON.parse(fs.readFileSync(path.join(distDir, 'bundle-drop-result.json'), 'utf8'));
+    expect(result.dashboardUrl).toBe(
+      'https://develop.bundle-drop-web.pages.dev/organizations/alpha-org/projects/demo-app',
+    );
+  });
+
+  it('links an exact production API upload to the production project page', async () => {
+    prepareAndroidUpload('https://api.bundledrop.app');
+
+    await upload('android', { version: '1.2.3', channel: 'develop', token: 'token' });
+
+    const result = JSON.parse(fs.readFileSync(path.join(distDir, 'bundle-drop-result.json'), 'utf8'));
+    expect(result.dashboardUrl).toBe(
+      'https://developer.bundledrop.app/organizations/alpha-org/projects/demo-app',
+    );
+    expect(consoleLogSpy.mock.calls.flat().join(' ')).toContain(result.dashboardUrl);
+  });
+
+  it('does not point a custom API upload at a hosted dashboard', async () => {
+    prepareAndroidUpload(
+      'https://api.example.com',
+      'alpha-org',
+      'demo-app',
+      'https://developer.bundledrop.app/organizations/alpha-org/projects/demo-app',
+    );
+
+    await upload('android', { version: '1.2.3', channel: 'develop', token: 'token' });
+
+    const result = JSON.parse(fs.readFileSync(path.join(distDir, 'bundle-drop-result.json'), 'utf8'));
+    expect(result.dashboardUrl).toBeNull();
+    expect(consoleLogSpy.mock.calls.flat().join(' ')).not.toContain('developer.bundledrop.app');
+  });
+
+  it('measures bundle/package, request, and total boundaries with the injected monotonic clock', async () => {
+    prepareAndroidUpload();
+    const ticks = [0, 10, 40, 50, 90, 100];
+    const nowMs = jest.fn(() => {
+      const tick = ticks.shift();
+      if (tick === undefined) throw new Error('Unexpected timing read');
+      return tick;
+    });
+
+    await upload('android', { version: '1.2.3', channel: 'develop', token: 'token' }, nowMs);
+
+    const result = JSON.parse(fs.readFileSync(path.join(distDir, 'bundle-drop-result.json'), 'utf8'));
+    expect(result).toEqual(expect.objectContaining({
+      bundlingAndPackagingMs: 30,
+      uploadMs: 40,
+      totalMs: 100,
+    }));
+    expect(nowMs).toHaveBeenCalledTimes(6);
+  });
+
+  it('reports a result-file write failure as a local warning after server upload succeeds', async () => {
+    prepareAndroidUpload();
+    const originalWriteFileSync = fs.writeFileSync.bind(fs);
+    const writeSpy = jest.spyOn(fs, 'writeFileSync');
+    mockAxiosNodePost.mockImplementation(async () => {
+      writeSpy.mockImplementation((filePath: fs.PathOrFileDescriptor, data: any, options?: any) => {
+        if (String(filePath).endsWith('bundle-drop-result.json')) throw new Error('disk full');
+        return originalWriteFileSync(filePath, data, options);
+      });
+      return { data: { bundleId: 'uploaded-bundle' } };
+    });
+
+    try {
+      await upload('android', { version: '1.2.3', channel: 'develop', token: 'token' });
+      expect(mockAxiosNodePost).toHaveBeenCalledTimes(1);
+      expect(process.exitCode).not.toBe(1);
+      expect(mockLog.success).toHaveBeenCalledWith(expect.stringContaining('Upload complete'));
+      expect(mockLog.warn).toHaveBeenCalledWith(expect.stringMatching(/result|report|disk full/i));
+      expect(mockLog.error).not.toHaveBeenCalledWith(expect.stringContaining('Upload failed'));
+    } finally {
+      writeSpy.mockRestore();
+    }
+  });
+
+  it('keeps upload success when the final summary cannot be rendered', async () => {
+    prepareAndroidUpload();
+    const stderrWriteSpy = jest.spyOn(process.stderr, 'write').mockImplementation(() => true);
+    mockAxiosNodePost.mockImplementation(async () => {
+      consoleLogSpy.mockImplementation(() => { throw new Error('terminal unavailable'); });
+      mockLog.warn.mockImplementation(() => { throw new Error('warning logger unavailable'); });
+      return { data: { bundleId: 'uploaded-bundle' } };
+    });
+
+    try {
+      await upload('android', { version: '1.2.3', channel: 'develop', token: 'token' });
+
+      expect(mockAxiosNodePost).toHaveBeenCalledTimes(1);
+      expect(process.exitCode).not.toBe(1);
+      expect(stderrWriteSpy).toHaveBeenCalledWith(
+        expect.stringContaining('summary rendering failed: terminal unavailable'),
+      );
+      expect(mockLog.error).not.toHaveBeenCalledWith(expect.stringContaining('Upload failed'));
+      expect(fs.existsSync(path.join(distDir, 'bundle-drop-result.json'))).toBe(true);
+    } finally {
+      stderrWriteSpy.mockRestore();
+    }
   });
 
   it('prefers the compiled bundle script when it exists in the package root', async () => {
@@ -714,6 +970,66 @@ describe('CLI/scripts/upload-cli', () => {
       expect.stringContaining('"error": "upload failed"'),
     );
     expect(fs.existsSync(path.join(distDir, 'main.jsbundle'))).toBe(false);
+  });
+
+  it('warns if a failed upload cannot write its local failure result', async () => {
+    prepareAndroidUpload();
+    const artifactDir = path.join(tempPackageRoot, 'failed-artifacts');
+    mockAxiosNodePost.mockRejectedValue(new Error('server unavailable'));
+    const originalWriteFileSync = fs.writeFileSync.bind(fs);
+    const writeSpy = jest.spyOn(fs, 'writeFileSync').mockImplementation(
+      (filePath: fs.PathOrFileDescriptor, data: any, options?: any) => {
+        if (String(filePath).endsWith('bundle-drop-result.json')) throw new Error('disk full');
+        return originalWriteFileSync(filePath, data, options);
+      },
+    );
+
+    try {
+      await upload('android', {
+        version: '1.2.3', channel: 'develop', token: 'token', artifactDir,
+      });
+      expect(process.exitCode).toBe(1);
+      expect(mockLog.error).toHaveBeenCalledWith('Upload failed: server unavailable');
+      expect(mockLog.warn).toHaveBeenCalledWith(
+        'Could not write failed upload result: disk full',
+      );
+    } finally {
+      writeSpy.mockRestore();
+    }
+  });
+
+  it('warns if artifact cleanup fails after a rejected upload', async () => {
+    prepareAndroidUpload();
+    mockAxiosNodePost.mockRejectedValue(new Error('server unavailable'));
+    const originalRmSync = fs.rmSync.bind(fs);
+    const rmSpy = jest.spyOn(fs, 'rmSync').mockImplementation((filePath: fs.PathLike, options: any) => {
+      if (String(filePath) === path.join(distDir, 'assets')) throw new Error('directory locked');
+      return originalRmSync(filePath, options);
+    });
+
+    try {
+      await upload('android', { version: '1.2.3', channel: 'develop', token: 'token' });
+      expect(process.exitCode).toBe(1);
+      expect(mockLog.error).toHaveBeenCalledWith('Upload failed: server unavailable');
+      expect(mockLog.warn).toHaveBeenCalledWith('Cleanup failed: directory locked');
+    } finally {
+      rmSpy.mockRestore();
+    }
+  });
+
+  it('warns if upload status cleanup fails after the request completes', async () => {
+    prepareAndroidUpload();
+    mockStopLoadingStatus.mockImplementationOnce(() => {
+      throw new Error('terminal unavailable');
+    });
+
+    await upload('android', { version: '1.2.3', channel: 'develop', token: 'token' });
+
+    expect(process.exitCode).not.toBe(1);
+    expect(mockLog.warn).toHaveBeenCalledWith(
+      'Could not stop upload status: terminal unavailable',
+    );
+    expect(fs.existsSync(path.join(distDir, 'bundle-drop-result.json'))).toBe(true);
   });
 
   it('recreates the result directory before writing upload metadata when needed', async () => {
@@ -1538,7 +1854,7 @@ describe('CLI/scripts/upload-cli', () => {
 };`);
     const artifact = prepareExpoDist('ios', 'expo-runtime');
     mockResolveExpoUploadIdentity.mockResolvedValue(identity);
-    mockExportProjectArtifact.mockResolvedValue(artifact);
+    mockExportProjectArtifact.mockResolvedValue({ ...artifact, sourceMapPath: undefined });
     mockAxiosNodePost.mockResolvedValue({ data: {} });
 
     await upload('ios', {

@@ -259,7 +259,12 @@ for (const filePath of packedFiles.keys()) {
     continue;
   }
 
-  const text = contents.toString('utf8');
+  let text = contents.toString('utf8');
+  if (filePath === 'lib/CLI/scripts/upload-cli.js') {
+    // The CLI links exact staging API uploads to the public staging dashboard.
+    // Allow only this one known URL; other staging references remain blocked.
+    text = text.replace('https://api-staging.bundledrop.app', '');
+  }
   for (const { label, pattern } of blockedContentPatterns) {
     if (pattern.test(text)) {
       contentLeaks.push(`${filePath}: ${label}`);

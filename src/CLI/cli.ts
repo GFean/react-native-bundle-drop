@@ -182,6 +182,7 @@ ${chalk.bold.cyan('Common Usage:')}
   ${chalk.gray('bundle-drop upload android --version 1.2.3 --channel develop')}
   ${chalk.gray('bundle-drop upload ios --plist-file ios/Info.plist --channel develop')}
   ${chalk.gray('bundle-drop upload android --buildgradle-path android/app/build.gradle --channel develop --release-notes "Fixes"')}
+  ${chalk.gray('bundle-drop upload android --channel develop --release-notes-file ./release-notes.md')}
 
 ${chalk.gray('Docs →')} ${chalk.underline.gray(DOCS_CLI_URL)}
 ${chalk.gray('Uploading →')} ${chalk.underline.gray(DOCS_UPLOADING_URL)}
@@ -227,6 +228,7 @@ ${chalk.bold('Examples:')}
     .option('--buildgradle-path <path>', 'Optional Android build.gradle path to read versionName')
     .option('--channel <name>', 'Target channel name to associate the bundle')
     .option('--release-notes <text>', 'Release notes (max 2000 chars)')
+    .option('--release-notes-file <path>', 'Read UTF-8 release notes from a file (max 2000 chars)')
     .option('--token <token>', 'Personal Access Token (alternative to `bundle-drop login`)')
     .option('--author <name>', 'Override the author name stored with the bundle')
     .option('--sourcemap', 'Generate source maps alongside the bundle for error tracking')
@@ -240,6 +242,7 @@ ${chalk.bold('Examples:')}
   ${chalk.gray('bundle-drop upload android --version 1.2.3 --channel develop')}
   ${chalk.gray('bundle-drop upload ios --plist-file ios/Info.plist --channel develop')}
   ${chalk.gray('bundle-drop upload android --buildgradle-path android/app/build.gradle --channel beta --release-notes "Bug fixes"')}
+  ${chalk.gray('bundle-drop upload android --channel develop --release-notes-file ./release-notes.md')}
   ${chalk.gray('bundle-drop upload android --version 1.2.3 --channel develop --token bdp_pat_xxx')}
   ${chalk.gray('bundle-drop upload android --version 1.2.3 --channel develop --sourcemap --artifact-dir ./build/bundledrop')}
 

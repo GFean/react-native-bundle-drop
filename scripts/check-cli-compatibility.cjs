@@ -54,6 +54,8 @@ try {
     assert.ok(run([cli, command, '--help'], fixture).includes('Usage:'), command);
   }
   assert.ok(run([cli, 'help', 'sight'], fixture).includes('--compare'));
+  const uploadHelp = run([cli, 'upload', '--help'], fixture);
+  assert.ok(uploadHelp.includes('--release-notes-file <path>'), 'upload help must describe release notes files');
   const version = JSON.parse(fs.readFileSync(path.join(installed, 'package.json'))).version;
   assert.ok(run([cli, '--cli-version'], fixture).includes(version));
   assert.match(run([cli, 'sight', '--does-not-exist'], fixture, 1), /unknown option/);
