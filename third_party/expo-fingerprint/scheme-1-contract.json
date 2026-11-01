@@ -11,7 +11,7 @@
   "typescriptVersion": "5.9.3",
   "dependencies": {
     "adm-zip": "0.6.1",
-    "axios": "1.20.0",
+    "axios": "1.21.0",
     "chalk": "4.1.2",
     "commander": "14.0.3",
     "debug": "4.4.3",
@@ -31,7 +31,7 @@
     "diff@^4.0.1": "4.0.4",
     "@xmldom/xmldom@^0.8.8": "0.8.13"
   },
-  "lockfileSha256": "cfe179fabba0c9a041ac41ede170e336451e0c3d93493f86347ae57802e58166",
+  "lockfileSha256": "bcf47a1e070b0c9144ec6700f4edd51e8eeb39534b0e64a190b7011069c28f5c",
   "sourceFiles": {
     "scripts/build-fingerprint.cjs": "5f2e6ac05b330e61e81ae5a3919d742e47b547b85ed408e163723d93f979757a",
     "scripts/check-fingerprint-contract.cjs": "741373a90854cadabfc1d86d3104841a326371ee894f9aa6ac11eeed56638b32",
