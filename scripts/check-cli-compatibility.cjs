@@ -49,7 +49,8 @@ try {
   const cli = path.join(installed, 'lib/CLI/cli.js');
   const axiosRoot = path.dirname(require.resolve('axios/package.json', { paths: [installed] }));
   const redirects = require(require.resolve('follow-redirects/package.json', { paths: [axiosRoot] }));
-  assert(require('semver').gte(redirects.version, '1.16.2'), 'Fresh packed consumer must resolve the patched redirect transport');
+  const semver = require(require.resolve('semver', { paths: [installed] }));
+  assert(semver.gte(redirects.version, '1.16.2'), 'Fresh packed consumer must resolve the patched redirect transport');
   const installedGlob = require(require.resolve('glob/package.json', { paths: [installed] }));
   const matcherPath = require.resolve('minimatch', { paths: [installed] });
   const { Minimatch } = require(matcherPath);
