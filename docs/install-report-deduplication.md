@@ -14,7 +14,10 @@ not unlimited history across project switches or application reinstalls.
 
 Reporting remains best effort. An HTTP failure leaves the target eligible for
 retry. A history persistence failure is logged; it must not block native safety
-recovery. A crash or disk failure after the server accepts a receipt but before
+recovery. Android UTF-8 writes use a completed temporary file and same-directory
+atomic rename, preserving the previous file when replacement fails. A malformed
+older ledger resets to an empty scoped history without importing unscoped legacy
+acknowledgements, so reporting can resume. A crash or disk failure after the server accepts a receipt but before
 local persistence can still cause a later retry; the local ledger cannot provide
 transactional exactly-once delivery across the network and device storage.
 

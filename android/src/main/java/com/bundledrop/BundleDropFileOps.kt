@@ -32,6 +32,26 @@ object BundleDropFileOps {
     }
   }
 
+  fun writeUtf8Atomically(file: File, content: String) {
+    val target = file.absoluteFile
+    val parent = target.parentFile ?: throw java.io.IOException("Missing parent directory")
+    parent.mkdirs()
+    val temporary = File.createTempFile(".bundle-drop-write-", ".tmp", parent)
+    try {
+      FileOutputStream(temporary).use { output ->
+        output.write(content.toByteArray(Charsets.UTF_8))
+        output.fd.sync()
+      }
+      // Same-directory rename replaces the file atomically on Android. Never
+      // delete the destination or fall back to copying over committed content.
+      if (!temporary.renameTo(target)) {
+        throw java.io.IOException("Could not atomically replace ${target.name}")
+      }
+    } finally {
+      temporary.delete()
+    }
+  }
+
   fun unzipFile(
     zipPath: String,
     destPath: String,

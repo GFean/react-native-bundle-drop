@@ -22,6 +22,29 @@ class BundleDropFileOpsTest {
   @get:Rule
   val tempFolder = TemporaryFolder()
 
+  @Test
+  fun `atomic UTF8 writes create and replace complete content`() {
+    val file = File(tempFolder.root, "history/installed-report-history.json")
+    BundleDropFileOps.writeUtf8Atomically(file, "{\"hashes\":[\"first\"]}")
+    assertEquals("{\"hashes\":[\"first\"]}", file.readText())
+    BundleDropFileOps.writeUtf8Atomically(file, "{\"hashes\":[\"second-π\"]}")
+    assertEquals("{\"hashes\":[\"second-π\"]}", file.readText())
+    assertEquals(listOf(file.name), file.parentFile!!.list()!!.toList())
+  }
+
+  @Test
+  fun `failed atomic replacement preserves destination and removes temporary file`() {
+    val destination = tempFolder.newFolder("history")
+    val retained = File(destination, "retained.json").apply { writeText("original") }
+    try {
+      BundleDropFileOps.writeUtf8Atomically(destination, "replacement")
+      fail("Replacing a nonempty directory must fail")
+    } catch (_: java.io.IOException) {
+      assertEquals("original", retained.readText())
+      assertFalse(tempFolder.root.list()!!.any { it.startsWith(".bundle-drop-write-") })
+    }
+  }
+
   // ---------------------------------------------------------------------------
   // URL scheme validation
   // ---------------------------------------------------------------------------

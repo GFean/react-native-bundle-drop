@@ -21,12 +21,18 @@ export function mergeInstalledReportHistory(
   const path = `${BUNDLE_DROP_ROOT}/installed-report-history.json`;
   const scope = JSON.stringify([config.serverUrl, config.org.slug, config.project.slug, installId]);
   const operation = pendingWrite.then(async () => {
-    let existing: InstalledReportHistory | undefined;
+    let existing: InstalledReportHistory | null | undefined;
     if (await RNFS.exists(path)) {
-      existing = JSON.parse(await RNFS.readFile(path, 'utf8'));
+      const contents = await RNFS.readFile(path, 'utf8');
+      try {
+        existing = JSON.parse(contents);
+      } catch (error) {
+        if (!(error instanceof SyntaxError)) throw error;
+        existing = null;
+      }
       if (typeof existing?.scope !== 'string' || !Array.isArray(existing.hashes)
         || existing.hashes.some(hash => typeof hash !== 'string')) {
-        throw new Error('Invalid installed-report history');
+        existing = null;
       }
     }
     // Legacy metadata has no scope. Migrate it only when creating the ledger,
@@ -34,7 +40,7 @@ export function mergeInstalledReportHistory(
     const sameScope = existing?.scope === scope;
     const hashes = [...new Set([
       ...(sameScope ? existing.hashes : []),
-      ...(!existing ? legacyHashes : []),
+      ...(existing === undefined ? legacyHashes : []),
     ])];
     if (reportedHash) {
       const previous = hashes.indexOf(reportedHash);

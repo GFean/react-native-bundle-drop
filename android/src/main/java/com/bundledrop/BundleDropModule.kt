@@ -206,7 +206,7 @@ class BundleDropModule(reactContext: ReactApplicationContext) :
         val bytes = android.util.Base64.decode(content, android.util.Base64.DEFAULT)
         file.writeBytes(bytes)
       } else {
-        file.writeText(content, Charsets.UTF_8)
+        BundleDropFileOps.writeUtf8Atomically(file, content)
       }
       promise.resolve(null)
     } catch (e: Exception) {

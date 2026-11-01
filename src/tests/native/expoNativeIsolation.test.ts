@@ -13,7 +13,7 @@ describe('Expo native target isolation', () => {
     const expoPodspec = readPackageFile('BundleDropExpo.podspec');
     const expoAndroidBuild = readPackageFile('expo/android/build.gradle');
 
-    expect(packageManifest.nativeVersion).toBe('0.6.3');
+    expect(packageManifest.nativeVersion).toBe('0.6.4');
     expect(barePodspec).toContain('native_version = package["nativeVersion"] || package["version"]');
     expect(expoPodspec).toContain('native_version = package["nativeVersion"] || package["version"]');
     expect(expoAndroidBuild).toContain(
