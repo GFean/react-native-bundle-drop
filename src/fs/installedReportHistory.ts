@@ -26,8 +26,7 @@ export function mergeInstalledReportHistory(
       const contents = await RNFS.readFile(path, 'utf8');
       try {
         existing = JSON.parse(contents);
-      } catch (error) {
-        if (!(error instanceof SyntaxError)) throw error;
+      } catch {
         existing = null;
       }
       if (typeof existing?.scope !== 'string' || !Array.isArray(existing.hashes)
