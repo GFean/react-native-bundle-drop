@@ -5,8 +5,10 @@ import path from 'path';
 import { measureInstalledSightOta, measureSightOta, type MeasureSightOtaOptions } from '../../../CLI/scripts/sight-ota';
 import { resolveExpoBuildIdentity } from '../../../expo/buildIdentity';
 import { runComparisonProcess } from '../../../CLI/scripts/sight-compare/process';
+import { calculateFingerprintSync } from '../../../fingerprint/client';
 
 jest.mock('../../../expo/buildIdentity');
+jest.mock('../../../fingerprint/client');
 jest.mock('../../../CLI/scripts/sight-compare/process', () => ({
   ...jest.requireActual('../../../CLI/scripts/sight-compare/process'),
   runComparisonProcess: jest.fn(),
@@ -74,6 +76,7 @@ describe('Sight local OTA measurements', () => {
     jest.spyOn(console, 'error').mockImplementation(() => undefined);
     jest.mocked(resolveExpoBuildIdentity).mockReset();
     jest.mocked(runComparisonProcess).mockReset();
+    jest.mocked(calculateFingerprintSync).mockReset();
   });
   afterEach(() => {
     jest.restoreAllMocks();
@@ -90,6 +93,30 @@ describe('Sight local OTA measurements', () => {
     if (result.status === 'available') expect(result.zipBytes).toBe(fs.statSync(path.join(options.workDirectory, 'bundle-android.zip')).size);
     expect(fs.readFileSync(options.bundlePath)).toEqual(before);
     expect(fs.readFileSync(path.join(options.workDirectory, 'bundle-android.zip')).subarray(0, 2).toString()).toBe('PK');
+  });
+
+  it('uses the independently collected fingerprint rather than its manual boundary', async () => {
+    configuration({ runtimeVersion: { compatibilitySource: 'fingerprint', android: 'boundary', fingerprint: { schemeVersion: 1 } }, hermesBytecode: false });
+    const runtimeVersion = 'bdfp1-' + 'a'.repeat(64);
+    jest.mocked(calculateFingerprintSync).mockReturnValue({ runtimeVersion } as any);
+    expect(await measureInstalledSightOta(options)).toMatchObject({ status: 'available' });
+    const AdmZip = require('adm-zip');
+    const zip = new AdmZip(path.join(options.workDirectory, 'bundle-android.zip'));
+    expect(JSON.parse(zip.readAsText('bundle-manifest.json')).runtimeVersion).toBe(runtimeVersion);
+    expect(calculateFingerprintSync).toHaveBeenCalledWith(root, 'android');
+  });
+
+  it('supports automatic fingerprint identity and never falls back after collection failure', async () => {
+    configuration({ runtimeVersion: { compatibilitySource: 'fingerprint' }, hermesBytecode: false });
+    jest.mocked(calculateFingerprintSync).mockImplementation(() => { throw new Error('private collector detail'); });
+    expect(await measureInstalledSightOta(options)).toEqual({ status: 'unavailable', reason: 'Native fingerprint collection failed for android OTA packaging.' });
+    expect(fs.existsSync(path.join(options.workDirectory, 'bundle-android.zip'))).toBe(false);
+  });
+
+  it('keeps Expo policy delegation unavailable for bare measurements', async () => {
+    configuration({ runtimeVersion: { source: 'expo' }, hermesBytecode: false });
+    expect(await measureInstalledSightOta(options)).toEqual({ status: 'unavailable', reason: 'Bare projects cannot delegate runtime identity to Expo.' });
+    expect(calculateFingerprintSync).not.toHaveBeenCalled();
   });
 
   it.each(['missing-config', 'missing-runtime', 'empty-runtime', 'missing-native', 'two-native', 'dynamic-version', 'two-versions', 'invalid-version', 'invalid-config'])('leaves missing or ambiguous identity unavailable: %s', async scenario => {

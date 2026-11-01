@@ -6,6 +6,7 @@ import type { InstallResult } from '../install/bundleInstallShared';
 import { installFromPatchSet } from './installFromPatchSet';
 import { isSupportedPatchAlgorithm, type SupportedPatchAlgorithm } from './patchOperations';
 import { isArtifactCapabilityRejected } from '../runtime-delivery/artifactCapability';
+import { isInstallPhaseError } from '../errors';
 
 export type PatchTransportTarget = {
   mode?: 'full' | 'patch';
@@ -22,6 +23,7 @@ type TryInstallPatchTransportParams = {
   projectSlug: string;
   platform: 'ios' | 'android';
   runtimeVersionValue?: string;
+  allowUnmanagedPatchAuthFallback?: boolean;
   statusCb?: (status: string) => void;
 };
 
@@ -83,6 +85,7 @@ export const tryInstallPatchTransport = async ({
   projectSlug,
   platform,
   runtimeVersionValue,
+  allowUnmanagedPatchAuthFallback = false,
   statusCb,
 }: TryInstallPatchTransportParams): Promise<InstallResult | null> => {
   if (
@@ -116,7 +119,10 @@ export const tryInstallPatchTransport = async ({
       statusCb,
     });
   } catch (e) {
-    if (isArtifactCapabilityRejected(e)) throw e;
+    if (isArtifactCapabilityRejected(e) && !(
+      allowUnmanagedPatchAuthFallback &&
+      isInstallPhaseError(e) && e.downloadSource === 'patch-set'
+    )) throw e;
     await reportPatchInstallFailureBeforeFallback({
       projectSlug,
       platform,

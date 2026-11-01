@@ -71,7 +71,9 @@ export function writeNativeRuntimeIdentity(
   const identity = resolveNativeRuntimeIdentity(options.projectRoot, options.platform);
   const content = `${JSON.stringify(identity)}\n`;
   if (options.outputPath) {
-    writeAtomically(options.outputPath, content);
+    if (!fs.existsSync(options.outputPath) || fs.readFileSync(options.outputPath, 'utf8') !== content) {
+      writeAtomically(options.outputPath, content);
+    }
   }
   return identity;
 }

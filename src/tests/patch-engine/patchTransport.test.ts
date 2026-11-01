@@ -155,7 +155,7 @@ describe('patch-engine/patchTransport', () => {
     }
   });
 
-  it('surfaces capability rejection without telemetry or full fallback conversion', async () => {
+  it('surfaces capability rejection unless the manager explicitly permits unmanaged patch fallback', async () => {
     const rejected = new InstallPhaseError('download', new Error('HTTP 401: expired'));
     mockInstallFromPatchSet.mockRejectedValueOnce(rejected);
 

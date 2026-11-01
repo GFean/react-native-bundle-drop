@@ -393,6 +393,103 @@ describe('manager/downloadAndInstall', () => {
     }
   });
 
+  describe('unmanaged patch artifact authorization fallback', () => {
+    const hash = '9'.repeat(64);
+    const selection = {
+      action: 'INSTALL' as const, channelName: 'General', hash,
+      runtimeVersion: '1.0.0', mode: 'patch' as const, baseHash: '8'.repeat(64),
+      patchSet: {
+        algorithm: 'xdelta3-vcdiff' as const, patchSetHash: 'patch-hash',
+        patchesUrl: 'https://cdn.example.com/patch.zip',
+      },
+      fallback: { mode: 'full' as const, downloadUrl: 'https://cdn.example.com/supplied-full.zip' },
+    };
+
+    beforeEach(() => {
+      mockCheckForUpdate.mockResolvedValue(selection);
+      jest.spyOn(console, 'warn').mockImplementation(() => undefined);
+      jest.spyOn(console, 'error').mockImplementation(() => undefined);
+    });
+
+    const rejectPatch = (status: number) => {
+      mockInstallFromPatchSet.mockRejectedValueOnce(
+        new InstallPhaseError('download', new Error(`HTTP ${status}: denied`), 'patch-set'),
+      );
+    };
+
+    it.each([401, 403])('tries the supplied full ZIP once after patch HTTP %s', async status => {
+      rejectPatch(status);
+      mockInstallFromZip.mockResolvedValueOnce({
+        bundlePath: `/mock/doc/bundle-drop/bundles/${hash}/main.jsbundle`,
+        metadataFromZip: { runtimeVersion: '1.0.0' },
+      });
+      await expect(downloadUpdate()).resolves.toMatchObject({ status: 'staged', hash });
+      expect(mockInstallFromPatchSet).toHaveBeenCalledTimes(1);
+      expect(mockInstallFromZip).toHaveBeenCalledTimes(1);
+      expect(mockInstallFromZip).toHaveBeenCalledWith(expect.objectContaining({
+        downloadUrl: selection.fallback.downloadUrl, hash,
+      }));
+      expect(mockAuthorizeRuntimeDeliveryUpdate).toHaveBeenCalledTimes(1);
+      expect(mockActivateStartupCandidateNative).toHaveBeenCalledTimes(1);
+    });
+
+    it('fails without discovering a URL when fallback is missing', async () => {
+      mockCheckForUpdate.mockResolvedValueOnce({ ...selection, fallback: undefined });
+      await expect(downloadUpdate()).rejects.toMatchObject({ code: 'DOWNLOAD_URL_MISSING' });
+      expect(mockInstallFromZip).not.toHaveBeenCalled();
+      expect(mockActivateStartupCandidateNative).not.toHaveBeenCalled();
+    });
+
+    it.each([
+      new InstallPhaseError('download', new Error('HTTP 403: full denied')),
+      new InstallPhaseError('install', new Error('Bundle manifest hash mismatch')),
+    ])('does not activate or retry when the full ZIP fails: %s', async error => {
+      rejectPatch(403);
+      mockInstallFromZip.mockRejectedValueOnce(error);
+      await expect(downloadUpdate()).rejects.toBeInstanceOf(BundleDropError);
+      expect(mockInstallFromZip).toHaveBeenCalledTimes(1);
+      expect(mockActivateStartupCandidateNative).not.toHaveBeenCalled();
+      expect(mockAuthorizeRuntimeDeliveryUpdate).toHaveBeenCalledTimes(1);
+    });
+
+    it.each(['resolve', 'authorize'])('never downloads after %s denial', async boundary => {
+      const denial = new Error('HTTP 403: API denied');
+      if (boundary === 'resolve') mockCheckForUpdate.mockRejectedValueOnce(denial);
+      else mockAuthorizeRuntimeDeliveryUpdate.mockRejectedValueOnce(denial);
+      await expect(downloadUpdate()).rejects.toBe(denial);
+      expect(mockInstallFromPatchSet).not.toHaveBeenCalled();
+      expect(mockInstallFromZip).not.toHaveBeenCalled();
+      expect(mockActivateStartupCandidateNative).not.toHaveBeenCalled();
+    });
+
+    it('does not treat a manifest or asset denial as patch ZIP denial', async () => {
+      mockInstallFromPatchSet.mockRejectedValueOnce(
+        new InstallPhaseError('download', new Error('HTTP 403: manifest denied')),
+      );
+      await expect(downloadUpdate()).rejects.toMatchObject({ code: 'DOWNLOAD_FAILED' });
+      expect(mockInstallFromZip).not.toHaveBeenCalled();
+      expect(mockActivateStartupCandidateNative).not.toHaveBeenCalled();
+    });
+
+    it.each([401, 403])('keeps managed patch HTTP %s on its bounded authorization path', async status => {
+      mockCheckForUpdate.mockResolvedValueOnce({
+        ...selection,
+        runtimeDelivery: {
+          generation: 11, targetReleaseRef: 'release-11', selectedMode: 'patch',
+          baseHash: selection.baseHash, patchAlgorithm: 'xdelta3-vcdiff',
+          patchSetHash: selection.patchSet.patchSetHash, patchArtifactRef: 'patch-ref',
+        },
+      });
+      rejectPatch(status);
+      rejectPatch(status);
+      await expect(downloadUpdate()).rejects.toMatchObject({ code: 'DOWNLOAD_FAILED' });
+      expect(mockAuthorizeRuntimeDeliveryUpdate).toHaveBeenCalledTimes(2);
+      expect(mockInstallFromPatchSet).toHaveBeenCalledTimes(2);
+      expect(mockInstallFromZip).not.toHaveBeenCalled();
+      expect(mockActivateStartupCandidateNative).not.toHaveBeenCalled();
+    });
+  });
+
   it('does not reauthorize v1 downloads or non-capability failures', async () => {
     mockCheckForUpdate.mockResolvedValue({
       action: 'INSTALL', channelName: 'General', hash: 'hash-v1',

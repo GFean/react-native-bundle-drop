@@ -206,7 +206,7 @@ class BundleDropModule(reactContext: ReactApplicationContext) :
         val bytes = android.util.Base64.decode(content, android.util.Base64.DEFAULT)
         file.writeBytes(bytes)
       } else {
-        file.writeText(content, Charsets.UTF_8)
+        BundleDropFileOps.writeUtf8Atomically(file, content)
       }
       promise.resolve(null)
     } catch (e: Exception) {
@@ -415,6 +415,9 @@ class BundleDropModule(reactContext: ReactApplicationContext) :
 
   override fun getConstants(): MutableMap<String, Any> {
     val map = mutableMapOf<String, Any>()
+    @Suppress("UNCHECKED_CAST")
+    (map as MutableMap<String, Any?>)["nativeRuntimeVersion"] =
+      BundleDropNativePaths.readEmbeddedRuntimeVersion(reactApplicationContext)
     map["startupRecoveryProtocolVersion"] = BundleDropStartupRecoveryController.PROTOCOL_VERSION
     @Suppress("UNCHECKED_CAST")
     (map as MutableMap<String, Any?>)["startupRecoverySelectedHash"] =

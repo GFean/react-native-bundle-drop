@@ -9,6 +9,7 @@ import { buildBundleDropLogo } from '../logo';
 import { log, startLoadingStatus } from '../utils/ui';
 import { readXmlPlist } from '../utils/read-xml-plist';
 import { resolveIosPlistVersion } from '../../scripts/resolve-ios-version';
+import { expoBuildNumber, iosBuildNumber, normalizeBuildNumber, readAndroidBuildNumber } from '../../scripts/nativeBuildNumber';
 import {
   assertExpoUpdatesDoesNotOwnStartup,
   detectProjectType,
@@ -40,6 +41,7 @@ type UploadOptions = {
   sourcemap?: boolean;
   artifactDir?: string;
   buildReceipt?: string;
+  buildNumber?: string;
 };
 
 type UploadDependencies = {
@@ -346,6 +348,7 @@ export async function runUpload(
   log.label('Channel', channel);
 
   let version: string | undefined = options.version;
+  let parsedIosPlist: Record<string, unknown> | undefined;
   let expoBuildIdentity: import('../../expo').ExpoBuildIdentity | undefined;
   const buildGradlePath = options.buildGradlePath || (options as any).buildgradlePath;
 
@@ -393,6 +396,7 @@ export async function runUpload(
 
       try {
         const parsed = await readXmlPlist(options.plistFile);
+        parsedIosPlist = parsed;
         const rawVersion = Object.prototype.hasOwnProperty.call(parsed, 'CFBundleShortVersionString')
           ? parsed.CFBundleShortVersionString
           : undefined;
@@ -435,6 +439,31 @@ export async function runUpload(
     process.exit(1);
   }
 
+  let buildNumber: string | null = null;
+  if (expoBuildIdentity) buildNumber = expoBuildNumber(expoBuildIdentity);
+  else if (options.buildNumber === undefined) {
+    try {
+      if (platform === 'ios' && options.plistFile) {
+        const plist = parsedIosPlist ?? await readXmlPlist(options.plistFile);
+        buildNumber = iosBuildNumber(plist.CFBundleVersion, projectRoot);
+      } else if (platform === 'android') {
+        buildNumber = readAndroidBuildNumber(projectRoot, buildGradlePath);
+      }
+    } catch (error) {
+      log.warn(`Build number is unavailable: ${(error as Error).message}. Continuing without build-number metadata.`);
+    }
+  }
+  if (options.buildNumber !== undefined) {
+    const explicit = normalizeBuildNumber(options.buildNumber, platform as 'ios' | 'android');
+    if (!explicit || (expoBuildIdentity && explicit !== buildNumber)) {
+      log.error(expoBuildIdentity && explicit
+        ? '❌ --build-number does not match the resolved Expo build identity.'
+        : '❌ --build-number must be a valid Android versionCode or numeric iOS build number.');
+      process.exit(1);
+    }
+    buildNumber = explicit;
+  }
+  if (buildNumber) log.label('Build Number', buildNumber);
   log.label('App Version', version);
   console.log();
 
@@ -474,6 +503,7 @@ export async function runUpload(
         env: {
           ...process.env,
           BUNDLE_DROP_APP_VERSION: version,
+          BUNDLE_DROP_BUILD_NUMBER: buildNumber ?? '',
         },
       });
       if (result.error) throw result.error;
@@ -552,6 +582,7 @@ export async function runUpload(
         orgSlug,
         projectSlug,
         runtimeVersion,
+        buildNumber,
         packageVersion: packageVersion ?? null,
         releaseNotes: releaseNotes ?? null,
         author: options.author ?? null,
@@ -584,6 +615,7 @@ export async function runUpload(
     orgSlug,
     projectSlug,
     runtimeVersion: responseData.runtimeVersion ?? runtimeVersion ?? null,
+    buildNumber: responseData.buildNumber ?? buildNumber,
     packageVersion: responseData.packageVersion ?? packageVersion ?? null,
     bundleId: responseData.bundleId ?? null,
     bundleVersion: responseData.bundleVersion ?? null,

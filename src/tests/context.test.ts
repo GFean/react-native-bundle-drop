@@ -8,8 +8,8 @@ type BundleDropConfigModule = {
   org?: { slug?: string };
   project?: { name?: string; slug?: string; apiKey?: string };
   runtimeVersion?: {
-    ios: string | { source: 'appVersion' | 'nativeVersion' };
-    android: string | { source: 'appVersion' | 'nativeVersion' };
+    ios: string | { source: 'appVersion' | 'nativeVersion' | 'native' };
+    android: string | { source: 'appVersion' | 'nativeVersion' | 'native' };
   } | { source: 'expo' };
   defaultChannel?: string;
   rollback?: {
@@ -38,6 +38,34 @@ const loadContextModule = (
 };
 
 describe('context', () => {
+  it.each(['bdfp1-packaged', null])('uses the binary runtime despite a changed JS declaration: %j', value => {
+    const context = loadContextModule(({ bundleDropConfig, NativeModules }) => {
+      NativeModules.BundleDrop.nativeRuntimeVersion = value;
+      bundleDropConfig.runtimeVersion = { ios: 'js-value', android: 'js-value' };
+    });
+    expect(context.runtimeVersion).toBe(value ?? undefined);
+  });
+  it('requires native capability for a release fingerprint pointer', () => {
+    const before = (global as any).__DEV__;
+    (global as any).__DEV__ = false;
+    try {
+      expect(() => loadContextModule(({ bundleDropConfig, NativeModules }) => {
+        delete NativeModules.BundleDrop.nativeRuntimeVersion;
+        bundleDropConfig.runtimeVersion = { ios: { source: 'native' }, android: { source: 'native' } };
+      })).toThrow('requires a new native binary');
+    } finally { (global as any).__DEV__ = before; }
+  });
+  it('permits a development pointer while rebuilding the binary', () => {
+    const before = (global as any).__DEV__;
+    (global as any).__DEV__ = true;
+    try {
+      const context = loadContextModule(({ bundleDropConfig, NativeModules }) => {
+        delete NativeModules.BundleDrop.nativeRuntimeVersion;
+        bundleDropConfig.runtimeVersion = { ios: { source: 'native' }, android: { source: 'native' } };
+      });
+      expect(context.runtimeVersion).toBeUndefined();
+    } finally { (global as any).__DEV__ = before; }
+  });
   it('derives Android values from config and the document directory', () => {
     const context = loadContextModule(({ Platform, bundleDropConfig, NativeModules }) => {
       Platform.OS = 'android';

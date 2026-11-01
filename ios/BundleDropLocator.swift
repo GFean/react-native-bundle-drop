@@ -131,4 +131,16 @@ import Foundation
   @objc public static func fileSize(at url: URL) -> UInt64 {
     (try? FileManager.default.attributesOfItem(atPath: url.path)[.size] as? UInt64) ?? 0
   }
+
+  static func embeddedBundleURL(bundle: Bundle = .main) -> URL? {
+    guard let url = bundle.url(forResource: "main", withExtension: "jsbundle"),
+          url.isFileURL else { return nil }
+    let root = bundle.bundleURL.standardizedFileURL.resolvingSymlinksInPath().path + "/"
+    let resolved = url.standardizedFileURL.resolvingSymlinksInPath()
+    guard resolved.path.hasPrefix(root),
+          let attributes = try? FileManager.default.attributesOfItem(atPath: url.path),
+          attributes[.type] as? FileAttributeType == .typeRegular,
+          fileSize(at: url) >= 1024 else { return nil }
+    return resolved
+  }
 }

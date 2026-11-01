@@ -45,6 +45,7 @@ const loadRuntimeServiceModule = (overrides?: {
   nativeModuleAvailable?: boolean;
   expoOtaStartupEnabled?: boolean;
   runtimeDeliveryMode?: 'v1' | 'shadow' | 'v2';
+  pendingRollback?: { reason?: string; channelName: string };
 }) => {
   jest.resetModules();
 
@@ -155,6 +156,17 @@ const loadRuntimeServiceModule = (overrides?: {
     await overrides?.setOtaEnabledPromise;
   });
   const warnIfStartupRecoveryUnavailableNative = jest.fn();
+  let pendingRollback = overrides?.pendingRollback ?? null;
+  const readPendingRollback = jest.fn(async () => pendingRollback);
+  const stageRollback = jest.fn(async (channelName: string, reason?: string) => {
+    pendingRollback = { channelName, reason };
+  });
+  const clearPendingRollback = jest.fn(async () => { pendingRollback = null; });
+  const isPendingRollbackCurrent = jest.fn(async (intent, channelName) => intent.channelName === channelName);
+
+  jest.doMock('../../manager/pendingRollback', () => ({
+    readPendingRollback, stageRollback, clearPendingRollback, isPendingRollbackCurrent,
+  }));
 
   jest.doMock('../../manager/downloadAndInstall', () => ({
     downloadUpdate,
@@ -232,6 +244,7 @@ const loadRuntimeServiceModule = (overrides?: {
       restartReactNativeNative,
       setOtaEnabledNative,
       warnIfStartupRecoveryUnavailableNative,
+      readPendingRollback, stageRollback, clearPendingRollback, isPendingRollbackCurrent,
     },
   };
 };
@@ -243,6 +256,7 @@ describe('runtime/service', () => {
     jest.unmock('../../manager/updateCheck');
     jest.unmock('../../manager/updateState');
     jest.unmock('../../manager/rollbackState');
+    jest.unmock('../../manager/pendingRollback');
     jest.unmock('../../bundleInfo');
     jest.unmock('../../context');
     jest.unmock('../../fs/bundlePointer');
@@ -283,7 +297,7 @@ describe('runtime/service', () => {
         isEnabled: false,
         isBusy: false,
       });
-      expect(mocks.setOtaEnabledNative).toHaveBeenCalledWith(false);
+      expect(mocks.setOtaEnabledNative).not.toHaveBeenCalled();
       expect(mocks.reconcileAppliedBundleOnLaunch).not.toHaveBeenCalled();
       await expect(service.checkLatest()).resolves.toEqual({
         response: null,
@@ -315,12 +329,29 @@ describe('runtime/service', () => {
         status: DISABLED_STATUS,
         isEnabled: false,
       });
-      expect(mocks.setOtaEnabledNative).toHaveBeenCalledWith(false);
+      expect(mocks.setOtaEnabledNative).not.toHaveBeenCalled();
       expect(mocks.reconcileAppliedBundleOnLaunch).not.toHaveBeenCalled();
       await expect(service.checkLatest()).resolves.toEqual({
         response: null,
         status: DISABLED_STATUS,
       });
+    } finally {
+      warnSpy.mockRestore();
+    }
+  });
+
+  it('persists an explicit disabled init even in an Expo development client', async () => {
+    const warnSpy = jest.spyOn(console, 'warn').mockImplementation(() => undefined);
+    const { service, mocks } = loadRuntimeServiceModule({
+      nativeModuleAvailable: true,
+      expoOtaStartupEnabled: false,
+    });
+    try {
+      service.initBundleDrop({ environment: 'development', enabled: false });
+      await service.waitForBundleDropStartupForTests();
+      expect(mocks.setOtaEnabledNative).toHaveBeenCalledWith(false);
+      expect(service.getBundleDropSnapshot().isEnabled).toBe(false);
+      expect(mocks.reconcileAppliedBundleOnLaunch).not.toHaveBeenCalled();
     } finally {
       warnSpy.mockRestore();
     }
@@ -777,7 +808,7 @@ describe('runtime/service', () => {
     expect(mocks.rollbackStartupBundle).toHaveBeenCalledWith(true);
   });
 
-  it('preserves previous-or-native behavior for non-revocation rollback reasons', async () => {
+  it('does not activate an ordinary rollback during a startup check', async () => {
     const { service, mocks } = loadRuntimeServiceModule({
       decision: { action: 'ROLLBACK', reason: 'SERVER_REQUESTED_ROLLBACK' },
     });
@@ -785,7 +816,8 @@ describe('runtime/service', () => {
     service.initBundleDrop({ environment: 'production', checkOnly: true });
     await service.waitForBundleDropStartupForTests();
 
-    expect(mocks.rollbackStartupBundle).toHaveBeenCalledWith(false);
+    expect(mocks.rollbackStartupBundle).not.toHaveBeenCalled();
+    expect(mocks.restartReactNativeNative).not.toHaveBeenCalled();
   });
 
   it.each(['immediate', 'on-next-launch'] as const)(
@@ -1317,7 +1349,7 @@ describe('runtime/service', () => {
     });
   });
 
-  it('executes previous-or-native rollback for manual downloads without an explicit reason', async () => {
+  it('stages an ordinary manual rollback without restarting, then revalidates and applies explicitly', async () => {
     const { service, mocks } = loadRuntimeServiceModule({
       decision: {
         action: 'ROLLBACK',
@@ -1336,11 +1368,140 @@ describe('runtime/service', () => {
     expect(mocks.restartReactNativeNative).not.toHaveBeenCalled();
 
     await expect(service.downloadAndStage()).resolves.toEqual({
-      result: { status: 'rollback' },
+      result: { status: 'rollback', pendingApply: true },
       status: '↩️ Rollback requested',
     });
+    expect(mocks.rollbackStartupBundle).not.toHaveBeenCalled();
+    expect(mocks.restartReactNativeNative).not.toHaveBeenCalled();
+    expect(service.getBundleDropSnapshot().pendingApply).toBe(true);
+    await expect(service.applyUpdate()).resolves.toEqual({ status: 'applied' });
+    expect(mocks.checkForUpdate).toHaveBeenCalledTimes(2);
     expect(mocks.rollbackStartupBundle).toHaveBeenCalledWith(false);
     expect(mocks.restartReactNativeNative).toHaveBeenCalledTimes(1);
+    expect(mocks.applyUpdate).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    'CURRENT_REVOKED_NO_COMPATIBLE_TARGET',
+    'CURRENT_REVOKED_NO_SAFE_TARGET',
+    'CURRENT_REVOKED_ORIGIN_UNAVAILABLE',
+  ])('preserves immediate manual safety recovery for %s even if intent cleanup fails', async reason => {
+    const { service, mocks } = loadRuntimeServiceModule({ downloadResult: { status: 'rollback', reason } });
+    service.initBundleDrop({ environment: 'staging', policy: 'manual' });
+    await service.waitForBundleDropStartupForTests();
+    mocks.clearPendingRollback.mockRejectedValueOnce(new Error('storage unavailable'));
+    jest.spyOn(console, 'warn').mockImplementation(() => undefined);
+    await expect(service.downloadUpdate()).resolves.toEqual({ status: 'rollback', reason });
+    expect(mocks.rollbackStartupBundle).toHaveBeenCalledWith(true);
+    expect(mocks.restartReactNativeNative).toHaveBeenCalledTimes(1);
+    expect(mocks.stageRollback).not.toHaveBeenCalled();
+    jest.restoreAllMocks();
+  });
+
+  it.each([
+    { action: 'NOOP', reason: 'NO_PUBLISHED_BUNDLE' },
+    { action: 'INSTALL', hash: 'replacement' },
+    { action: 'ROLLBACK', reason: 'DIFFERENT_ORDINARY_REASON' },
+  ])('blocks a staged rollback when refreshed authority changes to %j', async decision => {
+    const { service, mocks } = loadRuntimeServiceModule({
+      pendingRollback: { channelName: 'General', reason: 'SERVER_REQUESTED_ROLLBACK' },
+      decision,
+    });
+    service.initBundleDrop({ environment: 'staging' });
+    await service.waitForBundleDropStartupForTests();
+    expect(service.getBundleDropSnapshot().pendingApply).toBe(true);
+    await expect(service.applyUpdate()).resolves.toEqual({ status: 'blocked', reason: 'ROLLBACK_REVALIDATION_FAILED' });
+    expect(mocks.rollbackStartupBundle).not.toHaveBeenCalled();
+    expect(mocks.restartReactNativeNative).not.toHaveBeenCalled();
+    expect(mocks.applyUpdate).not.toHaveBeenCalled();
+    expect(service.getBundleDropSnapshot().pendingApply).toBe(false);
+  });
+
+  it('keeps an ordinary intent retryable when authority is unavailable, then permits explicit apply', async () => {
+    const { service, mocks } = loadRuntimeServiceModule({ pendingRollback: { channelName: 'General' } });
+    service.initBundleDrop({ environment: 'staging' });
+    await service.waitForBundleDropStartupForTests();
+    await expect(service.applyUpdate()).resolves.toEqual({ status: 'blocked', reason: 'ROLLBACK_REVALIDATION_FAILED' });
+    expect(service.getBundleDropSnapshot().pendingApply).toBe(true);
+    mocks.checkForUpdate.mockResolvedValueOnce({ action: 'ROLLBACK' });
+    await expect(service.applyUpdate()).resolves.toEqual({ status: 'applied' });
+    expect(mocks.rollbackStartupBundle).toHaveBeenCalledWith(false);
+  });
+
+  it.each(['before', 'during'] as const)('blocks a rollback if selection changes %s revalidation', async when => {
+    const { service, mocks } = loadRuntimeServiceModule({
+      pendingRollback: { channelName: 'General' }, decision: { action: 'ROLLBACK' },
+    });
+    service.initBundleDrop({ environment: 'staging' });
+    await service.waitForBundleDropStartupForTests();
+    if (when === 'during') mocks.isPendingRollbackCurrent.mockResolvedValueOnce(true);
+    mocks.isPendingRollbackCurrent.mockResolvedValueOnce(false);
+    await expect(service.applyUpdate()).resolves.toEqual({ status: 'blocked', reason: 'ROLLBACK_REVALIDATION_FAILED' });
+    expect(mocks.rollbackStartupBundle).not.toHaveBeenCalled();
+    expect(mocks.restartReactNativeNative).not.toHaveBeenCalled();
+  });
+
+  it('upgrades a pending ordinary rollback to confirmed-revocation recovery on apply', async () => {
+    const { service, mocks } = loadRuntimeServiceModule({
+      pendingRollback: { channelName: 'General', reason: 'SERVER_REQUESTED_ROLLBACK' },
+      decision: { action: 'ROLLBACK', reason: 'CURRENT_REVOKED_NO_SAFE_TARGET' },
+    });
+    service.initBundleDrop({ environment: 'staging' });
+    await service.waitForBundleDropStartupForTests();
+    await expect(service.applyUpdate()).resolves.toEqual({ status: 'applied' });
+    expect(mocks.rollbackStartupBundle).toHaveBeenCalledWith(true);
+    expect(mocks.restartReactNativeNative).toHaveBeenCalledTimes(1);
+  });
+
+  it('does not restart when native reports that rollback is already complete', async () => {
+    const { service, mocks } = loadRuntimeServiceModule({
+      pendingRollback: { channelName: 'General' }, decision: { action: 'ROLLBACK' },
+      rollbackResult: { rolledBack: false },
+    });
+    service.initBundleDrop({ environment: 'staging' });
+    await service.waitForBundleDropStartupForTests();
+    await expect(service.applyUpdate()).resolves.toEqual({ status: 'alreadyApplied' });
+    expect(mocks.restartReactNativeNative).not.toHaveBeenCalled();
+  });
+
+  it('blocks without consuming the intent if the native rollback capability is unavailable', async () => {
+    const { service, mocks } = loadRuntimeServiceModule({
+      pendingRollback: { channelName: 'General' }, decision: { action: 'ROLLBACK' },
+    });
+    service.initBundleDrop({ environment: 'staging' });
+    await service.waitForBundleDropStartupForTests();
+    mocks.rollbackStartupBundle.mockResolvedValueOnce(null as any);
+    await expect(service.applyUpdate()).resolves.toEqual({ status: 'blocked', reason: 'ROLLBACK_REVALIDATION_FAILED' });
+    expect(mocks.restartReactNativeNative).not.toHaveBeenCalled();
+    expect(service.getBundleDropSnapshot().pendingApply).toBe(true);
+  });
+
+  it.each(['manual', 'immediate', 'on-next-launch'] as const)('never automatically applies a persisted manual rollback under %s', async policy => {
+    const { service, mocks } = loadRuntimeServiceModule({
+      pendingRollback: { channelName: 'General' }, decision: { action: 'NOOP' },
+    });
+    service.initBundleDrop({ environment: 'staging', policy });
+    await service.waitForBundleDropStartupForTests();
+    expect(mocks.applyUpdate).not.toHaveBeenCalled();
+    expect(mocks.rollbackStartupBundle).not.toHaveBeenCalled();
+    expect(service.getBundleDropSnapshot().pendingApply).toBe(true);
+  });
+
+  it('stages ordinary managed list rollback and discards that intent when a new download is requested', async () => {
+    const { service, mocks } = loadRuntimeServiceModule({
+      runtimeDeliveryMode: 'v2', decision: { action: 'ROLLBACK', reason: 'SERVER_REQUESTED_ROLLBACK' },
+      downloadResult: { status: 'upToDate', reason: 'NO_PUBLISHED_BUNDLE' },
+    });
+    service.initBundleDrop({ environment: 'staging' });
+    await service.waitForBundleDropStartupForTests();
+    expect(await service.installBundleFromListItem(createBundleListItem())).toMatchObject({
+      result: { status: 'rollback', pendingApply: true },
+    });
+    expect(mocks.rollbackStartupBundle).not.toHaveBeenCalled();
+    expect(service.getBundleDropSnapshot().pendingApply).toBe(true);
+    await service.downloadUpdate();
+    expect(service.getBundleDropSnapshot().pendingApply).toBe(false);
+    expect(mocks.stageRollback).toHaveBeenCalledTimes(1);
   });
 
   it('returns empty fetch fallbacks and guards bundle list items without download urls', async () => {

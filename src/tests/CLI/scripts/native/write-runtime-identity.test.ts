@@ -40,6 +40,13 @@ describe('native runtime identity writer', () => {
       '{"schemaVersion":1,"platform":"android","source":"bundle-drop","runtimeVersion":"android-runtime"}\n',
     );
     expect(fs.readdirSync(path.dirname(outputPath))).toEqual(['build-identity.json']);
+    const rename = jest.spyOn(fs, 'renameSync');
+    writeNativeRuntimeIdentity({ projectRoot, platform: 'android', outputPath });
+    expect(rename).not.toHaveBeenCalled();
+    fs.writeFileSync(outputPath, 'stale identity');
+    writeNativeRuntimeIdentity({ projectRoot, platform: 'android', outputPath });
+    expect(rename).toHaveBeenCalledTimes(1);
+    rename.mockRestore();
   });
 
   it('reports Expo authority without inventing a literal', () => {

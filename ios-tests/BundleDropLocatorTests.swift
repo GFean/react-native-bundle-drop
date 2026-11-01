@@ -387,6 +387,33 @@ final class BundleDropLocatorTests: XCTestCase {
     try content.write(to: url, atomically: true, encoding: .utf8)
   }
 
+  func testEmbeddedReloadUsesOnlyNontrivialBundledResource() throws {
+    // Bundle caches resource lookup results; each fixture models an immutable
+    // installed application rather than adding resources after the first lookup.
+    for content in [nil, "tiny", String(repeating: "embedded", count: 256)] as [String?] {
+      let bundle = try makeBundleFixture(version: "1", build: "1")
+      let url = bundle.bundleURL.appendingPathComponent("main.jsbundle")
+      if let content { try content.write(to: url, atomically: true, encoding: .utf8) }
+      if let content, content.utf8.count >= 1024 {
+        XCTAssertEqual(BundleDropLocatorCore.embeddedBundleURL(bundle: bundle), url.resolvingSymlinksInPath())
+      } else {
+        XCTAssertNil(BundleDropLocatorCore.embeddedBundleURL(bundle: bundle))
+      }
+    }
+  }
+
+  func testEmbeddedReloadRejectsSymlinkAndDirectoryResources() throws {
+    let bundle = try makeBundleFixture(version: "1", build: "1")
+    let url = bundle.bundleURL.appendingPathComponent("main.jsbundle")
+    let outside = tempRoot.appendingPathComponent("outside.jsbundle")
+    try String(repeating: "outside", count: 256).write(to: outside, atomically: true, encoding: .utf8)
+    try FileManager.default.createSymbolicLink(at: url, withDestinationURL: outside)
+    XCTAssertNil(BundleDropLocatorCore.embeddedBundleURL(bundle: bundle))
+    try FileManager.default.removeItem(at: url)
+    try FileManager.default.createDirectory(at: url, withIntermediateDirectories: true)
+    XCTAssertNil(BundleDropLocatorCore.embeddedBundleURL(bundle: bundle))
+  }
+
   private func makeBundleFixture(
     version: String,
     build: String,

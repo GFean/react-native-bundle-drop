@@ -15,6 +15,56 @@ abstract class BundleDropCommandExecutor {
   }
 }
 
+// Keep only plain artifact metadata in the package task action. Capturing an AGP
+// variant or Project in a doLast closure prevents configuration-cache storage.
+class BundleDropPackagedReceiptAction implements Action<Task> {
+  BundleDropCommandExecutor commandExecutor
+  File receiptWriter
+  File workingDirectory
+  File projectRoot
+  File sdkDirectory
+  String nodeBinary
+  List<Map<String, String>> outputIdentities
+
+  @Override
+  void execute(Task task) {
+    def artifacts = []
+    task.outputs.files.files.each { File output ->
+      if (output.isFile() && (output.name.endsWith('.apk') || output.name.endsWith('.aab'))) {
+        artifacts.add(output.canonicalFile)
+      } else if (output.isDirectory()) {
+        output.eachFileRecurse { File candidate ->
+          if (candidate.isFile() && (candidate.name.endsWith('.apk') || candidate.name.endsWith('.aab'))) {
+            artifacts.add(candidate.canonicalFile)
+          }
+        }
+      }
+    }
+    artifacts = artifacts.unique { it.path }.sort { left, right -> left.path <=> right.path }
+    if (artifacts.isEmpty()) return
+    if (!receiptWriter.isFile()) {
+      throw new GradleException("Bundle Drop receipt writer is missing from the installed package: ${receiptWriter}")
+    }
+    // Split APKs are separately signed outputs; retain the deterministic exact
+    // artifact selection and version mapping used by the receipt writer.
+    def artifact = artifacts.first()
+    def matching = outputIdentities.findAll { it.fileName == artifact.name }
+    def identity
+    if (matching.size() == 1) identity = matching.first()
+    else if (outputIdentities.size() == 1) identity = outputIdentities.first()
+    else throw new GradleException("Bundle Drop could not map ${artifact.name} to an exact Android variant output.")
+    commandExecutor.execute(workingDirectory, nodeBinary, [
+      receiptWriter.path,
+      '--project-root', projectRoot.path,
+      '--platform', 'android',
+      '--artifact', artifact.path,
+      '--android-sdk', sdkDirectory.path,
+      '--app-version', identity.appVersion,
+      '--native-build-version', identity.nativeBuildVersion
+    ])
+  }
+}
+
 buildscript {
   repositories {
     google()
@@ -60,22 +110,6 @@ dependencies {
 def bundleDropReceiptWriter = file("../../lib/CLI/scripts/expo/write-build-receipt.js").canonicalFile
 def bundleDropExpoProjectRoot = rootProject.projectDir.parentFile.canonicalFile
 
-def bundleDropPackagedArtifacts = { Task task ->
-  def artifacts = []
-  task.outputs.files.files.each { File output ->
-    if (output.isFile() && (output.name.endsWith(".apk") || output.name.endsWith(".aab"))) {
-      artifacts.add(output.canonicalFile)
-    } else if (output.isDirectory()) {
-      output.eachFileRecurse { File candidate ->
-        if (candidate.isFile() && (candidate.name.endsWith(".apk") || candidate.name.endsWith(".aab"))) {
-          artifacts.add(candidate.canonicalFile)
-        }
-      }
-    }
-  }
-  return artifacts.unique { it.path }.sort { left, right -> left.path <=> right.path }
-}
-
 def bundleDropVariantForTask = { applicationProject, Task task ->
   def taskName = task.name.toLowerCase()
   def matchingVariants = applicationProject.android.applicationVariants.findAll { variant ->
@@ -89,21 +123,7 @@ def bundleDropVariantForTask = { applicationProject, Task task ->
   return matchingVariants.first()
 }
 
-def bundleDropVariantIdentity = { variant, File artifact = null ->
-  def matchingOutputs = artifact == null ? [] : variant.outputs.findAll { output ->
-    output.outputFileName == artifact.name
-  }
-  def output
-  if (matchingOutputs.size() == 1) {
-    output = matchingOutputs.first()
-  } else if (variant.outputs.size() == 1) {
-    output = variant.outputs.first()
-  } else {
-    def outputLabel = artifact == null ? variant.name : artifact.name
-    throw new GradleException(
-      "Bundle Drop could not map ${outputLabel} to an exact Android variant output."
-    )
-  }
+def bundleDropOutputIdentity = { variant, output ->
   def appVersion = output.versionNameOverride ?: variant.versionName
   def nativeBuildVersion = output.versionCodeOverride ?: output.versionCode ?: variant.versionCode
   if (appVersion == null || nativeBuildVersion == null) {
@@ -111,7 +131,7 @@ def bundleDropVariantIdentity = { variant, File artifact = null ->
       "Bundle Drop could not resolve the packaged Android versionName/versionCode."
     )
   }
-  return [appVersion: appVersion.toString(), nativeBuildVersion: nativeBuildVersion.toString()]
+  return [fileName: output.outputFileName.toString(), appVersion: appVersion.toString(), nativeBuildVersion: nativeBuildVersion.toString()]
 }
 
 // This module is Expo-only. Attach proof after Android's application package/bundle task
@@ -128,30 +148,15 @@ rootProject.gradle.projectsEvaluated {
       applicationProject.tasks.configureEach { Task task ->
         if (task.name ==~ /(?i)(package|bundle).*release/) {
           def variant = bundleDropVariantForTask(applicationProject, task)
-          task.doLast {
-            def artifacts = bundleDropPackagedArtifacts(task)
-            if (!artifacts.isEmpty()) {
-              if (!bundleDropReceiptWriter.isFile()) {
-                throw new GradleException(
-                  "Bundle Drop receipt writer is missing from the installed package: ${bundleDropReceiptWriter}"
-                )
-              }
-              // Split APKs are separately signed outputs. Use the lexically first exact
-              // artifact so the proof is deterministic and can be re-hashed at upload.
-              def artifact = artifacts.first()
-              def nodeBinary = System.getenv("NODE_BINARY") ?: "node"
-              def packagedIdentity = bundleDropVariantIdentity(variant, artifact)
-              bundleDropCommandExecutor.execute(applicationProject.projectDir, nodeBinary, [
-                  bundleDropReceiptWriter.path,
-                  "--project-root", bundleDropExpoProjectRoot.path,
-                  "--platform", "android",
-                  "--artifact", artifact.path,
-                  "--android-sdk", applicationProject.android.sdkDirectory.canonicalPath,
-                  "--app-version", packagedIdentity.appVersion,
-                  "--native-build-version", packagedIdentity.nativeBuildVersion
-              ])
-            }
-          }
+          task.doLast(new BundleDropPackagedReceiptAction(
+            commandExecutor: bundleDropCommandExecutor,
+            receiptWriter: bundleDropReceiptWriter,
+            workingDirectory: applicationProject.projectDir.canonicalFile,
+            projectRoot: bundleDropExpoProjectRoot,
+            sdkDirectory: applicationProject.android.sdkDirectory.canonicalFile,
+            nodeBinary: System.getenv('NODE_BINARY') ?: 'node',
+            outputIdentities: variant.outputs.collect { output -> bundleDropOutputIdentity(variant, output) }
+          ))
         }
       }
     }

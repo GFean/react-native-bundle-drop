@@ -26,7 +26,10 @@ export { setBundleDropProjectType } from '../../../expo/projectType';
 
 const PACKAGE_NAME = '@gfean/react-native-bundle-drop';
 const EXPO_UPDATES = 'expo-updates';
-const TRANSIENT_GRADLE_KOTLIN_FINGERPRINT_PATTERN = '**/*-gradle-plugin/.kotlin/**/*';
+const TRANSIENT_GRADLE_KOTLIN_FINGERPRINT_PATTERNS = [
+  '**/*-gradle-plugin/.kotlin/**/*',
+  '**/android/.kotlin/**/*',
+];
 const EXPO_RUNTIME_SOURCE_PATTERN =
   /runtimeVersion\s*:\s*\{\s*source\s*:\s*['"]expo['"]\s*\}/;
 
@@ -198,16 +201,20 @@ export function planExpoProjectConfiguration(params: {
 
   const fingerprintIgnoreFile = inspectProjectFile(params.projectRoot, '.fingerprintignore');
   const fingerprintIgnore = fingerprintIgnoreFile.exists ? fingerprintIgnoreFile.content : '';
+  const existingFingerprintPatterns = fingerprintIgnore.split(/\r?\n/).map(line => line.trim());
+  const missingFingerprintPatterns = TRANSIENT_GRADLE_KOTLIN_FINGERPRINT_PATTERNS.filter(
+    pattern => !existingFingerprintPatterns.includes(pattern),
+  );
   if (
     EXPO_RUNTIME_SOURCE_PATTERN.test(updatedBundleConfig) &&
-    !fingerprintIgnore.split(/\r?\n/).includes(TRANSIENT_GRADLE_KOTLIN_FINGERPRINT_PATTERN)
+    missingFingerprintPatterns.length > 0
   ) {
     changes.push({
       file: '.fingerprintignore',
       original: fingerprintIgnoreFile.exists ? fingerprintIgnore : null,
       updated:
         `${fingerprintIgnore.trimEnd()}${fingerprintIgnore.trim() ? '\n' : ''}` +
-        `${TRANSIENT_GRADLE_KOTLIN_FINGERPRINT_PATTERN}\n`,
+        `${missingFingerprintPatterns.join('\n')}\n`,
       reason: 'Exclude transient Gradle Kotlin compiler sessions from Expo runtime fingerprints.',
     });
   }

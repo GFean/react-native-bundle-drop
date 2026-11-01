@@ -5,6 +5,8 @@ import {
   resolveExpoMetroRuntimeVersion,
 } from '../../expo';
 import { createExpoFixture, removeFixture } from './fixture';
+import { calculateFingerprintSync } from '../../fingerprint/client';
+jest.mock('../../fingerprint/client', () => ({ calculateFingerprintSync: jest.fn() }));
 
 describe('resolveExpoBuildIdentity', () => {
   const roots: string[] = [];
@@ -21,6 +23,14 @@ describe('resolveExpoBuildIdentity', () => {
     return root;
   };
 
+  it('calculates the upload identity independently while Metro emits a native pointer', async () => {
+    const root = fixture({ config: { version: '1.0.0' }, bundleDropRuntimeVersion: { compatibilitySource: 'fingerprint' } as any });
+    (calculateFingerprintSync as jest.Mock).mockReturnValue({ runtimeVersion: 'bdfp1-independent' });
+    await expect(resolveExpoBuildIdentity(root, 'android')).resolves.toMatchObject({ runtimeVersion: 'bdfp1-independent' });
+    (calculateFingerprintSync as jest.Mock).mockClear();
+    await expect(resolveExpoMetroRuntimeVersion(root, 'android')).resolves.toEqual({ source: 'native' });
+    expect(calculateFingerprintSync).not.toHaveBeenCalled();
+  });
   it.each(['54.0.36', '55.0.0', '56.1.2', '57.0.0-canary-1'])(
     'resolves literal identities for supported expo@%s',
     async expoVersion => {

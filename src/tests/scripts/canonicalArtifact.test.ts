@@ -130,6 +130,25 @@ describe('buildCanonicalArtifact', () => {
     fs.rmSync(root, { recursive: true, force: true });
   });
 
+  it('hashes explicit fingerprint display metadata without changing the runtime lane', () => {
+    const runtimeVersion = `bdfp1-${'a'.repeat(64)}`;
+    const fingerprint = { schemeVersion: 1 as const, hash: runtimeVersion, manualBoundary: '4.0.27' };
+    const artifact = buildCanonicalArtifact({
+      platform: 'ios', appVersion: '1.2.3', runtimeVersion,
+      runtimeCompatibility: { compatibilitySource: 'fingerprint', fingerprint },
+      buildNumber: '122132',
+      bundlePath, assetsDir, outputDir,
+    });
+    const metadata = JSON.parse(fs.readFileSync(artifact.metadataPath, 'utf8'));
+    expect(metadata).toMatchObject({ runtimeVersion, compatibilitySource: 'fingerprint', fingerprint, buildNumber: '122132' });
+    const manifest = JSON.parse(fs.readFileSync(artifact.manifestPath, 'utf8'));
+    expect(manifest.runtimeVersion).toBe(runtimeVersion);
+    const metadataEntry = manifest.files.find((file: BundleManifestFile) => file.path === 'metadata-ios.json');
+    expect(metadataEntry.sha256).toBe(sha256Buffer(fs.readFileSync(artifact.metadataPath)));
+    expect(manifest.bundleHash).toBe(calculateBundleHash(manifest.files));
+    expect(new AdmZip(artifact.zipPath).readAsText('metadata-ios.json')).toBe(fs.readFileSync(artifact.metadataPath, 'utf8'));
+  });
+
   it('builds the frozen iOS manifest and ZIP roles', () => {
     fs.mkdirSync(path.join(assetsDir, 'assets'), { recursive: true });
     fs.writeFileSync(path.join(assetsDir, 'assets', 'logo.png'), 'png');
@@ -186,7 +205,7 @@ describe('buildCanonicalArtifact', () => {
   });
 
   it.each(['ios', 'android'] as const)(
-    'is byte-equivalent to the pre-refactor bare %s artifact',
+    'preserves pre-refactor bare %s payloads while adding explicit mode metadata',
     platform => {
       jest.useFakeTimers();
       jest.setSystemTime(new Date('2025-01-02T03:04:06.000Z'));
@@ -215,11 +234,17 @@ describe('buildCanonicalArtifact', () => {
           assetTraversal: 'legacy-bare',
         });
 
-        expect(canonical.bundleHash).toBe(legacy.bundleHash);
+        expect(canonical.bundleHash).not.toBe(legacy.bundleHash);
         expect(canonical.jsBundleHash).toBe(legacy.jsBundleHash);
-        expect(fs.readFileSync(canonical.metadataPath)).toEqual(fs.readFileSync(legacy.metadataPath));
-        expect(fs.readFileSync(canonical.manifestPath)).toEqual(fs.readFileSync(legacy.manifestPath));
-        expect(fs.readFileSync(canonical.zipPath)).toEqual(fs.readFileSync(legacy.zipPath));
+        const { compatibilitySource, ...metadata } = JSON.parse(fs.readFileSync(canonical.metadataPath, 'utf8'));
+        expect(compatibilitySource).toBe('manual');
+        expect(metadata).toEqual(JSON.parse(fs.readFileSync(legacy.metadataPath, 'utf8')));
+        const oldZip = new AdmZip(legacy.zipPath);
+        const newZip = new AdmZip(canonical.zipPath);
+        for (const entry of oldZip.getEntries()) {
+          if (entry.entryName === `metadata-${platform}.json` || entry.entryName === BUNDLE_MANIFEST) continue;
+          expect(newZip.readFile(entry.entryName)).toEqual(entry.getData());
+        }
       } finally {
         jest.useRealTimers();
       }
@@ -276,9 +301,13 @@ describe('buildCanonicalArtifact', () => {
 
         expect(canonical.bundleHash).toBe(legacy.bundleHash);
         expect(canonical.jsBundleHash).toBe(legacy.jsBundleHash);
-        expect(fs.readFileSync(canonical.metadataPath)).toEqual(fs.readFileSync(legacy.metadataPath));
-        expect(fs.readFileSync(canonical.manifestPath)).toEqual(fs.readFileSync(legacy.manifestPath));
         expect(fs.readFileSync(canonical.zipPath)).toEqual(fs.readFileSync(legacy.zipPath));
+        // Legacy traversal intentionally permits a reserved-name asset to
+        // replace the ZIP metadata; the standalone diagnostic metadata still
+        // declares mode. Keep that traversal contract separate from display.
+        const { compatibilitySource, ...metadata } = JSON.parse(fs.readFileSync(canonical.metadataPath, 'utf8'));
+        expect(compatibilitySource).toBe('manual');
+        expect(metadata).toEqual(JSON.parse(fs.readFileSync(legacy.metadataPath, 'utf8')));
       } finally {
         jest.useRealTimers();
       }

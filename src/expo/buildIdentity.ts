@@ -4,7 +4,7 @@ import path from 'path';
 import { evaluateExpoConfig } from './config';
 import { ExpoIntegrationError } from './errors';
 import { loadExpoDependency, loadProjectModule } from './localModules';
-import { resolveBundleDropRuntimeVersionAuthority } from './runtimeVersion';
+import { readBundleDropRuntimeSelection, resolveBundleDropRuntimeVersionAuthority } from './runtimeVersion';
 import type {
   ExpoBuildIdentity,
   ExpoRuntimeVersionPolicy,
@@ -281,7 +281,7 @@ export async function resolveExpoBuildIdentity(
 }
 
 export type ExpoMetroRuntimeVersion = string | {
-  source: 'appVersion' | 'nativeVersion';
+  source: 'appVersion' | 'nativeVersion' | 'native';
 };
 
 /**
@@ -294,6 +294,9 @@ export async function resolveExpoMetroRuntimeVersion(
   platform: MobilePlatform,
 ): Promise<ExpoMetroRuntimeVersion> {
   const absoluteProjectRoot = path.resolve(projectRoot);
+  if (readBundleDropRuntimeSelection(absoluteProjectRoot, platform).source === 'fingerprint') {
+    return { source: 'native' };
+  }
   const runtimeAuthority = resolveBundleDropRuntimeVersionAuthority(
     absoluteProjectRoot,
     platform,

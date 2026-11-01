@@ -17,7 +17,7 @@ export type DownloadUpdateResult =
   | { status: 'upToDate'; reason?: string; skippedFailedBundle?: boolean; skippedHash?: string }
   | { status: 'disabled' }
   | { status: 'incompatible' }
-  | { status: 'rollback'; reason?: string };
+  | { status: 'rollback'; reason?: string; pendingApply?: boolean };
 
 type DownloadOptions = {
   channelName?: string;
@@ -196,6 +196,10 @@ async function downloadAndStageUpdate(
           projectSlug: project.slug,
           platform,
           runtimeVersionValue: serverRuntimeVersion,
+          // The resolve decision supplies this target's full ZIP. Managed
+          // capability rejection must instead retain its bounded refresh path.
+          allowUnmanagedPatchAuthFallback: !unresolvedCheckResult.runtimeDelivery &&
+            !checkResult.runtimeDelivery && checkResult.fallback?.mode === 'full',
           statusCb,
         });
 

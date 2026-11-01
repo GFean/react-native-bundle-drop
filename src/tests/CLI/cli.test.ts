@@ -13,6 +13,8 @@ const mockHasExistingBundleDropConfig = jest.fn(() => true);
 const mockRunDoctor = jest.fn();
 const mockWriteEasBuildReceipt = jest.fn();
 const mockRunSightCommand = jest.fn();
+const mockRunFingerprintCli = jest.fn();
+jest.mock('../../CLI/scripts/fingerprint-cli', () => ({ runFingerprintCli: (...args: unknown[]) => mockRunFingerprintCli(...args) }));
 const mockDetectProjectType = jest.fn(
   (_options?: { explicitType?: 'expo' | 'bare' }): 'expo' | 'bare' => 'bare',
 );
@@ -97,6 +99,10 @@ describe('CLI/cli', () => {
     process.env = { ...originalEnv };
   });
 
+  it('routes the scheme-1 fingerprint inspection command', async () => {
+    await parseCommand('fingerprint', '--platform', 'android', '--json');
+    expect(mockRunFingerprintCli).toHaveBeenCalledWith(expect.objectContaining({ platform: 'android', json: true }));
+  });
   it('routes upload arguments to the upload action', async () => {
     await parseCommand(
       'upload',

@@ -218,6 +218,15 @@ ${chalk.bold('Examples:')}
     .action(runSightCommand);
 
   program
+    .command('fingerprint')
+    .requiredOption('--platform <platform>', 'Platform to inspect: ios or android')
+    .option('--output <path>', 'Write the source digest report')
+    .option('--compare <path>', 'Compare sources with a previous report')
+    .option('--json', 'Print the report as JSON')
+    .description('Inspect scheme-1 native runtime fingerprint inputs')
+    .action(options => require('./scripts/fingerprint-cli').runFingerprintCli(options));
+
+  program
     .command('upload <platform>')
     .helpGroup('Releases:')
     .option('--plist-file <path>', 'Path to Info.plist for iOS')
@@ -226,6 +235,7 @@ ${chalk.bold('Examples:')}
       'App version. iOS will fallback to --plist-file; Android can fallback to build.gradle when provided.'
     )
     .option('--buildgradle-path <path>', 'Optional Android build.gradle path to read versionName')
+    .option('--build-number <number>', 'Optional Android versionCode or iOS build number for upload metadata')
     .option('--channel <name>', 'Target channel name to associate the bundle')
     .option('--release-notes <text>', 'Release notes (max 2000 chars)')
     .option('--release-notes-file <path>', 'Read UTF-8 release notes from a file (max 2000 chars)')

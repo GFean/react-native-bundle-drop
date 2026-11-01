@@ -46,7 +46,11 @@ object BundleDropNativePaths {
   internal fun readEmbeddedRuntimeVersion(context: Context): String? {
     return try {
       context.assets.open(BUILD_IDENTITY_ASSET).bufferedReader().use { reader ->
-        JSONObject(reader.readText())
+        val identity = JSONObject(reader.readText())
+        if (identity.optInt("schemaVersion") != 1 || identity.optString("platform") != "android") {
+          return null
+        }
+        identity
           .optString("runtimeVersion", "")
           .takeIf { it.trim().isNotEmpty() }
       }

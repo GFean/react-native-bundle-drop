@@ -21,6 +21,7 @@ node_modules/
 dist/
 lib/
 coverage/
+third_party/expo-fingerprint/build/
 .build/
 .swiftpm/
 *.tgz

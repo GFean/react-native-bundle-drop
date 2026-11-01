@@ -80,6 +80,12 @@ describe('withBundleDropExpo', () => {
     );
   });
 
+  it('embeds native pointers for a bare fingerprint project', () => {
+    const root = fixture();
+    fs.writeFileSync(path.join(root, 'bundle.drop.config.js'), "module.exports = { serverUrl: 'https://api.example.com', org: { slug: 'org' }, project: { slug: 'app' }, runtimeVersion: { compatibilitySource: 'fingerprint' } };");
+    withBundleDrop({}, { projectRoot: root });
+    expect(readGeneratedConfig(root).runtimeVersion).toEqual({ ios: { source: 'native' }, android: { source: 'native' } });
+  });
   it('embeds a native runtime sentinel when EAS owns the remote build version', async () => {
     const root = fixture();
     mockResolveExpoMetroRuntimeVersion.mockImplementation(

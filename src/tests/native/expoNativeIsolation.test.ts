@@ -13,7 +13,7 @@ describe('Expo native target isolation', () => {
     const expoPodspec = readPackageFile('BundleDropExpo.podspec');
     const expoAndroidBuild = readPackageFile('expo/android/build.gradle');
 
-    expect(packageManifest.nativeVersion).toBe('0.6.0');
+    expect(packageManifest.nativeVersion).toBe('0.6.4');
     expect(barePodspec).toContain('native_version = package["nativeVersion"] || package["version"]');
     expect(expoPodspec).toContain('native_version = package["nativeVersion"] || package["version"]');
     expect(expoAndroidBuild).toContain(
@@ -41,9 +41,8 @@ describe('Expo native target isolation', () => {
     expect(barePodspec).toContain('write-runtime-identity.js');
     expect(barePodspec).toContain('"--platform", "ios"');
     expect(barePodspec).toContain('"bundle-drop-build-identity.json"');
-    expect(barePodspec).toContain('Digest::SHA256.hexdigest(project_root)[0, 16]');
     expect(barePodspec).toContain('"runtime-identity"');
-    expect(barePodspec).toContain('s.resources = native_runtime_identity_resource');
+    expect(barePodspec).toContain('s.resources = native_runtime_identity[:resource_path]');
     expect(barePodspec).toContain('s.script_phase = {');
     expect(barePodspec).toContain(':execution_position => :before_compile');
     expect(barePodspec).toContain('Regenerate Bundle Drop runtime identity');
@@ -155,7 +154,7 @@ describe('Expo native target isolation', () => {
     expect(expoBuild).toContain(
       'applicationProject.objects.newInstance(\n        BundleDropCommandExecutor',
     );
-    expect(expoBuild.match(/bundleDropCommandExecutor\.execute\(/g)).toHaveLength(1);
+    expect(expoBuild.match(/commandExecutor\.execute\(/g)).toHaveLength(1);
     expect(expoBuild).toContain('spec.workingDir workingDirectory');
     expect(expoBuild).toContain('}.assertNormalExitValue()');
     expect(identityTask).toContain('abstract ExecOperations getExecOperations()');
@@ -196,7 +195,9 @@ describe('Expo native target isolation', () => {
     expect(expoBuild).not.toContain('generatedAssetsConsumer');
     expect(expoBuild).not.toContain('generateBundleDrop${capitalizedVariant}BuildIdentity');
     expect(expoBuild).toContain('task.name ==~ /(?i)(package|bundle).*release/');
-    expect(expoBuild).toContain('task.doLast {');
+    expect(expoBuild).toContain('task.doLast(new BundleDropPackagedReceiptAction(');
+    expect(expoBuild).toContain('implements Action<Task>');
+    expect(expoBuild).not.toContain('task.doLast {');
     expect(expoBuild).not.toContain('task.finalizedBy');
   });
 });

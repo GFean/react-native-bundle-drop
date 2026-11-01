@@ -1,7 +1,7 @@
 {
   "name": "@gfean/react-native-bundle-drop",
-  "version": "0.10.0",
-  "nativeVersion": "0.6.0",
+  "version": "0.11.0",
+  "nativeVersion": "0.6.4",
   "description": "Over-the-air updates for Expo and bare React Native apps, with channels, staged rollouts, patch delivery, and rollback.",
   "main": "lib/index.js",
   "types": "lib/index.d.ts",
@@ -36,7 +36,7 @@
   ],
   "scripts": {
     "clean": "rimraf lib dist",
-    "build": "npm run clean && tsc -p tsconfig.build.json && node scripts/make-cli-executable.js",
+    "build": "npm run clean && tsc -p tsconfig.build.json && node scripts/build-fingerprint.cjs && node scripts/make-cli-executable.js",
     "test": "jest --runInBand",
     "typecheck": "tsc --noEmit -p tsconfig.json",
     "test:cli:compat": "node scripts/check-cli-compatibility.cjs",
@@ -52,11 +52,12 @@
     "codeql:local:fast": "node scripts/run-codeql-local.cjs fast",
     "codeql:local:full": "node scripts/run-codeql-local.cjs full",
     "codeql:local:compare": "node scripts/run-codeql-local.cjs compare",
-    "verify:quick": "yarn typecheck && yarn build && yarn coverage:gate && yarn test:expo:plugin && yarn package:check",
+    "verify:quick": "yarn typecheck && yarn build && yarn fingerprint:check && yarn coverage:gate && yarn test:expo:plugin && yarn package:check",
     "verify:native": "yarn test:android && yarn test:ios",
     "verify:release": "yarn verify:quick && yarn verify:native && yarn audit:production",
     "prepack": "npm run build",
-    "prepublishOnly": "npm run verify:release"
+    "prepublishOnly": "npm run verify:release",
+    "fingerprint:check": "node scripts/check-fingerprint-contract.cjs"
   },
   "devDependencies": {
     "@types/adm-zip": "^0.6.0",
@@ -88,6 +89,11 @@
     "ios/*.{m,h,mm,swift}",
     "third_party/xdelta/NOTICE",
     "third_party/xdelta/PROVENANCE.md",
+    "third_party/expo-fingerprint/build/**",
+    "third_party/expo-fingerprint/LICENSE",
+    "third_party/expo-fingerprint/NOTICE",
+    "third_party/expo-fingerprint/PROVENANCE.md",
+    "third_party/expo-fingerprint/upstream-files.json",
     "third_party/xdelta/bundle_drop_xdelta.c",
     "third_party/xdelta/bundle_drop_xdelta.h",
     "third_party/xdelta/xdelta3/LICENSE",
@@ -112,7 +118,9 @@
     "expo/bundle-drop-expo-gradle-plugin/build.gradle",
     "expo/bundle-drop-expo-gradle-plugin/src/main/**",
     "expo/ios/Sources/**",
-    "README.md"
+    "README.md",
+    "third_party/expo-fingerprint/scheme-1-contract.json",
+    "docs/native-fingerprint.md"
   ],
   "keywords": [
     "react-native",
@@ -175,12 +183,18 @@
     "axios": "1.21.0",
     "chalk": "4.1.2",
     "commander": "14.0.3",
+    "debug": "4.4.3",
     "diff": "9.0.0",
     "figures": "3.2.0",
     "form-data": "4.0.6",
     "fs-extra": "11.4.1",
+    "glob": "14.0.3",
+    "ignore": "5.3.2",
+    "minimatch": "11.0.3",
     "plist": "5.0.0",
-    "prompts": "2.4.2"
+    "prompts": "2.4.2",
+    "resolve-from": "5.0.0",
+    "semver": "7.7.4"
   },
   "publishConfig": {
     "access": "public"

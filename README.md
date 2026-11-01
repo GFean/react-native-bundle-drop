@@ -428,6 +428,25 @@ the entire `.bundle-drop` directory was deleted, and repairs the corresponding
 `.gitignore` rules. The lockfile contains public identity and verification material,
 not secrets, so commit it with the application.
 
+## Binary build numbers
+
+Uploads can record Android `versionCode` or iOS `CFBundleVersion` as optional
+display metadata. The dashboard shows it as `1.0.0 (122132)`. Expo uses its resolved
+build identity; bare projects use recognized literal Gradle/plist/Xcode settings.
+For custom bare build scripts, pass `--build-number 122132` with the upload. Unknown
+or ambiguous values stay absent. Build numbers describe upload context and do not
+restrict delivery or replace runtime compatibility checks.
+
+## Native fingerprinting (Beta)
+
+Opt into native fingerprinting to derive `runtimeVersion` from native inputs
+instead of manually bumping it. Compatible JavaScript updates retain the identity;
+detected native changes create a different one and require a new native binary.
+Ship a fingerprint-enabled binary first. Manual runtimes remain the default.
+
+You can also keep an explicit runtime version as a manual boundary alongside the
+fingerprint. See [configuration, compatibility rules and coverage limits](docs/native-fingerprint.md).
+
 ## Initialize the Runtime
 
 Call `BundleDrop.init` once, as early as possible in the app process.
@@ -482,6 +501,13 @@ using Expo Go for normal development.
 Debug builds and development clients also keep Metro as the JavaScript authority;
 they do not start an installed OTA bundle. Test the OTA lifecycle with a non-Debug
 Release build.
+
+Implicit Expo Debug/Expo Go suppression applies only to the current process, so
+opening a development build does not disable OTA startup in a later Release build.
+An explicit `init({ enabled: false })` still persists the app's disabled setting.
+For Expo runtime fingerprints, setup excludes transient Kotlin compiler sessions
+under Gradle plugin and Android `.kotlin` directories. Rerun `bundle-drop init`
+and review its setup changes to add missing exclusions to an existing integration.
 
 For managed/CNG projects, setup can leave `ios/` and `android/` absent. The config
 plugin generates the native integration during a later prebuild, `expo run:*`, or
@@ -611,7 +637,7 @@ it verifies or persists lane generation state. A missing, invalid, expired, or
 operator-disabled lease therefore falls back to `/ota/resolve`, even when cached
 manifest bytes remain cryptographically valid.
 
-Artifact download capabilities are intentionally short-lived. If an artifact URL is
+Managed artifact download capabilities are intentionally short-lived. If an artifact URL is
 rejected with HTTP 401 or 403 during download, the SDK reauthorizes the original
 signed selection once and retries only when its generation, target, transport,
 artifact references, and signed hashes are unchanged. Verification, reconstruction,
@@ -625,6 +651,8 @@ resolve and artifact-authorization decision.
 Unchanged install state is reported at most once every seven days. A current bundle
 hash, app environment, or user-property change is reported immediately; successful
 installs continue to use the separate idempotent installed receipt.
+The SDK's bounded [installed receipt history](docs/install-report-deduplication.md)
+survives recovery to the embedded app without retaining stale installed metadata.
 
 The manifest URL is derived from `manifestBaseUrl`, `manifestAccessId`, channel,
 platform, and runtime version. `manifestAccessId` is an opaque URL-routing value,
@@ -742,6 +770,30 @@ The same actions are available as standalone functions (`checkForUpdate`,
 `downloadUpdate`, `applyUpdate`, `setChannel`, `reportHealthy`, and others) for use
 outside React.
 
+With `policy: 'manual'`, an ordinary server `ROLLBACK` returned by
+`downloadUpdate()` stages a persisted rollback intent without restarting. Its
+result includes `status: 'rollback', pendingApply: true`; the hook and
+`getUpdateState()` also report `pendingApply`. Call `applyUpdate()` to activate it.
+This changes the previous behavior, which rolled back during download itself.
+An ordinary startup check does not activate that rollback.
+
+Before applying, Bundle Drop refreshes the decision and checks that the channel,
+runtime and current bundle still match the staged intent. A changed decision or
+selection returns `status: 'blocked', reason: 'ROLLBACK_REVALIDATION_FAILED'`;
+check/download again. If authority is unavailable, apply is blocked and the intent
+remains retryable. A new successful download/staging request replaces the intent.
+The intent does not pin a fallback bundle: at explicit apply, native recovery
+selects and validates a proven previous bundle or falls back to embedded. Missing,
+tampered, incompatible, quarantined and locally known-revoked fallbacks are excluded.
+
+Safety recovery remains distinct. The existing `CURRENT_REVOKED_NO_COMPATIBLE_TARGET`,
+`CURRENT_REVOKED_NO_SAFE_TARGET` and `CURRENT_REVOKED_ORIGIN_UNAVAILABLE` decisions
+retain authoritative embedded recovery, including during download or startup
+checking. Native crash recovery, runtime compatibility enforcement and persisted
+revocation checks are unchanged. `NOOP` (including no published bundle) does not
+create a rollback intent. The current backend's no-target revocation decisions
+are safety cases; they are not ordinary manual rollback requests.
+
 ## Targeted Rollouts
 
 Attach user properties to target specific cohorts when you stage a release:
@@ -769,6 +821,13 @@ manifest, verifies file hashes and sizes, and only then promotes the bundle.
   native xdelta support passes its probe.
 - If patch transport is unavailable or fails, the SDK falls back to the signed
   full ZIP.
+- For unmanaged delivery, a patch ZIP HTTP 401/403 permits one attempt of the
+  full ZIP explicitly supplied by the resolve decision for that same target.
+  The SDK does not discover another URL or switch targets. A missing fallback,
+  denied full ZIP, or failed verification fails without activation. Resolve/API
+  authorization denials and separate manifest/asset download denials do not
+  enter this exception. Managed delivery retains its bounded authorization
+  refresh and signed-identity checks described above.
 - Rollback remains a local pointer switch between verified bundle hashes.
 
 The production manifest contract is `manifestVersion: 1`. `jsBundleHash` is retained

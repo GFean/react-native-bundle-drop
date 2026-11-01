@@ -259,7 +259,7 @@ describe('CLI/scripts/expo/configure-expo', () => {
     expect(metro?.updated).toContain("getDefaultConfig } = require('expo/metro-config')");
     expect(fingerprintIgnore).toEqual(expect.objectContaining({
       original: null,
-      updated: '**/*-gradle-plugin/.kotlin/**/*\n',
+      updated: '**/*-gradle-plugin/.kotlin/**/*\n**/android/.kotlin/**/*\n',
     }));
     expect(gitignore).toEqual(expect.objectContaining({
       original: null,
@@ -314,9 +314,22 @@ describe('CLI/scripts/expo/configure-expo', () => {
 
     expect(fingerprintChange).toEqual(expect.objectContaining({
       original: 'ios/generated/**/*\n',
-      updated: 'ios/generated/**/*\n**/*-gradle-plugin/.kotlin/**/*\n',
+      updated: 'ios/generated/**/*\n**/*-gradle-plugin/.kotlin/**/*\n**/android/.kotlin/**/*\n',
     }));
 
+    applyExpoConfigurationChanges({ projectRoot, changes });
+    expect(planExpoProjectConfiguration({ projectRoot, migrateExpoUpdates: false })).toEqual([]);
+  });
+
+  it('upgrades the existing Gradle-plugin-only exclusion without duplicating it', () => {
+    write('package.json', '{"dependencies":{"expo":"55.0.0"}}');
+    write('app.json', '{"expo":{}}');
+    write('.fingerprintignore', '**/*-gradle-plugin/.kotlin/**/*\n');
+    write('bundle.drop.config.js', "module.exports = { runtimeVersion: { source: 'expo' } };\n");
+    const changes = planExpoProjectConfiguration({ projectRoot, migrateExpoUpdates: false });
+    expect(changes.find(change => change.file === '.fingerprintignore')?.updated).toBe(
+      '**/*-gradle-plugin/.kotlin/**/*\n**/android/.kotlin/**/*\n',
+    );
     applyExpoConfigurationChanges({ projectRoot, changes });
     expect(planExpoProjectConfiguration({ projectRoot, migrateExpoUpdates: false })).toEqual([]);
   });

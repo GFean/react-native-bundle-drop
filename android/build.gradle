@@ -133,6 +133,10 @@ if (!project.hasProperty("standalone") && rootProject.findProject(":bundledrop-e
       task.inputs.file(bundleDropConfigFile)
       task.inputs.file(bundleDropIdentityWriter)
       task.outputs.file(bundleDropIdentityOutput)
+      // Fingerprint inputs extend beyond the config and writer. Recollect on
+      // every build; the writer preserves the output mtime when bytes match.
+      task.outputs.upToDateWhen { false }
+      task.outputs.cacheIf { false }
       task.doLast {
         def nodeBinary = System.getenv("NODE_BINARY") ?: "node"
         bundleDropCommandExecutor.execute(bundleDropProjectRoot, nodeBinary, [

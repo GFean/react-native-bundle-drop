@@ -26,6 +26,7 @@ export type WithBundleDropOptions = {
 export type WithBundleDropExpoOptions = WithBundleDropOptions;
 
 type BaseBundleDropConfig = {
+  runtimeVersion?: { compatibilitySource?: string };
   serverUrl?: string;
   org?: { slug?: string };
   project?: { slug?: string };
@@ -124,6 +125,9 @@ export function withBundleDrop<T extends BundleDropMetroConfig>(
   const generatedConfigPath = writeGeneratedRuntimeConfig({
     projectRoot,
     runtimeDelivery: resolveRuntimeDelivery(projectRoot, baseConfig),
+    ...(baseConfig.runtimeVersion?.compatibilitySource === 'fingerprint'
+      ? { runtimeVersion: { ios: { source: 'native' as const }, android: { source: 'native' as const } } }
+      : {}),
   });
   return mergeMetroAlias(config, generatedConfigPath);
 }

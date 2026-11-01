@@ -26,6 +26,7 @@ const loadUpdateStateModule = (overrides?: {
   });
   const writeBundleInfoDurably = jest.fn(async (_info: Record<string, unknown>) => undefined);
   const deleteBundleInfo = jest.fn(async () => undefined);
+  const preserveInstalledReportHistory = jest.fn(async () => undefined);
   const reportInstalledIfReady = jest.fn(async (_state?: unknown) => {
     if (overrides?.reportError) {
       throw overrides.reportError;
@@ -47,6 +48,7 @@ const loadUpdateStateModule = (overrides?: {
     deleteBundleInfo,
   }));
   jest.doMock('../../manager/reporting', () => ({
+    preserveInstalledReportHistory,
     reportInstalledIfReady,
   }));
   jest.doMock('../../native/bundleDropNative', () => ({
@@ -76,6 +78,7 @@ const loadUpdateStateModule = (overrides?: {
       updateBundleInfo,
       writeBundleInfoDurably,
       deleteBundleInfo,
+      preserveInstalledReportHistory,
       reportInstalledIfReady,
       getDownloadedBundlePathNative,
       restartReactNativeNative,
@@ -174,6 +177,9 @@ describe('manager/updateState', () => {
     expect(mocks.updateBundleInfo).not.toHaveBeenCalled();
     expect(mocks.reportInstalledIfReady).not.toHaveBeenCalled();
     expect(mocks.deleteBundleInfo).toHaveBeenCalledTimes(1);
+    expect(mocks.preserveInstalledReportHistory).toHaveBeenCalledWith({ hash: 'hash-1', pendingApply: true });
+    expect(mocks.preserveInstalledReportHistory.mock.invocationCallOrder[0])
+      .toBeLessThan(mocks.deleteBundleInfo.mock.invocationCallOrder[0]);
 
     const noPending = loadUpdateStateModule({
       bundlePath: '/bundles/hash-1/main.jsbundle',

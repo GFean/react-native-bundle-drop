@@ -11,6 +11,9 @@ import type { ExpoBuildIdentity, MobilePlatform, ProjectType } from '../expo';
 import { resolveExpoUploadIdentity } from '../CLI/scripts/expo/build-receipt';
 import { buildCanonicalArtifact } from './canonicalArtifact';
 import { runBundleScript } from './bundle';
+import { readBundleDropRuntimeSelection } from '../expo/runtimeVersion';
+import type { RuntimeCompatibilityMetadata } from './runtimeCompatibilityMetadata';
+import { expoBuildNumber } from './nativeBuildNumber';
 
 const getExpoArtifactRoot = (projectRoot: string) =>
   path.join(projectRoot, '.bundle-drop', 'artifacts');
@@ -82,10 +85,19 @@ export async function exportProjectArtifact(options: ExportProjectArtifactOption
   fs.copyFileSync(exported.bundlePath, bundlePath);
   fs.copyFileSync(exported.sourceMapPath, sourceMapPath);
 
+  const selection = readBundleDropRuntimeSelection(projectRoot, options.platform);
+  const runtimeCompatibility: RuntimeCompatibilityMetadata = selection.source === 'fingerprint'
+    ? {
+        compatibilitySource: 'fingerprint',
+        fingerprint: { schemeVersion: 1, hash: buildIdentity.runtimeVersion, manualBoundary: selection.boundary },
+      }
+    : { compatibilitySource: 'manual' };
   const artifact = buildCanonicalArtifact({
     platform: options.platform,
     appVersion: buildIdentity.appVersion,
     runtimeVersion: buildIdentity.runtimeVersion,
+    runtimeCompatibility,
+    buildNumber: expoBuildNumber(buildIdentity),
     bundlePath,
     assetsDir: exported.assetsDirectory,
     outputDir,

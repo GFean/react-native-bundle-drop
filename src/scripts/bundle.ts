@@ -6,9 +6,12 @@ import * as path from 'path';
 
 import { BUNDLE_MANIFEST } from '../manifest/bundleManifest';
 import { buildCanonicalArtifact } from './canonicalArtifact';
+import { runtimeCompatibilityMetadata } from './runtimeCompatibilityMetadata';
+import { normalizeBuildNumber } from './nativeBuildNumber';
 import { findProjectRoot } from './projectRoot';
 import { resolveModuleFrom, type ModuleResolver } from './resolveModule';
 import { detectImplicitIosHermes } from './iosHermesDefault';
+import { resolveBundleDropRuntimeVersionAuthority } from '../expo/runtimeVersion';
 
 export { findProjectRoot };
 
@@ -259,6 +262,10 @@ export function runBundleScript(options: BundleScriptOptions = {}) {
   //eslint-disable-next-line
   const cfg = require(configPath) as Record<string, unknown>;
   runtimeVersion = (cfg?.runtimeVersion as Record<string, string> | undefined)?.[platform];
+  if ((cfg?.runtimeVersion as Record<string, unknown> | undefined)?.compatibilitySource === 'fingerprint') {
+    const authority = resolveBundleDropRuntimeVersionAuthority(projectRoot, platform as 'ios' | 'android');
+    if (authority.source === 'bundle-drop') runtimeVersion = authority.runtimeVersion;
+  }
   if (!runtimeVersion) {
     console.error(
       `❌ Missing runtimeVersion.${platform} in bundle.drop.config.js. Example: runtimeVersion: { ios: "1.0.0", android: "1.0.0" }`,
@@ -399,6 +406,8 @@ export function runBundleScript(options: BundleScriptOptions = {}) {
     platform: platform as 'ios' | 'android',
     appVersion,
     runtimeVersion,
+    runtimeCompatibility: runtimeCompatibilityMetadata(cfg.runtimeVersion, platform as 'ios' | 'android', runtimeVersion),
+    buildNumber: normalizeBuildNumber(process.env.BUNDLE_DROP_BUILD_NUMBER, platform as 'ios' | 'android'),
     bundlePath,
     assetsDir,
     outputDir,

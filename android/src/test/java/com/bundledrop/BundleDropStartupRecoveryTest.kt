@@ -1020,6 +1020,43 @@ class BundleDropStartupRecoveryTest {
     assertNull(alreadyEmbedded.hash)
   }
 
+  @Test
+  fun `explicit rollback revalidates fallback eligibility at activation time`() {
+    listOf("missing", "tampered", "runtime", "revoked", "quarantined").forEach { change ->
+      val root = tempFolder.newFolder("apply-rollback-$change")
+      val filesDir = root.parentFile!!
+      val stableHash = writeBundle(root, "stable-$change")
+      val candidateHash = writeBundle(root, "candidate-$change")
+      val controller = controller(root, filesDir, "process-$change")
+      controller.activateCandidate(stableHash, 2, "manual", 0.0)
+      val attempt = controller.selectForStartup()
+      assertTrue(controller.markHealthy(stableHash, attempt.attemptId!!))
+      controller.activateCandidate(candidateHash, 2, "manual", 0.0)
+      assertEquals(candidateHash, pointerHash(root, "current.json"))
+      // The app can wait between download/staging and explicit apply.
+      when (change) {
+        "missing" -> File(bundlePath(root, stableHash)).delete()
+        "tampered" -> File(bundlePath(root, stableHash)).writeText("changed")
+        "runtime" -> {
+          val manifest = File(root, "bundles/$stableHash/bundle-manifest.json")
+          manifest.writeText(manifest.readText().replace("runtime-1", "runtime-2"))
+        }
+        "revoked" -> controller.setRevokedHashes(setOf(stableHash))
+        "quarantined" -> {
+          val file = File(root, BundleDropStartupRecoveryController.RECOVERY_LEDGER)
+          val ledger = JSONObject(file.readText()).put("quarantinedHashes", JSONArray().put(stableHash))
+          file.writeText(ledger.toString())
+        }
+      }
+      val result = controller.rollbackStartupBundle(forceEmbedded = false)
+      assertTrue(change, result.rolledBack)
+      assertTrue(change, result.toEmbedded)
+      assertNull(change, result.hash)
+      assertFalse(change, File(root, "current.json").exists())
+      assertEquals(0, controller.snapshot().getJSONArray("pendingRecoveryEvents").length())
+    }
+  }
+
   @Suppress("UNUSED_PARAMETER")
   private fun controller(
     root: File,

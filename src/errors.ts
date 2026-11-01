@@ -70,7 +70,7 @@ export type InstallPhase = 'download' | 'install';
 export class InstallPhaseError extends Error {
   phase: InstallPhase;
   originalCause: unknown;
-  constructor(phase: InstallPhase, cause: unknown) {
+  constructor(phase: InstallPhase, cause: unknown, readonly downloadSource?: 'patch-set') {
     const msg = cause instanceof Error ? cause.message : String(cause);
     super(msg);
     this.name = 'InstallPhaseError';

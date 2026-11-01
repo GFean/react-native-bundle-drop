@@ -729,7 +729,7 @@ describe('CLI/scripts/upload-cli', () => {
     );
   });
 
-  it('uses an explicit iOS version without reading a supplied plist', async () => {
+  it('keeps an explicit iOS version when optional build-number metadata cannot be read', async () => {
     writeConfig(`module.exports = {
       serverUrl: 'https://api.example.com', org: { slug: 'alpha-org' }, project: { slug: 'demo-app' },
       runtimeVersion: { ios: '1.0.0' },
@@ -740,6 +740,7 @@ describe('CLI/scripts/upload-cli', () => {
       channel: 'Beta', token: 'override-token',
     });
     expect(formInstances[0].entries).toContainEqual({ name: 'version', value: '3.4.5' });
+    expect(mockLog.warn).toHaveBeenCalledWith(expect.stringContaining('Build number is unavailable'));
   });
 
   it.each(['<integer>123</integer>', '<string/>', '<string> </string>', '<dict/>'])
@@ -1776,6 +1777,7 @@ describe('CLI/scripts/upload-cli', () => {
       platform: 'ios',
       runtimeVersion: '1.0.0',
       appVersion: '1.0.0',
+      nativeVersion: '1.0.0(1)',
     });
     mockExportProjectArtifact.mockResolvedValue(artifact);
     mockAxiosNodePost.mockResolvedValue({ data: {} });
@@ -1846,6 +1848,56 @@ describe('CLI/scripts/upload-cli', () => {
     expect(result.packageVersion).toBeNull();
   });
 
+  it('records a static Android versionCode and forwards it into canonical packaging', async () => {
+    prepareAndroidUpload();
+    const gradle = path.join(tempProjectDir, 'android/app/build.gradle');
+    fs.mkdirSync(path.dirname(gradle), { recursive: true });
+    fs.writeFileSync(gradle, 'android { defaultConfig { versionCode 122132 } }');
+    await upload('android', { channel: 'develop', version: '1.0.0', token: 'token' });
+    expect((spawnCalls[0].options as any).env.BUNDLE_DROP_BUILD_NUMBER).toBe('122132');
+    expect(JSON.parse(fs.readFileSync(path.join(distDir, 'bundle-drop-result.json'), 'utf8')).buildNumber).toBe('122132');
+  });
+
+  it('accepts an explicit build number for a custom bare build and rejects invalid input before bundling', async () => {
+    prepareAndroidUpload();
+    await upload('android', { channel: 'develop', version: '1.0.0', token: 'token', buildNumber: '777' });
+    expect((spawnCalls[0].options as any).env.BUNDLE_DROP_BUILD_NUMBER).toBe('777');
+    spawnCalls.length = 0;
+    const exitSpy = mockProcessExit();
+    try {
+      await expect(upload('android', { channel: 'develop', version: '1.0.0', token: 'token', buildNumber: 'not-a-number' })).rejects.toMatchObject({ code: 1 });
+      expect(spawnCalls).toHaveLength(0);
+    } finally { exitSpy.mockRestore(); }
+  });
+
+  it('reads the iOS build number even when the app version was explicitly supplied', async () => {
+    prepareAndroidUpload();
+    prepareDist('ios');
+    const plist = path.join(tempProjectDir, 'Info.plist');
+    fs.writeFileSync(plist, '<?xml version="1.0"?><plist version="1.0"><dict><key>CFBundleVersion</key><string>12.3</string></dict></plist>');
+    await upload('ios', { channel: 'develop', version: '1.0.0', token: 'token', plistFile: plist });
+    expect((spawnCalls[0].options as any).env.BUNDLE_DROP_BUILD_NUMBER).toBe('12.3');
+  });
+
+  it.each(['12', '13'])('validates an explicit build number against the Expo identity: %s', async buildNumber => {
+    prepareAndroidUpload();
+    mockDetectProjectType.mockReturnValue('expo');
+    mockEvaluateExpoConfig.mockReturnValue({ exp: { plugins: [], updates: { enabled: false } } });
+    mockResolveExpoUploadIdentity.mockResolvedValue({ platform: 'ios', appVersion: '2.0.0', nativeVersion: '2.0.0(12)', runtimeVersion: 'expo-runtime' });
+    const artifact = prepareExpoDist('ios', 'expo-runtime');
+    mockExportProjectArtifact.mockResolvedValue(artifact);
+    if (buildNumber === '12') {
+      await upload('ios', { channel: 'develop', token: 'token', buildNumber });
+      expect(JSON.parse(fs.readFileSync(path.join(artifact.outputDir, 'bundle-drop-result.json'), 'utf8')).buildNumber).toBe('12');
+    } else {
+      const exitSpy = mockProcessExit();
+      try {
+        await expect(upload('ios', { channel: 'develop', token: 'token', buildNumber })).rejects.toMatchObject({ code: 1 });
+        expect(mockExportProjectArtifact).not.toHaveBeenCalled();
+      } finally { exitSpy.mockRestore(); }
+    }
+  });
+
   it('exports an Expo artifact with the exact proven build identity', async () => {
     const identity = {
       platform: 'ios',
@@ -1914,6 +1966,7 @@ describe('CLI/scripts/upload-cli', () => {
       platform: 'ios',
       runtimeVersion: 'ios-runtime',
       appVersion: '2.0.0',
+      nativeVersion: '2.0.0(12)',
     });
     mockExportProjectArtifact.mockResolvedValue(iosArtifact);
     mockAxiosNodePost.mockResolvedValue({ data: {} });
@@ -1949,6 +2002,7 @@ describe('CLI/scripts/upload-cli', () => {
         platform,
         runtimeVersion: `${platform}-runtime`,
         appVersion: '2.0.0',
+        nativeVersion: '2.0.0(12)',
       }),
     );
     mockExportProjectArtifact.mockImplementation(

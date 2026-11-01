@@ -9,7 +9,7 @@ import {
 import RNFS from '../native/fs';
 import { platform } from '../context';
 import { readJsonFile, verifyBundleDir } from '../install/bundleVerification';
-import { reportInstalledIfReady } from './reporting';
+import { preserveInstalledReportHistory, reportInstalledIfReady } from './reporting';
 import { BundleDropError } from '../errors';
 import { isBundleHashFailed } from './rollbackState';
 
@@ -18,6 +18,7 @@ export type ApplyUpdateResult =
   | { status: 'noBundle' }
   | { status: 'disabled' }
   | { status: 'alreadyApplied' }
+  | { status: 'blocked'; reason: 'ROLLBACK_REVALIDATION_FAILED' }
   | { status: 'blocked'; reason: 'BUNDLE_PREVIOUSLY_FAILED'; skippedHash?: string };
 
 export const getUpdateState = async (cached?: {
@@ -80,6 +81,7 @@ export const reconcileAppliedBundleOnLaunch = async (cached?: {
   const state = await getUpdateState({ ...cached, bundlePath });
   if (!state.hasBundle) {
     if (state.info) {
+      await preserveInstalledReportHistory(state.info);
       await deleteBundleInfo();
     }
     return null;

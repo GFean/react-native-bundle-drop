@@ -3,7 +3,7 @@ import RNFS from './native/fs';
 
 import { loadConfig } from './loadConfig';
 import { resolveExpoNativeRuntimeVersion } from './expo/nativeIdentity';
-import { isBundleDropNativeAvailable } from './native/bundleDropNative';
+import { getNativeRuntimeVersion, isBundleDropNativeAvailable } from './native/bundleDropNative';
 
 export const config = loadConfig();
 
@@ -22,7 +22,7 @@ const isExpoDevelopmentWithoutNativeAdapter =
   __DEV__ &&
   !isBundleDropNativeAvailable();
 
-export const runtimeVersion =
+const configuredRuntime =
   typeof platformRuntimeVersion === 'string'
     ? platformRuntimeVersion
     : platformRuntimeVersion?.source === 'appVersion' ||
@@ -31,6 +31,15 @@ export const runtimeVersion =
         ? undefined
         : resolveExpoNativeRuntimeVersion(platformRuntimeVersion.source)
       : undefined;
+
+const binaryRuntime = getNativeRuntimeVersion();
+const needsNativeRuntime = platformRuntimeVersion && typeof platformRuntimeVersion === 'object' &&
+  platformRuntimeVersion.source === 'native';
+if (needsNativeRuntime && binaryRuntime === undefined && !isExpoDevelopmentWithoutNativeAdapter &&
+    !(typeof __DEV__ !== 'undefined' && __DEV__)) {
+  throw new Error('[BundleDrop] Fingerprint runtime requires a new native binary with embedded identity.');
+}
+export const runtimeVersion = binaryRuntime !== undefined ? binaryRuntime ?? undefined : configuredRuntime;
 
 export const defaultChannel = config.defaultChannel || 'develop';
 

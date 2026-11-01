@@ -2,15 +2,20 @@ require "digest"
 require "fileutils"
 require "json"
 require "open3"
+require "pathname"
 require "shellwords"
 
 bundle_drop_native_runtime_identity_resource = lambda do
   return nil unless defined?(Pod::Config)
 
-  project_root = File.expand_path("..", Pod::Config.instance.installation_root.to_s)
+  project_root = File.realpath(File.expand_path("..", Pod::Config.instance.installation_root.to_s))
+  package_root = File.realpath(__dir__)
+  # Relocation must not change the podspec checksum. Relative consumer paths also
+  # keep different apps using one shared SDK package in separate resource slots.
+  project_relative_root = Pathname.new(project_root).relative_path_from(Pathname.new(package_root)).to_s
   config_path = File.join(project_root, "bundle.drop.config.js")
   writer_path = File.join(
-    __dir__,
+    package_root,
     "lib",
     "CLI",
     "scripts",
@@ -27,10 +32,10 @@ bundle_drop_native_runtime_identity_resource = lambda do
     "build",
     "generated",
     "runtime-identity",
-    Digest::SHA256.hexdigest(project_root)[0, 16],
+    Digest::SHA256.hexdigest(project_relative_root)[0, 16],
     "bundle-drop-build-identity.json"
   )
-  output_path = File.join(__dir__, resource_path)
+  output_path = File.join(package_root, resource_path)
 
   if File.file?(config_path)
     stdout, stderr, status = Open3.capture3(
@@ -65,21 +70,12 @@ bundle_drop_native_runtime_identity_resource = lambda do
       }) + "\n"
     )
   end
-  resource_path
+  { :resource_path => resource_path, :project_relative_root => project_relative_root }
 end
 
 package = JSON.parse(File.read(File.join(__dir__, "package.json")))
 native_version = package["nativeVersion"] || package["version"]
-native_runtime_identity_resource = bundle_drop_native_runtime_identity_resource.call
-native_runtime_identity_project_root = if native_runtime_identity_resource
-  File.expand_path("..", Pod::Config.instance.installation_root.to_s)
-end
-native_runtime_identity_writer = if native_runtime_identity_resource
-  File.join(__dir__, "lib", "CLI", "scripts", "native", "write-runtime-identity.js")
-end
-native_runtime_identity_output = if native_runtime_identity_resource
-  File.join(__dir__, native_runtime_identity_resource)
-end
+native_runtime_identity = bundle_drop_native_runtime_identity_resource.call
 
 Pod::Spec.new do |s|
   s.name         = "BundleDrop"
@@ -93,8 +89,8 @@ Pod::Spec.new do |s|
   s.source       = { :git => ".git", :tag => "#{s.version}" }
 
   s.source_files = "ios/**/*.{h,m,mm,swift}", "third_party/xdelta/**/*.{c,h}"
-  s.resources = native_runtime_identity_resource if native_runtime_identity_resource
-  if native_runtime_identity_resource
+  s.resources = native_runtime_identity[:resource_path] if native_runtime_identity
+  if native_runtime_identity
     # Intentionally omit output files so Xcode reruns this when a bare app builds,
     # even when CocoaPods has not been reinstalled since its config changed.
     s.script_phase = {
@@ -103,11 +99,12 @@ Pod::Spec.new do |s|
       :show_env_vars_in_log => "0",
       :script => <<-SCRIPT
 set -e
+package_root="$(cd "${PODS_TARGET_SRCROOT:?CocoaPods package root is missing}" && pwd -P)"
 "${NODE_BINARY:-node}" \
-  #{Shellwords.escape(native_runtime_identity_writer)} \
-  --project-root #{Shellwords.escape(native_runtime_identity_project_root)} \
+  "$package_root/lib/CLI/scripts/native/write-runtime-identity.js" \
+  --project-root "$package_root"/#{Shellwords.escape(native_runtime_identity[:project_relative_root])} \
   --platform ios \
-  --output #{Shellwords.escape(native_runtime_identity_output)}
+  --output "$package_root"/#{Shellwords.escape(native_runtime_identity[:resource_path])}
 SCRIPT
     }
   end
