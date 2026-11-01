@@ -415,6 +415,9 @@ class BundleDropModule(reactContext: ReactApplicationContext) :
 
   override fun getConstants(): MutableMap<String, Any> {
     val map = mutableMapOf<String, Any>()
+    @Suppress("UNCHECKED_CAST")
+    (map as MutableMap<String, Any?>)["nativeRuntimeVersion"] =
+      BundleDropNativePaths.readEmbeddedRuntimeVersion(reactApplicationContext)
     map["startupRecoveryProtocolVersion"] = BundleDropStartupRecoveryController.PROTOCOL_VERSION
     @Suppress("UNCHECKED_CAST")
     (map as MutableMap<String, Any?>)["startupRecoverySelectedHash"] =

@@ -12,6 +12,8 @@ type MockZipInstance = {
 
 const zipInstances: MockZipInstance[] = [];
 const mockExecSync = jest.fn();
+const mockResolveRuntime = jest.fn();
+jest.mock('../../expo/runtimeVersion', () => ({ resolveBundleDropRuntimeVersionAuthority: (...args: unknown[]) => mockResolveRuntime(...args) }));
 const spawnCalls: Array<{ executable: string; args: string[]; options: unknown }> = [];
 
 const quotePath = (value: string) => `"${value}"`;
@@ -134,6 +136,12 @@ describe('scripts/bundle', () => {
     fs.rmSync(distDir, { recursive: true, force: true });
   });
 
+  it('packages the independently calculated fingerprint in a bare OTA manifest', () => {
+    fs.writeFileSync(path.join(tempProjectDir, 'bundle.drop.config.js'), 'module.exports = { runtimeVersion: { compatibilitySource: "fingerprint" }, hermesBytecode: false };');
+    mockResolveRuntime.mockReturnValue({ source: 'bundle-drop', runtimeVersion: 'bdfp1-test' });
+    const result = runBundleScript({ platform: 'android', cwd: tempProjectDir });
+    expect(JSON.parse(fs.readFileSync(result.manifestPath, 'utf8')).runtimeVersion).toBe('bdfp1-test');
+  });
   it('finds the native project root from nested directories', () => {
     const nestedDir = path.join(tempProjectDir, 'android', 'app', 'src');
     fs.mkdirSync(nestedDir, { recursive: true });

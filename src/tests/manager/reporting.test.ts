@@ -2,8 +2,10 @@ import { reportInstalledIfReady, reportLocalRollback } from '../../manager/repor
 import { setMockConfig } from '../mocks/context';
 import { mockReportInstalled, mockReportLocalRollback } from '../mocks/api/clientApi';
 import { mockGetDownloadedBundlePathNative } from '../mocks/native/bundleDropNative';
-import { readMockJson, setMockFile } from '../mocks/native/fs';
+import { mockWriteFile, readMockJson, setMockFile } from '../mocks/native/fs';
 import { initializeBundleDropRuntime, resetBundleDropRuntimeForTests } from '../../runtime/initState';
+import { readBundleInfo } from '../../bundleInfo';
+import { reconcileAppliedBundleOnLaunch } from '../../manager/updateState';
 
 jest.mock('../../context', () => require('../mocks/context'));
 jest.mock('../../native/fs', () => require('../mocks/native/fs'));
@@ -13,10 +15,100 @@ jest.mock('../../native/bundleDropNative', () => require('../mocks/native/bundle
 const BUNDLE_INFO_PATH = '/mock/doc/bundle-info.json';
 const INSTALL_ID_PATH = '/mock/doc/bundle-drop/install-id.txt';
 const USER_PROPERTIES_PATH = '/mock/doc/bundle-drop/user-properties.json';
+const HISTORY_PATH = '/mock/doc/bundle-drop/installed-report-history.json';
 
 describe('manager/reporting', () => {
   beforeEach(() => {
     resetBundleDropRuntimeForTests();
+  });
+
+  it('keeps install-report history across embedded recovery and a later explicit reinstall', async () => {
+    setMockFile(INSTALL_ID_PATH, 'same-install');
+    setMockFile(BUNDLE_INFO_PATH, JSON.stringify({ hash: 'reinstalled', pendingApply: false }));
+    mockReportInstalled.mockResolvedValue({ data: undefined } as never);
+    await reportInstalledIfReady({ hasBundle: true, info: await readBundleInfo() });
+
+    await expect(reconcileAppliedBundleOnLaunch({ bundlePath: null })).resolves.toBeNull();
+    await expect(readBundleInfo()).resolves.toBeNull();
+    setMockFile(BUNDLE_INFO_PATH, JSON.stringify({ hash: 'reinstalled', pendingApply: false }));
+    await reportInstalledIfReady({ hasBundle: true, info: await readBundleInfo() });
+    await reportInstalledIfReady({ hasBundle: true, info: await readBundleInfo() });
+    expect(mockReportInstalled).toHaveBeenCalledTimes(1);
+  });
+
+  it('migrates legacy history before embedded recovery without reporting a stale installed bundle', async () => {
+    setMockFile(INSTALL_ID_PATH, 'legacy-install');
+    setMockFile(BUNDLE_INFO_PATH, JSON.stringify({
+      hash: 'previous', installedReportedHashes: ['legacy-target'], lastInstalledReportedHash: 'previous',
+    }));
+    await expect(reconcileAppliedBundleOnLaunch({ bundlePath: null })).resolves.toBeNull();
+    await expect(readBundleInfo()).resolves.toBeNull();
+    await reportInstalledIfReady({ hasBundle: true, info: { hash: 'legacy-target' } });
+    await reportInstalledIfReady({ hasBundle: true, info: { hash: 'previous' } });
+    expect(mockReportInstalled).not.toHaveBeenCalled();
+  });
+
+  it('preserves a completed report when embedded recovery deletes metadata during the HTTP request', async () => {
+    setMockFile(INSTALL_ID_PATH, 'install-race');
+    setMockFile(BUNDLE_INFO_PATH, JSON.stringify({ hash: 'race-target' }));
+    mockReportInstalled.mockImplementationOnce(async () => {
+      await reconcileAppliedBundleOnLaunch({ bundlePath: null });
+      return { data: undefined } as never;
+    });
+    await reportInstalledIfReady({ hasBundle: true, info: await readBundleInfo() });
+    await expect(readBundleInfo()).resolves.toBeNull();
+    await reportInstalledIfReady({ hasBundle: true, info: { hash: 'race-target' } });
+    expect(mockReportInstalled).toHaveBeenCalledTimes(1);
+  });
+
+  it('keeps concurrent reports for different targets in durable history', async () => {
+    setMockFile(INSTALL_ID_PATH, 'parallel-install');
+    mockReportInstalled.mockResolvedValue({ data: undefined } as never);
+    await Promise.all(['a', 'b'].map(hash =>
+      reportInstalledIfReady({ hasBundle: true, info: { hash } }),
+    ));
+    expect(readMockJson(HISTORY_PATH)).toEqual(expect.objectContaining({ hashes: ['a', 'b'] }));
+    await Promise.all(['a', 'b'].map(hash =>
+      reportInstalledIfReady({ hasBundle: true, info: { hash } }),
+    ));
+    expect(mockReportInstalled).toHaveBeenCalledTimes(2);
+  });
+
+  it('retries a failed report without prematurely marking the target as reported', async () => {
+    setMockFile(INSTALL_ID_PATH, 'retry-install');
+    const warn = jest.spyOn(console, 'warn').mockImplementation(() => {});
+    mockReportInstalled.mockRejectedValueOnce(new Error('offline'));
+    await reportInstalledIfReady({ hasBundle: true, info: { hash: 'retry' } });
+    expect(readMockJson(HISTORY_PATH)).toEqual(expect.objectContaining({ hashes: [] }));
+    mockReportInstalled.mockResolvedValue({ data: undefined } as never);
+    await reportInstalledIfReady({ hasBundle: true, info: { hash: 'retry' } });
+    expect(mockReportInstalled).toHaveBeenCalledTimes(2);
+    expect(readMockJson(HISTORY_PATH)).toEqual(expect.objectContaining({ hashes: ['retry'] }));
+    warn.mockRestore();
+  });
+
+  it('does not block embedded recovery on a history write failure', async () => {
+    setMockFile(INSTALL_ID_PATH, 'unwritable-install');
+    setMockFile(BUNDLE_INFO_PATH, JSON.stringify({ hash: 'old', installedReportedHashes: ['old'] }));
+    mockWriteFile.mockRejectedValueOnce(new Error('disk full'));
+    const warn = jest.spyOn(console, 'warn').mockImplementation(() => {});
+    await expect(reconcileAppliedBundleOnLaunch({ bundlePath: null })).resolves.toBeNull();
+    await expect(readBundleInfo()).resolves.toBeNull();
+    expect(warn).toHaveBeenCalledWith('⚠️ Failed to preserve install-report history:', expect.any(Error));
+    expect(mockReportInstalled).not.toHaveBeenCalled();
+    warn.mockRestore();
+  });
+
+  it('retries after a pre-report history write failure without sending an unrecorded request', async () => {
+    setMockFile(INSTALL_ID_PATH, 'write-retry');
+    mockWriteFile.mockRejectedValueOnce(new Error('disk full'));
+    const warn = jest.spyOn(console, 'warn').mockImplementation(() => {});
+    await reportInstalledIfReady({ hasBundle: true, info: { hash: 'write-retry' } });
+    expect(mockReportInstalled).not.toHaveBeenCalled();
+    mockReportInstalled.mockResolvedValue({ data: undefined } as never);
+    await reportInstalledIfReady({ hasBundle: true, info: { hash: 'write-retry' } });
+    expect(mockReportInstalled).toHaveBeenCalledTimes(1);
+    warn.mockRestore();
   });
 
   it('skips reporting when the bundle is missing, pending, not active, or already reported', async () => {

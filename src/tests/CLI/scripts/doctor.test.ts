@@ -296,7 +296,7 @@ describe('CLI/scripts/doctor', () => {
     expect(result.checks).toContainEqual(expect.objectContaining({
       name: 'ios build identity',
       status: 'pass',
-      message: expect.stringContaining('Bundle Drop literal resolved to ios-runtime'),
+      message: expect.stringContaining('Bundle Drop runtime resolved to ios-runtime'),
     }));
   });
 
@@ -403,6 +403,33 @@ describe('CLI/scripts/doctor', () => {
       }));
     }
   });
+
+  it.each(['missing', 'invalid-module', 'invalid-selector'])(
+    'reports active Expo Updates and an %s Bundle Drop config as blocking diagnostics',
+    async configState => {
+      const projectRoot = createExpoProject({
+        name: 'Fixture', slug: 'fixture', version: '1.0.0', runtimeVersion: 'runtime-1',
+      });
+      updatePackageJson(projectRoot, { 'expo-updates': '1.0.0' });
+      installBundleDropMetadata(projectRoot);
+      const configPath = path.join(projectRoot, 'bundle.drop.config.js');
+      if (configState === 'missing') fs.unlinkSync(configPath);
+      else fs.writeFileSync(configPath, configState === 'invalid-module'
+        ? 'module.exports = ;'
+        : "module.exports = { runtimeVersion: { source: 'unsupported' } };\n");
+
+      const result = await inspectProject({ cwd: projectRoot, projectType: 'expo', platform: 'ios' });
+      expect(result.checks).toEqual(expect.arrayContaining([
+        expect.objectContaining({ name: 'Expo Updates ownership', status: 'error' }),
+        expect.objectContaining({ name: 'Runtime authority', status: 'error' }),
+      ]));
+      expect(result.checks.some(check => check.name === 'ios build identity')).toBe(false);
+      const output = jest.spyOn(console, 'log').mockImplementation(() => {});
+      await expect(runDoctor({ cwd: projectRoot, projectType: 'expo', platform: 'ios' }))
+        .rejects.toThrow('blocking issue');
+      expect(output.mock.calls.flat().join('\n')).toContain('Active expo-updates can own startup');
+    },
+  );
 
   it('warns for explicitly disabled Expo Updates and accepts exact build receipt parity', async () => {
     const projectRoot = createExpoProject({

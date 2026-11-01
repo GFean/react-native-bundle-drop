@@ -12,6 +12,8 @@ import { checkComparisonAbort, runComparisonProcess } from './sight-compare/proc
 import type { DependencyProcessOptions } from './sight-compare/dependencies';
 import type { SightOtaMeasurement } from './sight-compare/types';
 import { collectComparisonAssets } from './sight-compare/assets';
+import { selectRuntimeVersion } from '../../fingerprint/config';
+import { calculateFingerprintSync } from '../../fingerprint/client';
 
 export type MeasureSightOtaOptions = {
   projectRoot: string;
@@ -143,15 +145,21 @@ export async function measureInstalledSightOta(options: MeasureSightOtaOptions):
       const configPath = path.join(options.projectRoot, 'bundle.drop.config.js');
       if (!fs.existsSync(configPath)) return unavailable('This project has no bundle.drop.config.js. Configure Bundle Drop to measure its OTA archive.');
       const config = createRequire(path.join(options.projectRoot, 'package.json'))(insideSnapshot(options, configPath)) as Record<string, unknown>;
-      const runtime = (config.runtimeVersion as Record<string, unknown> | undefined)?.[options.platform];
-      if (typeof runtime !== 'string' || !runtime.trim()) {
+      const runtimeConfig = config.runtimeVersion as Record<string, unknown> | undefined;
+      const runtime = runtimeConfig?.[options.platform];
+      if (!runtimeConfig?.source && runtimeConfig?.compatibilitySource !== 'fingerprint' && (typeof runtime !== 'string' || !runtime.trim())) {
         return unavailable(`Bundle Drop has no runtime version configured for ${options.platform}. Set runtimeVersion.${options.platform} in bundle.drop.config.js.`);
       }
+      const selection = selectRuntimeVersion(runtimeConfig, options.platform);
+      if (selection.source === 'expo') return unavailable('Bare projects cannot delegate runtime identity to Expo.');
+      reason = `Native fingerprint collection failed for ${options.platform} OTA packaging.`;
+      runtimeVersion = selection.source === 'fingerprint'
+        ? calculateFingerprintSync(options.projectRoot, options.platform).runtimeVersion
+        : selection.runtimeVersion;
       reason = `The native ${options.platform} app version could not be resolved unambiguously for Bundle Drop OTA packaging.`;
       const version = await bareAppVersion(options);
       if (!version) return unavailable(reason);
       appVersion = version;
-      runtimeVersion = runtime;
       hermes = shouldCompileHermesBytecode(config, options.platform, options.projectRoot, options.snapshotRoot);
     }
     const bundlePath = path.join(options.workDirectory, 'main.jsbundle');

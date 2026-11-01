@@ -47,6 +47,16 @@ try {
   run([npmCli, 'install', tarball, '--ignore-scripts', '--omit=peer', '--no-audit', '--no-fund'], fixture);
   const installed = path.join(fixture, 'node_modules/@gfean/react-native-bundle-drop');
   const cli = path.join(installed, 'lib/CLI/cli.js');
+  const axiosRoot = path.dirname(require.resolve('axios/package.json', { paths: [installed] }));
+  const redirects = require(require.resolve('follow-redirects/package.json', { paths: [axiosRoot] }));
+  assert(require('semver').gte(redirects.version, '1.16.2'), 'Fresh packed consumer must resolve the patched redirect transport');
+  const installedGlob = require(require.resolve('glob/package.json', { paths: [installed] }));
+  const matcherPath = require.resolve('minimatch', { paths: [installed] });
+  const { Minimatch } = require(matcherPath);
+  assert.equal(installedGlob.version, '14.0.3');
+  assert.equal(require(require.resolve('minimatch/package.json', { paths: [installed] })).version, '11.0.3');
+  assert(new Minimatch('**/a/b/c/**/d/**', { dot: true }).match('a/b/c/d/file.kt'));
+  assert(!new Minimatch('native/*(x)', { dot: true }).match('native/'));
   const help = run([cli, '--help'], fixture, 0, { FORCE_COLOR: '0' });
   for (const group of ['Setup', 'Analysis', 'Releases', 'Account']) assert.ok(help.includes(group), group);
   assert.ok(!/\u001b\[/.test(help), 'FORCE_COLOR=0 must suppress ANSI colors');
@@ -75,6 +85,37 @@ try {
     const reject = `require(process.argv[1]).readXmlPlist(process.argv[2]).then(()=>{process.exitCode=1},()=>{});`;
     run(['-e', reject, reader, xmlFile], fixture);
   }
+  // The installed package must preserve scheme1 even with a fresh npm dependency graph.
+  const goldens = require(path.join(root, 'src/tests/fingerprint/scheme-1-golden.json'));
+  const write = (relative, contents) => {
+    const file = path.join(fixture, relative);
+    fs.mkdirSync(path.dirname(file), { recursive: true });
+    fs.writeFileSync(file, contents);
+  };
+  write('package.json', '{"name":"fingerprint-fixture","scripts":{}}');
+  write('node_modules/react-native/package.json', '{"name":"react-native","version":"0.78.3"}');
+  write('node_modules/react-native/cli.js', 'console.log(JSON.stringify({root:process.cwd(),dependencies:{}}));');
+  write('android/app/build.gradle', 'android {\n defaultConfig {\n versionCode 1\n targetSdk 35\n }\n}\n');
+  write('android/app/src/main/Native.kt', 'fun feature() = false\n');
+  const setRuntime = (platform, schemeVersion = 1) => write('bundle.drop.config.js', `module.exports = ${JSON.stringify({
+    projectType: 'bare', runtimeVersion: { compatibilitySource: 'fingerprint',
+      fingerprint: { schemeVersion, nativeProjectMode: { [platform]: 'native' } } },
+  })};`);
+  setRuntime('android');
+  const androidReport = JSON.parse(run([cli, 'fingerprint', '--platform', 'android', '--json'], fixture));
+  assert.equal(androidReport.status, 'stable');
+  assert.equal(androidReport.nativeHash, goldens.cases.bareAndroid.nativeHash);
+  assert.equal(androidReport.runtimeVersion, goldens.cases.bareAndroid.runtimeVersion);
+  write('previous-experimental-report.json', JSON.stringify({ ...androidReport, status: 'experimental' }));
+  const compared = JSON.parse(run([cli, 'fingerprint', '--platform', 'android', '--compare', 'previous-experimental-report.json', '--json'], fixture));
+  assert.deepEqual(compared.changes, []);
+  write('ios/Fixture.xcodeproj/project.pbxproj', '{ objects = { ID = { buildSettings = { CURRENT_PROJECT_VERSION = 1; ENABLE_NATIVE_PROBE = NO; }; }; }; }');
+  setRuntime('ios');
+  const iosReport = JSON.parse(run([cli, 'fingerprint', '--platform', 'ios', '--json'], fixture));
+  assert.equal(iosReport.runtimeVersion, goldens.cases.bareIos.runtimeVersion);
+  setRuntime('android', 2);
+  assert.match(run([cli, 'fingerprint', '--platform', 'android', '--json'], fixture, 1), /Unsupported fingerprint scheme/);
+  console.log('Fresh packed CLI scheme1 goldens, experimental-report comparison and unsupported-scheme refusal passed.');
   console.log(`Packed CLI compatibility passed: ${process.platform}, Node ${process.version}, package ${version}`);
 } finally {
   fs.rmSync(temporary, { recursive: true, force: true });

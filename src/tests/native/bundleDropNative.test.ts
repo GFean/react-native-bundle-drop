@@ -19,6 +19,35 @@ const loadBundleDropNativeModule = (
 };
 
 describe('native/bundleDropNative', () => {
+  it.each([ACTIVE_HASH, null])('captures getter-backed startup selection %s for the running JS lifetime', initialHash => {
+    let selectedHash: string | null = initialHash;
+    const module = loadBundleDropNativeModule(({ NativeModules }) => {
+      const target = NativeModules.BundleDrop;
+      delete target.startupRecoverySelectedHash;
+      NativeModules.BundleDrop = new Proxy(target, {
+        get: (value, property) => property === 'startupRecoverySelectedHash' ? selectedHash : value[property],
+      });
+      expect(Object.prototype.hasOwnProperty.call(NativeModules.BundleDrop, 'startupRecoverySelectedHash')).toBe(false);
+    });
+    expect(module.getStartupRecoverySelectedHashNative()).toBe(initialHash);
+    selectedHash = LATER_HASH;
+    expect(module.getStartupRecoverySelectedHashNative()).toBe(initialHash);
+  });
+
+  it('captures constants exposed by a New Architecture host-object getter', () => {
+    let runtime = 'bdfp1-from-binary';
+    const module = loadBundleDropNativeModule(({ NativeModules }) => {
+      const target = NativeModules.BundleDrop;
+      delete target.nativeRuntimeVersion;
+      NativeModules.BundleDrop = new Proxy(target, {
+        get: (value, property) => property === 'nativeRuntimeVersion' ? runtime : value[property],
+      });
+      expect(Object.prototype.hasOwnProperty.call(NativeModules.BundleDrop, 'nativeRuntimeVersion')).toBe(false);
+    });
+    expect(module.getNativeRuntimeVersion()).toBe('bdfp1-from-binary');
+    runtime = 'changed-later';
+    expect(module.getNativeRuntimeVersion()).toBe('bdfp1-from-binary');
+  });
   it('reports whether the Bundle Drop native bridge is available', () => {
     const available = loadBundleDropNativeModule();
     const reactNative = require('react-native') as typeof import('react-native');

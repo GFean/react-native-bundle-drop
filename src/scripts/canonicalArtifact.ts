@@ -2,6 +2,7 @@ import AdmZip from 'adm-zip';
 import { createHash } from 'crypto';
 import * as fs from 'fs';
 import * as path from 'path';
+import type { RuntimeCompatibilityMetadata } from './runtimeCompatibilityMetadata';
 
 import {
   BUNDLE_MANIFEST,
@@ -18,6 +19,8 @@ export type BuildCanonicalArtifactOptions = {
   platform: CanonicalArtifactPlatform;
   appVersion: string;
   runtimeVersion: string;
+  runtimeCompatibility?: RuntimeCompatibilityMetadata;
+  buildNumber?: string | null;
   bundlePath: string;
   assetsDir: string;
   outputDir: string;
@@ -142,6 +145,8 @@ export function buildCanonicalArtifact(
     platform,
     appVersion,
     runtimeVersion,
+    runtimeCompatibility = { compatibilitySource: 'manual' },
+    buildNumber,
     bundlePath,
     assetsDir,
     outputDir,
@@ -170,6 +175,8 @@ export function buildCanonicalArtifact(
     bundlePath: 'main.jsbundle',
     sizeInBytes: bundleBuffer.length,
     runtimeVersion,
+    ...runtimeCompatibility,
+    ...(buildNumber != null ? { buildNumber } : {}),
   };
   const metadataBuffer = Buffer.from(JSON.stringify(metadata, null, 2));
   const stagedFiles = new Map<string, Buffer>([

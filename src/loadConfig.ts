@@ -1,3 +1,5 @@
+import type { FingerprintOptions } from './fingerprint/types';
+
 /**
  * Shape of `bundle.drop.config.js` after it is loaded through Metro.
  */
@@ -55,10 +57,13 @@ export type BundleDropProjectConfig = {
    */
   runtimeVersion?:
     | {
+        /** Missing selector preserves manual runtimes. Fingerprinting is experimental. */
+        compatibilitySource?: 'manual' | 'fingerprint';
+        fingerprint?: FingerprintOptions;
         /** iOS runtime version. */
-        ios?: string | { source: 'appVersion' | 'nativeVersion' };
+        ios?: string | { source: 'appVersion' | 'nativeVersion' | 'native' };
         /** Android runtime version. */
-        android?: string | { source: 'appVersion' | 'nativeVersion' };
+        android?: string | { source: 'appVersion' | 'nativeVersion' | 'native' };
       }
     | {
         /** Explicitly resolve concrete values from the evaluated Expo app config. */

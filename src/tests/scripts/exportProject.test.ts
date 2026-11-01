@@ -56,6 +56,7 @@ describe('exportProjectArtifact', () => {
     const root = createTempProjectDir();
     roots.push(root);
     fs.writeJsonSync(path.join(root, 'package.json'), packageJson);
+    fs.writeFileSync(path.join(root, 'bundle.drop.config.js'), "module.exports = { runtimeVersion: { source: 'expo' } };");
     return root;
   };
 
@@ -91,7 +92,7 @@ describe('exportProjectArtifact', () => {
     for (const root of roots.splice(0)) removeTempDir(root);
   });
 
-  it('keeps bare React Native publishing delegated to the unchanged bundle script', async () => {
+  it('keeps bare React Native publishing delegated to the bundle script', async () => {
     const root = fixture();
     mockDetectProjectType.mockReturnValue('bare');
 
@@ -119,6 +120,22 @@ describe('exportProjectArtifact', () => {
     });
     expect(mockExportExpoProject).not.toHaveBeenCalled();
     expect(mockBuildCanonicalArtifact).not.toHaveBeenCalled();
+  });
+
+  it('passes explicit fingerprint mode and the readable boundary to canonical metadata', async () => {
+    const root = fixture({ dependencies: { expo: '57.0.0' } });
+    fs.writeFileSync(path.join(root, 'bundle.drop.config.js'), `module.exports = {
+      runtimeVersion: { compatibilitySource: 'fingerprint', ios: '4.0.27', fingerprint: { nativeProjectMode: { ios: 'cng' } } }
+    };`);
+    const runtimeVersion = `bdfp1-${'a'.repeat(64)}`;
+    await exportProjectArtifact({
+      projectRoot: root, platform: 'ios', appVersion: '2.0.0', generateSourceMap: true,
+      buildIdentity: { ...iosIdentity, runtimeVersion },
+    });
+    expect(mockBuildCanonicalArtifact).toHaveBeenCalledWith(expect.objectContaining({
+      runtimeVersion,
+      runtimeCompatibility: { compatibilitySource: 'fingerprint', fingerprint: { schemeVersion: 1, hash: runtimeVersion, manualBoundary: '4.0.27' } },
+    }));
   });
 
   it('normalizes Expo export:embed output through the canonical artifact builder', async () => {
@@ -154,6 +171,8 @@ describe('exportProjectArtifact', () => {
       platform: 'ios',
       appVersion: '2.0.0',
       runtimeVersion: 'ios-runtime',
+      runtimeCompatibility: { compatibilitySource: 'manual' },
+      buildNumber: '12',
       bundlePath: path.join(root, '.bundle-drop/artifacts/expo-artifacts-ios/main.jsbundle'),
       assetsDir: path.join(root, '.bundle-drop/artifacts/expo-export-ios/assets'),
       outputDir: path.join(root, '.bundle-drop/artifacts/expo-artifacts-ios'),

@@ -1,8 +1,35 @@
 import Foundation
 import React
+import UIKit
 
 @objc(BundleDropModule)
 final class BundleDropModule: NSObject {
+
+  private var startupContentObserver: NSObjectProtocol?
+
+  @objc weak var bridge: RCTBridge?
+
+  deinit {
+    if let startupContentObserver { NotificationCenter.default.removeObserver(startupContentObserver) }
+  }
+
+  private func observeStartupContentIfNeeded() {
+    guard startupContentObserver == nil,
+          let bridge,
+          let url = BundleDropStartupRecoveryAdapter.bundleURL(from: bridge),
+          let viewRegistry = bridge.uiManager else { return }
+    startupContentObserver = BundleDropStartupRecoveryAdapter.observeRuntimeContent(
+      bundleURL: url,
+      currentContentRoot: { [weak viewRegistry] in
+        guard let viewRegistry else { return nil }
+        return BundleDropReactContent.currentRoot(in: viewRegistry)
+      },
+      ownsRoot: { [weak viewRegistry] root in
+        guard let viewRegistry else { return false }
+        return BundleDropReactContent.ownsRoot(root, in: viewRegistry)
+      }
+    )
+  }
 
   private static var isReloading = false
   private static let fm = FileManager.default
@@ -150,24 +177,13 @@ final class BundleDropModule: NSObject {
         return
       }
 
-      guard let stagedURL = BundleDropStartupRecoveryAdapter.downloadedBundleURL() else {
-        print("⚠️ No downloaded bundle found; skipping restart.")
-        return
-      }
-
-      let size = BundleDropLocatorCore.fileSize(at: stagedURL)
-      if size < 1024 {
-        print("⚠️ Bundle exists but looks invalid (size=\(size)). Skipping restart.")
-        return
-      }
-
       guard let url = BundleDropStartupRecoveryAdapter.beginReload() else {
-        print("⚠️ Downloaded bundle became unavailable; skipping restart.")
+        print("⚠️ No validated reload target; skipping restart.")
         return
       }
 
       Self.isReloading = true
-      print("🔄 Restarting RN from \(url.path) size=\(size)")
+      print("🔄 Restarting RN from \(url.path)")
 
       RCTReloadCommandSetBundleURL(url)
       RCTTriggerReloadCommandListeners("bundle-drop-restart")
@@ -182,6 +198,7 @@ final class BundleDropModule: NSObject {
 
   @objc
   func constantsToExport() -> [String: Any] {
+    observeStartupContentIfNeeded()
     let fm = FileManager.default
     let docs = fm.urls(for: .documentDirectory, in: .userDomainMask).first?.path ?? ""
     let lib = fm.urls(for: .libraryDirectory, in: .userDomainMask).first?.path ?? ""
@@ -190,6 +207,7 @@ final class BundleDropModule: NSObject {
       "DocumentDirectoryPath": docs,
       "LibraryDirectoryPath": lib,
       "startupRecoveryProtocolVersion": BundleDropStartupRecoveryAdapter.protocolVersion,
+      "nativeRuntimeVersion": BundleDropLocatorCore.getRuntimeVersion() ?? NSNull(),
       "startupRecoverySelectedHash": BundleDropStartupRecoveryAdapter.capturedSelectedHash() ?? NSNull(),
       "startupRecoveryAttemptHash": attempt.hash ?? NSNull(),
       "startupRecoveryAttemptId": attempt.attemptId ?? NSNull(),

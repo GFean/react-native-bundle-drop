@@ -110,7 +110,7 @@ export async function installFromPatchSet(params: InstallFromPatchSetParams): Pr
     try {
       await RNFS.downloadFile(patchesUrl, tempZipPath);
     } catch (e) {
-      throw new InstallPhaseError('download', e);
+      throw new InstallPhaseError('download', e, 'patch-set');
     }
     const actualPatchSetHash = await RNFS.sha256File(tempZipPath);
     if (actualPatchSetHash !== patchSetHash) {

@@ -124,6 +124,9 @@ final class BundleDropStartupRecoveryController {
   private let makeId: () -> String
   private let failpoint: Failpoint?
   private let lock = NSRecursiveLock()
+  // Process-local and tied to the exact committed rollback. A missing pointer
+  // alone must never authorize switching a running React instance to embedded.
+  private var embeddedReloadRevision: Int?
 
   private var ledgerURL: URL {
     bundleDropRoot.appendingPathComponent("recovery-ledger.json")
@@ -522,6 +525,38 @@ final class BundleDropStartupRecoveryController {
     }
   }
 
+  func prepareReload(embeddedBundleURL: URL?) -> (url: URL, selection: BundleDropStartupSelection)? {
+    withLock {
+      guard hasExpectedIdentity else { return nil }
+      if let current = passiveCurrentBundle() {
+        embeddedReloadRevision = nil
+        guard BundleDropLocatorCore.fileSize(at: current) >= 1024 else { return nil }
+        let selection = selectStartupBundle(beginReload: true)
+        guard let url = selection.bundleURL else { return nil }
+        return (url, selection)
+      }
+
+      guard let revision = embeddedReloadRevision,
+            let ledger = try? readLedgerFromDisk(),
+            ledger.revision == revision,
+            ledger.phase == .idle,
+            ledger.pendingTransition == nil,
+            ledger.binaryIdentity == expectedBinaryIdentity,
+            ledger.runtimeIdentity == expectedRuntimeVersion,
+            !fileManager.fileExists(atPath: bundleDropRoot.appendingPathComponent("current.json").path)
+      else {
+        embeddedReloadRevision = nil
+        return nil
+      }
+      guard let embeddedBundleURL else { return nil }
+      embeddedReloadRevision = nil
+      return (
+        embeddedBundleURL,
+        BundleDropStartupSelection(bundleURL: nil, attemptHash: nil, attemptId: nil)
+      )
+    }
+  }
+
   func setRevokedHashes(_ hashes: [String]) throws {
     try withLock {
       guard hashes.allSatisfy(Self.isCanonicalHash) else {
@@ -549,6 +584,8 @@ final class BundleDropStartupRecoveryController {
   func rollback(forceEmbedded: Bool) throws -> BundleDropStartupRollbackResult {
     try withLock {
       var ledger = try readLedgerImportingLegacyState()
+      let continuingEmbeddedReload = embeddedReloadRevision == ledger.revision
+      embeddedReloadRevision = nil
       let current = BundleDropOtaResolver.readPointer(
         named: "current.json",
         bundleDropRoot: bundleDropRoot,
@@ -578,10 +615,16 @@ final class BundleDropStartupRecoveryController {
       try commit(&ledger)
       try failpoint?("afterRollbackPrepared")
       try completePendingTransition(ledger: &ledger)
+      // Transition completion can reject a previous bundle that changed after
+      // preparation. Report and authorize only the destination actually committed.
+      let committedHash = ledger.stableHash
+      if committedHash == nil, current != nil || continuingEmbeddedReload {
+        embeddedReloadRevision = ledger.revision
+      }
       return BundleDropStartupRollbackResult(
         rolledBack: current != nil,
-        toEmbedded: fallback == nil,
-        hash: fallback?.hash
+        toEmbedded: committedHash == nil,
+        hash: committedHash
       )
     }
   }
@@ -688,6 +731,9 @@ final class BundleDropStartupRecoveryController {
       ledger.stableHash = nil
       ledger.previousStableHash = nil
       ledger.pendingTransition = transition
+      if transition.kind == "rollback" {
+        ledger.phase = .idle
+      }
       if transition.kind == "recovery",
          let eventIndex = ledger.pendingRecoveryEvents.lastIndex(where: {
            $0.recoveryTarget == "previous" && $0.recoveredHash == targetHash

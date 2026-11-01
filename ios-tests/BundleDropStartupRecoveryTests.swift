@@ -3,6 +3,151 @@ import XCTest
 @testable import BundleDropIOSCore
 
 final class BundleDropStartupRecoveryTests: XCTestCase {
+  func testRuntimeOwnedContentPreservesManualHealthAndRejectsStaleAutoCallbacks() throws {
+    for mode in ["auto", "manual"] {
+      let candidate = try makeBundle(contents: String(repeating: mode, count: 256))
+      let controller = makeController()
+      _ = try controller.activateCandidate(hash: candidate.hash, maxCrashCount: 2, healthCheckMode: mode, healthyAfterSec: 0)
+      let old = controller.selectStartupBundle()
+      let current = try XCTUnwrap(controller.prepareReload(embeddedBundleURL: nil)).selection
+      let bindings = BundleDropStartupContentBindings()
+      let center = NotificationCenter()
+      let root = NSObject()
+      bindings.capture(hash: current.attemptHash, attemptId: current.attemptId, bundleURL: current.bundleURL)
+      let observer = try XCTUnwrap(bindings.observeRuntimeContent(
+        bundleURL: try XCTUnwrap(current.bundleURL), notificationCenter: center,
+        ownsRoot: { $0 === root }, contentAppeared: { binding in
+          if controller.markContentAppeared(hash: binding.hash, attemptId: binding.attemptId) != nil {
+            XCTAssertTrue(controller.markHealthy(hash: binding.hash, attemptId: binding.attemptId))
+          }
+        }
+      ))
+      defer { center.removeObserver(observer) }
+      XCTAssertNil(controller.markContentAppeared(hash: candidate.hash, attemptId: try XCTUnwrap(old.attemptId)))
+      XCTAssertFalse(controller.markHealthy(hash: candidate.hash, attemptId: try XCTUnwrap(old.attemptId)))
+      center.post(name: Notification.Name("RCTContentDidAppearNotification"), object: root)
+      if mode == "auto" {
+        XCTAssertEqual(try readLedger().phase, .stable)
+      } else {
+        XCTAssertEqual(try readLedger().phase, .launching)
+        XCTAssertFalse(try XCTUnwrap(readLedger().activeAttempt).contentAppeared)
+        XCTAssertTrue(controller.markHealthy(hash: candidate.hash, attemptId: try XCTUnwrap(current.attemptId)))
+      }
+    }
+  }
+
+  func testEmbeddedReloadRequiresCommittedRollbackAndIsConsumedOnce() throws {
+    let controller = makeController()
+    let embedded = tempRoot.appendingPathComponent("embedded/main.jsbundle")
+    XCTAssertNil(controller.prepareReload(embeddedBundleURL: embedded))
+    let candidate = try makeBundle(contents: String(repeating: "candidate", count: 256))
+    _ = try controller.activateCandidate(hash: candidate.hash, maxCrashCount: 2, healthCheckMode: "manual", healthyAfterSec: 0)
+    let attempt = controller.selectStartupBundle()
+    let result = try controller.rollback(forceEmbedded: true)
+    XCTAssertTrue(result.rolledBack)
+    XCTAssertTrue(result.toEmbedded)
+    // A missing bundled resource does not consume a valid permit.
+    XCTAssertNil(controller.prepareReload(embeddedBundleURL: nil))
+    let reload = try XCTUnwrap(controller.prepareReload(embeddedBundleURL: embedded))
+    XCTAssertEqual(reload.url, embedded)
+    XCTAssertNil(reload.selection.bundleURL)
+    BundleDropStartupRecoveryAdapter.captureStartupSelection(reload.selection)
+    XCTAssertNil(BundleDropStartupRecoveryAdapter.capturedSelectedHash())
+    XCTAssertNil(BundleDropStartupRecoveryAdapter.capturedAttempt().attemptId)
+    XCTAssertFalse(controller.markHealthy(hash: candidate.hash, attemptId: try XCTUnwrap(attempt.attemptId)))
+    XCTAssertNil(controller.prepareReload(embeddedBundleURL: embedded))
+  }
+
+  func testIdempotentRollbackPreservesOnlyExistingEmbeddedReloadPermit() throws {
+    let controller = makeController()
+    let embedded = tempRoot.appendingPathComponent("embedded/main.jsbundle")
+    XCTAssertFalse(try controller.rollback(forceEmbedded: true).rolledBack)
+    XCTAssertNil(controller.prepareReload(embeddedBundleURL: embedded))
+    let candidate = try makeBundle(contents: "candidate")
+    _ = try controller.activateCandidate(hash: candidate.hash, maxCrashCount: 2, healthCheckMode: "manual", healthyAfterSec: 0)
+    XCTAssertTrue(try controller.rollback(forceEmbedded: true).rolledBack)
+    XCTAssertFalse(try controller.rollback(forceEmbedded: true).rolledBack)
+    XCTAssertEqual(controller.prepareReload(embeddedBundleURL: embedded)?.url, embedded)
+  }
+
+  func testEmbeddedReloadPermitDoesNotSurviveSupersedingStateOrProcess() throws {
+    let controller = makeController()
+    let embedded = tempRoot.appendingPathComponent("embedded/main.jsbundle")
+    let first = try makeBundle(contents: "first")
+    _ = try controller.activateCandidate(hash: first.hash, maxCrashCount: 2, healthCheckMode: "manual", healthyAfterSec: 0)
+    _ = try controller.rollback(forceEmbedded: true)
+    XCTAssertNil(makeController().prepareReload(embeddedBundleURL: embedded))
+    let second = try makeBundle(contents: String(repeating: "second", count: 256))
+    _ = try controller.activateCandidate(hash: second.hash, maxCrashCount: 2, healthCheckMode: "manual", healthyAfterSec: 0)
+    try FileManager.default.removeItem(at: second.bundleURL)
+    XCTAssertNil(controller.prepareReload(embeddedBundleURL: embedded))
+  }
+
+  func testEmbeddedReloadRejectsChangedAuthorityAndUnexpectedCurrentPointer() throws {
+    let candidate = try makeBundle(contents: "candidate")
+    let controller = makeController()
+    let embedded = tempRoot.appendingPathComponent("embedded/main.jsbundle")
+    _ = try controller.activateCandidate(hash: candidate.hash, maxCrashCount: 2, healthCheckMode: "manual", healthyAfterSec: 0)
+    _ = try controller.rollback(forceEmbedded: true)
+    try controller.setRevokedHashes([candidate.hash])
+    XCTAssertNil(controller.prepareReload(embeddedBundleURL: embedded))
+    _ = try controller.activateCandidate(hash: try makeBundle(contents: "other").hash, maxCrashCount: 2, healthCheckMode: "manual", healthyAfterSec: 0)
+    _ = try controller.rollback(forceEmbedded: true)
+    try "{}".write(to: tempRoot.appendingPathComponent("current.json"), atomically: true, encoding: .utf8)
+    XCTAssertNil(controller.prepareReload(embeddedBundleURL: embedded))
+  }
+
+  func testReloadRetainsOtaSizeValidationAndStartsFreshAttemptWithoutCrashCharge() throws {
+    let controller = makeController()
+    let tiny = try makeBundle(contents: "tiny")
+    _ = try controller.activateCandidate(hash: tiny.hash, maxCrashCount: 2, healthCheckMode: "manual", healthyAfterSec: 0)
+    XCTAssertNil(controller.prepareReload(embeddedBundleURL: nil))
+    XCTAssertEqual(try readLedger().phase, .armed)
+    let candidate = try makeBundle(contents: String(repeating: "valid", count: 256))
+    _ = try controller.activateCandidate(hash: candidate.hash, maxCrashCount: 2, healthCheckMode: "manual", healthyAfterSec: 0)
+    let initial = controller.selectStartupBundle()
+    let reload = try XCTUnwrap(controller.prepareReload(embeddedBundleURL: nil))
+    XCTAssertEqual(reload.url, candidate.bundleURL)
+    XCTAssertNotEqual(reload.selection.attemptId, initial.attemptId)
+    XCTAssertEqual(try readLedger().activeAttempt?.unacknowledgedLaunchCount, 0)
+  }
+
+  func testPreviousRollbackStillReloadsVerifiedOta() throws {
+    let stable = try makeBundle(contents: String(repeating: "stable", count: 256))
+    try establishNativeStable(stable.hash)
+    let candidate = try makeBundle(contents: "candidate")
+    let controller = makeController()
+    _ = try controller.activateCandidate(hash: candidate.hash, maxCrashCount: 2, healthCheckMode: "manual", healthyAfterSec: 0)
+    XCTAssertFalse(try controller.rollback(forceEmbedded: false).toEmbedded)
+    XCTAssertEqual(controller.prepareReload(embeddedBundleURL: nil)?.url, stable.bundleURL)
+  }
+
+  func testFailedRollbackDoesNotAuthorizeEmbeddedReload() throws {
+    let candidate = try makeBundle(contents: "candidate")
+    let controller = makeController(failpoint: { if $0 == "afterRollbackPrepared" { throw TestError.interrupted } })
+    _ = try controller.activateCandidate(hash: candidate.hash, maxCrashCount: 2, healthCheckMode: "manual", healthyAfterSec: 0)
+    XCTAssertThrowsError(try controller.rollback(forceEmbedded: true))
+    XCTAssertNil(controller.prepareReload(embeddedBundleURL: tempRoot.appendingPathComponent("embedded/main.jsbundle")))
+  }
+
+  func testRollbackReloadUsesCommittedEmbeddedDestinationAfterPreviousChanges() throws {
+    let stable = try makeBundle(contents: String(repeating: "stable", count: 256))
+    try establishNativeStable(stable.hash)
+    let candidate = try makeBundle(contents: "candidate")
+    let controller = makeController(failpoint: { point in
+      if point == "afterRollbackPrepared" {
+        try "tampered".write(to: stable.bundleURL, atomically: true, encoding: .utf8)
+      }
+    })
+    _ = try controller.activateCandidate(hash: candidate.hash, maxCrashCount: 2, healthCheckMode: "manual", healthyAfterSec: 0)
+    let result = try controller.rollback(forceEmbedded: false)
+    XCTAssertTrue(result.toEmbedded)
+    XCTAssertNil(result.hash)
+    XCTAssertEqual(try readLedger().phase, .idle)
+    let embedded = tempRoot.appendingPathComponent("embedded/main.jsbundle")
+    XCTAssertEqual(controller.prepareReload(embeddedBundleURL: embedded)?.url, embedded)
+  }
+
   func testActivationRejectsInvalidPolicyInsteadOfClampingIt() throws {
     let candidate = try makeBundle(contents: "invalid-policy")
     let controller = makeController()
@@ -1113,6 +1258,43 @@ final class BundleDropStartupRecoveryTests: XCTestCase {
     XCTAssertEqual(readPointer("current.json")?.hash, nextCandidate.hash)
     XCTAssertNil(try readLedger().pendingTransition)
     XCTAssertEqual(try readLedger().reservedAttemptId, "next-attempt")
+  }
+
+  func testExplicitRollbackRevalidatesFallbackAtActivationTime() throws {
+    for change in ["missing", "tampered", "runtime", "revoked", "quarantined"] {
+      let stable = try makeBundle(contents: "stable-\(change)")
+      let candidate = try makeBundle(contents: "candidate-\(change)")
+      try establishNativeStable(stable.hash)
+      let controller = makeController()
+      _ = try controller.activateCandidate(
+        hash: candidate.hash, maxCrashCount: 2, healthCheckMode: "manual", healthyAfterSec: 0
+      )
+      XCTAssertEqual(readPointer("current.json")?.hash, candidate.hash)
+      // Recheck at explicit apply, after an app-controlled staging interval.
+      switch change {
+      case "missing":
+        try FileManager.default.removeItem(at: stable.bundleURL)
+      case "tampered":
+        try "changed".write(to: stable.bundleURL, atomically: true, encoding: .utf8)
+      case "runtime":
+        let manifest = stable.bundleURL.deletingLastPathComponent().appendingPathComponent("bundle-manifest.json")
+        let contents = try String(contentsOf: manifest, encoding: .utf8)
+        try contents.replacingOccurrences(of: runtimeVersion, with: "other-runtime")
+          .write(to: manifest, atomically: true, encoding: .utf8)
+      case "revoked":
+        try controller.setRevokedHashes([stable.hash])
+      default:
+        var ledger = try readLedger()
+        ledger.quarantinedHashes.append(stable.hash)
+        try JSONEncoder().encode(ledger).write(to: tempRoot.appendingPathComponent("recovery-ledger.json"))
+      }
+      let result = try controller.rollback(forceEmbedded: false)
+      XCTAssertTrue(result.rolledBack, change)
+      XCTAssertTrue(result.toEmbedded, change)
+      XCTAssertNil(result.hash, change)
+      XCTAssertNil(readPointer("current.json"), change)
+      XCTAssertTrue(try readLedger().pendingRecoveryEvents.isEmpty, change)
+    }
   }
 
   private enum TestError: Error {

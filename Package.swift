@@ -40,6 +40,7 @@ let package = Package(
         "BundleDropLocator.m",
         "BundleDropLocator.swift",
         "BundleDropModule.swift",
+        "BundleDropReactContent.swift",
         "BundleDropOtaResolver.swift",
       ],
       sources: [
@@ -67,6 +68,7 @@ let package = Package(
         "BundleDropLocator.h",
         "BundleDropLocator.m",
         "BundleDropModule.swift",
+        "BundleDropReactContent.swift",
         "BundleDropZipExtractor.h",
         "BundleDropZipExtractor.m",
       ],

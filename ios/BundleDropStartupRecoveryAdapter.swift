@@ -46,11 +46,15 @@ enum BundleDropStartupRecoveryAdapter {
   }
 
   static func beginReload() -> URL? {
-    guard let controller = defaultController() else { return nil }
+    guard BundleDropLocatorCore.hasRuntimeIdentityForOta(),
+          BundleDropLocatorCore.isOtaEnabled(),
+          let controller = defaultController(),
+          let reload = controller.prepareReload(
+            embeddedBundleURL: BundleDropLocatorCore.embeddedBundleURL()
+          ) else { return nil }
     installReactLifecycleObservers()
-    let selection = controller.selectStartupBundle(beginReload: true)
-    captureStartupSelection(selection)
-    return selection.bundleURL
+    captureStartupSelection(reload.selection)
+    return reload.url
   }
 
   static func markHealthy(hash: String, attemptId: String) -> Bool {
@@ -76,6 +80,7 @@ enum BundleDropStartupRecoveryAdapter {
   static func rollback(forceEmbedded: Bool) throws -> BundleDropStartupRollbackResult {
     let result = try requireDefaultController().rollback(forceEmbedded: forceEmbedded)
     clearCapturedAttempt()
+    contentBindings.capture(hash: nil, attemptId: nil, bundleURL: nil)
     return result
   }
 
@@ -160,6 +165,33 @@ enum BundleDropStartupRecoveryAdapter {
     lock.unlock()
   }
 
+  static func observeRuntimeContent(
+    bundleURL: URL,
+    currentContentRoot: @escaping () -> AnyObject? = { nil },
+    ownsRoot: @escaping (AnyObject) -> Bool
+  ) -> NSObjectProtocol? {
+    contentBindings.observeRuntimeContent(
+      bundleURL: bundleURL, currentContentRoot: currentContentRoot, ownsRoot: ownsRoot
+    ) { attempt in
+      contentAppeared(attempt)
+    }
+  }
+
+  private static func contentAppeared(_ attempt: BundleDropStartupContentBindings.Binding) {
+    guard let delay = defaultController()?.markContentAppeared(
+      hash: attempt.hash,
+      attemptId: attempt.attemptId
+    ) else { return }
+    let markHealthy = {
+      _ = BundleDropStartupRecoveryAdapter.markHealthy(hash: attempt.hash, attemptId: attempt.attemptId)
+    }
+    if delay <= 0 {
+      markHealthy()
+    } else {
+      DispatchQueue.main.asyncAfter(deadline: .now() + delay, execute: markHealthy)
+    }
+  }
+
   private static func installReactLifecycleObservers() {
     lock.lock()
     guard !observersInstalled else {
@@ -183,40 +215,24 @@ enum BundleDropStartupRecoveryAdapter {
       queue: nil
     ) { notification in
       guard let attempt = contentBindings.binding(for: notification.object) else { return }
-      let hash = attempt.hash
-      let attemptId = attempt.attemptId
-      guard let delay = defaultController()?.markContentAppeared(
-        hash: hash,
-        attemptId: attemptId
-      ) else { return }
-      let markHealthy = {
-        _ = BundleDropStartupRecoveryAdapter.markHealthy(hash: hash, attemptId: attemptId)
-      }
-      if delay <= 0 {
-        markHealthy()
-      } else {
-        DispatchQueue.main.asyncAfter(deadline: .now() + delay, execute: markHealthy)
-      }
+      contentAppeared(attempt)
     }
   }
 
   static func bundleURL(from notification: Notification) -> URL? {
-    let selector = NSSelectorFromString("bundleURL")
     let providers = [notification.userInfo?["bridge"], notification.object].compactMap { $0 }
     for provider in providers {
-      let object = provider as AnyObject
-      // RCTBridgeProxy forwards -bundleURL but reports responds(to:) as false.
-      // Checking the concrete Objective-C implementation keeps URL identity
-      // available in bridgeless RN without accepting an anonymous global event.
-      guard object.responds(to: selector) ||
-              class_getInstanceMethod(type(of: object), selector) != nil else {
-        continue
-      }
-      if let url = object.perform(selector)?.takeUnretainedValue() as? URL {
-        return url
-      }
+      if let url = bundleURL(from: provider as AnyObject) { return url }
     }
     return nil
+  }
+
+  static func bundleURL(from provider: AnyObject) -> URL? {
+    let selector = NSSelectorFromString("bundleURL")
+    // RCTBridgeProxy implements -bundleURL but can deny responds(to:).
+    guard provider.responds(to: selector) ||
+            class_getInstanceMethod(type(of: provider), selector) != nil else { return nil }
+    return provider.perform(selector)?.takeUnretainedValue() as? URL
   }
 }
 
@@ -246,6 +262,7 @@ final class BundleDropStartupContentBindings {
   private var generation: UInt64 = 0
   private var activeBinding: Binding?
   private var activeRuntimeLoaded = false
+  private var runtimeOwnedGeneration: UInt64?
   private var roots: [ObjectIdentifier: RootEntry] = [:]
 
   func capture(hash: String?, attemptId: String?, bundleURL: URL?) {
@@ -263,6 +280,7 @@ final class BundleDropStartupContentBindings {
       activeBinding = nil
     }
     activeRuntimeLoaded = false
+    runtimeOwnedGeneration = nil
     roots = roots.filter { $0.value.root != nil }
   }
 
@@ -286,6 +304,9 @@ final class BundleDropStartupContentBindings {
     let rootObject = root as AnyObject
     lock.lock()
     defer { lock.unlock() }
+    // Once a module supplies its own root registry, the global legacy observer
+    // must not bypass that runtime ownership check.
+    if let activeBinding, runtimeOwnedGeneration == activeBinding.generation { return nil }
     let identifier = ObjectIdentifier(rootObject)
     if let existing = roots[identifier], existing.root === rootObject {
       return existing.binding
@@ -293,6 +314,42 @@ final class BundleDropStartupContentBindings {
     guard activeRuntimeLoaded, let activeBinding else { return nil }
     roots[identifier] = RootEntry(root: rootObject, binding: activeBinding)
     return activeBinding
+  }
+
+  func observeRuntimeContent(
+    bundleURL: URL,
+    notificationCenter: NotificationCenter = .default,
+    currentContentRoot: @escaping () -> AnyObject? = { nil },
+    ownsRoot: @escaping (AnyObject) -> Bool,
+    contentAppeared: @escaping (Binding) -> Void
+  ) -> NSObjectProtocol? {
+    lock.lock()
+    guard let attempt = activeBinding,
+          Self.normalizedPath(bundleURL) == attempt.bundlePath else {
+      lock.unlock()
+      return nil
+    }
+    runtimeOwnedGeneration = attempt.generation
+    lock.unlock()
+    // Capture the attempt, not mutable global selection. An old module can
+    // only report its old attempt, which the ledger rejects after a reload.
+    let deliver: (AnyObject) -> Void = { root in
+      guard ownsRoot(root) else { return }
+      contentAppeared(attempt)
+    }
+    let observer = notificationCenter.addObserver(
+      forName: Notification.Name("RCTContentDidAppearNotification"),
+      object: nil,
+      queue: .main
+    ) { notification in
+      guard let root = notification.object else { return }
+      deliver(root as AnyObject)
+    }
+    DispatchQueue.main.async {
+      guard let root = currentContentRoot() else { return }
+      deliver(root)
+    }
+    return observer
   }
 
   private static func normalizedPath(_ url: URL) -> String {

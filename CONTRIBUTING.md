@@ -53,12 +53,19 @@ repository uses the squash-merge title as its commit message. Examples include
 
 For changes to OTA resolution, download, apply, rollback, native integration, or
 package contents, run the complete release gate. Android and iOS CI is deliberately
-limited to the repository's bounded host-side native tests; public contributions do
-not run private certification or device harnesses.
+limited to the repository's bounded host-side native tests. Device behavior needs
+separate native verification.
 
 Do not lower coverage thresholds or weaken a failing validation gate. If a focused
 change exposes an unrelated defect, report it separately instead of expanding the
 pull request.
+
+Native fingerprint scheme 1 has a frozen calculation contract and goldens; see
+[the contract and limitations](docs/native-fingerprint.md). Run
+`yarn fingerprint:check` after building. Never update scheme 1 vectors to accept
+changed identities for unchanged inputs; introduce a new scheme while retaining
+scheme 1 behavior. Dependency maintenance must demonstrate unchanged calculation
+behavior before a reviewed contract pin is updated.
 
 By contributing, you agree that your contribution is licensed under this
 repository's ISC license. The project does not require a separate contributor

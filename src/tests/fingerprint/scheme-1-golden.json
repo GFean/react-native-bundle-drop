@@ -1,0 +1,35 @@
+{
+  "status": "frozen",
+  "schemeVersion": 1,
+  "fixture": "collect.test.ts default bare Android inputs",
+  "nativeHash": "5c520cd75243ce6d117c42a450a7d30d12f4e4d0b4fa490e6504c81266e9243c",
+  "runtimeVersion": "bdfp1-ae7c5cd5c1ae846ffa64de1fa4a92ccf4d6b0c2065ce95cf25600c0e147ad139",
+  "cases": {
+    "bareAndroid": {
+      "nativeHash": "5c520cd75243ce6d117c42a450a7d30d12f4e4d0b4fa490e6504c81266e9243c",
+      "runtimeVersion": "bdfp1-ae7c5cd5c1ae846ffa64de1fa4a92ccf4d6b0c2065ce95cf25600c0e147ad139"
+    },
+    "bareAndroidNativeEdit": {
+      "nativeHash": "924d11f2f97e4b70ec9bb616402e552ddb229ead2901dc5cae5b75042868bbed",
+      "runtimeVersion": "bdfp1-0ddf7863cd7589ed049568957f5e8c71da95fdac0a1564bc9f4f4f04c8433d7e"
+    },
+    "bareAndroidBoundary": {
+      "nativeHash": "5c520cd75243ce6d117c42a450a7d30d12f4e4d0b4fa490e6504c81266e9243c",
+      "runtimeVersion": "bdfp1-f6403096e9e44accd10f827aa379e31ea091faf9af71f395a1162fcd1c584cf9"
+    },
+    "bareIos": {
+      "nativeHash": "7daec32fd31f94e12ba9a806ea0def7ebd829a6855fd1f10c6b7c16b4ed4b9f1",
+      "runtimeVersion": "bdfp1-11557f677fd0827d205ffdd9b9d8cbae4ecceda803ec141e25b248f82facbac1"
+    },
+    "bareIosNativeEdit": {
+      "nativeHash": "0eb560fa26e8671e3ec19ae65ff62f434b9d2469dd8c7909e3577a300df42dd7",
+      "runtimeVersion": "bdfp1-4ceddb7015808146eb57c9c74a2280f84fe12dcd3eaae517ad1b76f991a881b3"
+    },
+    "multiGlobstarIgnore": {
+      "nativeHash": "5c520cd75243ce6d117c42a450a7d30d12f4e4d0b4fa490e6504c81266e9243c",
+      "runtimeVersion": "bdfp1-ae7c5cd5c1ae846ffa64de1fa4a92ccf4d6b0c2065ce95cf25600c0e147ad139"
+    }
+  },
+  "baselineRevision": "0.11.0",
+  "originalVectorsCandidate": "2a07e5e329035a8996455534a238db4566d20049af05fa21a8a66b23d931992f"
+}

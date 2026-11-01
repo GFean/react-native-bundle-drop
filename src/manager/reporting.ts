@@ -5,6 +5,7 @@ import { getDownloadedBundlePathNative } from '../native/bundleDropNative';
 import { getOrCreateInstallId } from '../fs/installId';
 import { getCurrentUserProperties } from '../fs/userProperties';
 import { getBundleDropRuntimeConfig } from '../runtime/initState';
+import { MAX_REPORTED_INSTALL_HASHES, mergeInstalledReportHistory } from '../fs/installedReportHistory';
 
 export type FailedBundleRecord = {
   reason: 'crash_loop';
@@ -15,12 +16,28 @@ export type FailedBundleRecord = {
   previousHash?: string;
 };
 
-const MAX_REPORTED_INSTALL_HASHES = 50;
 const installedReportInFlightHashes = new Set<string>();
 
 function appendReportedHash(existing: string[] | undefined, hash: string): string[] {
   const next = [...(existing || []).filter(value => value !== hash), hash];
   return next.slice(-MAX_REPORTED_INSTALL_HASHES);
+}
+
+function legacyReportedHashes(info: BundleInfo): string[] {
+  return [
+    ...(info.installedReportedHashes ?? []),
+    ...(info.lastInstalledReportedHash ? [info.lastInstalledReportedHash] : []),
+  ];
+}
+
+export async function preserveInstalledReportHistory(info: BundleInfo): Promise<void> {
+  try {
+    const installId = await getOrCreateInstallId();
+    await mergeInstalledReportHistory(installId, legacyReportedHashes(info));
+  } catch (e) {
+    // Reporting persistence must not prevent authoritative embedded recovery.
+    console.warn('⚠️ Failed to preserve install-report history:', e);
+  }
 }
 
 async function getReportingState() {
@@ -40,8 +57,6 @@ export async function reportInstalledIfReady(state?: { hasBundle?: boolean; info
   if (!info?.hash) return;
   if (info.pendingApply) return;
   if (hasBundle === false) return;
-  if (info.lastInstalledReportedHash === info.hash) return;
-  if (info.installedReportedHashes?.includes(info.hash)) return;
   if (installedReportInFlightHashes.has(info.hash)) return;
 
   const reportedHash = info.hash;
@@ -51,6 +66,8 @@ export async function reportInstalledIfReady(state?: { hasBundle?: boolean; info
       getOrCreateInstallId(),
       getCurrentUserProperties(),
     ]);
+    const history = await mergeInstalledReportHistory(installId, legacyReportedHashes(info));
+    if (history.includes(reportedHash)) return;
     const appEnvironment = getBundleDropRuntimeConfig()?.environment ?? null;
     await reportInstalled(config.project.slug, reportedHash, {
       channelName: info.channelName,
@@ -60,6 +77,7 @@ export async function reportInstalledIfReady(state?: { hasBundle?: boolean; info
       environment: appEnvironment,
       userProperties: Object.keys(userProperties).length > 0 ? userProperties : undefined,
     });
+    await mergeInstalledReportHistory(installId, [], reportedHash);
     const latestInfo = await readBundleInfo();
     if (latestInfo) {
       const nextInfo: Partial<BundleInfo> = {

@@ -330,12 +330,22 @@ async function inspectExpoProject(
       : metro.issue || 'Metro must export withBundleDropExpo(...) and preserve expo/metro-config.',
   });
 
-  const runtimeAuthorities = new Map(
-    platforms.map(platform => [
-      platform,
-      resolveBundleDropRuntimeVersionAuthority(projectRoot, platform),
-    ]),
-  );
+  let runtimeAuthorities: Map<MobilePlatform, ReturnType<typeof resolveBundleDropRuntimeVersionAuthority>>;
+  try {
+    runtimeAuthorities = new Map(
+      platforms.map(platform => [
+        platform,
+        resolveBundleDropRuntimeVersionAuthority(projectRoot, platform),
+      ]),
+    );
+  } catch (error) {
+    checks.push({
+      name: 'Runtime authority',
+      status: 'error',
+      message: (error as Error).message,
+    });
+    return checks;
+  }
   const usesExpoRuntimePolicies = [...runtimeAuthorities.values()]
     .some(authority => authority.source === 'expo');
   const identities = new Map<MobilePlatform, Awaited<ReturnType<typeof resolveExpoBuildIdentity>>>();
@@ -347,7 +357,7 @@ async function inspectExpoProject(
         name: `${platform} build identity`,
         status: 'pass',
         message:
-          `${runtimeAuthorities.get(platform)?.source === 'expo' ? 'Expo policy' : 'Bundle Drop literal'} ` +
+          `${runtimeAuthorities.get(platform)?.source === 'expo' ? 'Expo policy' : 'Bundle Drop runtime'} ` +
           `resolved to ${identity.runtimeVersion}; ` +
           `${identity.javaScriptEngine}, Expo ${identity.expoSdkVersion}, RN ${identity.reactNativeVersion}.`,
       });
@@ -472,13 +482,13 @@ const checkBareRuntimeIdentity = (
       return {
         name: `${platform} runtime identity`,
         status: 'error',
-        message: 'Bare projects require a literal Bundle Drop runtime version, not Expo runtime authority.',
+        message: 'Bare projects require Bundle Drop runtime authority, not Expo runtime authority.',
       };
     }
     return {
       name: `${platform} runtime identity`,
       status: 'pass',
-      message: `Bundle Drop literal resolved to ${authority.runtimeVersion}.`,
+      message: `Bundle Drop runtime resolved to ${authority.runtimeVersion}.`,
     };
   } catch (error) {
     return {

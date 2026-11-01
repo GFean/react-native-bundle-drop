@@ -2,6 +2,8 @@ import path from 'path';
 
 import { ExpoIntegrationError } from './errors';
 import type { MobilePlatform } from './types';
+import { selectRuntimeVersion } from '../fingerprint/config';
+import { calculateFingerprintSync } from '../fingerprint/client';
 
 export type BundleDropRuntimeVersionAuthority =
   | {
@@ -36,25 +38,22 @@ const loadBundleDropConfig = (projectRoot: string): Record<string, any> => {
  * type. Expo runtime policies remain available only through an explicit
  * `runtimeVersion: { source: 'expo' }` opt-in.
  */
+export function readBundleDropRuntimeSelection(projectRoot: string, platform: MobilePlatform) {
+  return selectRuntimeVersion(loadBundleDropConfig(projectRoot).runtimeVersion, platform);
+}
+
 export function resolveBundleDropRuntimeVersionAuthority(
   projectRoot: string,
   platform: MobilePlatform,
 ): BundleDropRuntimeVersionAuthority {
-  const config = loadBundleDropConfig(projectRoot);
-  const configuredRuntimeVersion = config.runtimeVersion;
-  if (configuredRuntimeVersion?.source === 'expo') {
+  const selection = readBundleDropRuntimeSelection(projectRoot, platform);
+  if (selection.source === 'expo') {
     return { source: 'expo' };
-  }
-
-  const runtimeVersion = configuredRuntimeVersion?.[platform];
-  if (typeof runtimeVersion !== 'string' || !runtimeVersion.trim()) {
-    throw new ExpoIntegrationError(
-      `bundle.drop.config.js must define a non-empty runtimeVersion.${platform} literal. ` +
-        "Use runtimeVersion: { source: 'expo' } only when explicitly opting into Expo runtime policies.",
-    );
   }
   return {
     source: 'bundle-drop',
-    runtimeVersion: runtimeVersion.trim(),
+    runtimeVersion: selection.source === 'fingerprint'
+      ? calculateFingerprintSync(projectRoot, platform).runtimeVersion
+      : selection.runtimeVersion,
   };
 }

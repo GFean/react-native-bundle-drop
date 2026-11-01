@@ -33,6 +33,12 @@ import {
 } from '../manager/rollbackState';
 import type { ApplyUpdateResult } from '../manager/updateState';
 import {
+  clearPendingRollback,
+  isPendingRollbackCurrent,
+  readPendingRollback,
+  stageRollback,
+} from '../manager/pendingRollback';
+import {
   applyUpdate as applyUpdateInternal,
   getUpdateState as getUpdateStateInternal,
   reconcileAppliedBundleOnLaunch,
@@ -216,7 +222,9 @@ function getApplyStatus(result: ApplyUpdateResult): string | undefined {
     : result.status === 'noBundle'
       ? '⚠️ No downloaded bundle to apply'
       : result.status === 'blocked'
-        ? '⚠️ Update previously failed on this device'
+        ? result.reason === 'ROLLBACK_REVALIDATION_FAILED'
+          ? '⚠️ Rollback decision changed or could not be revalidated; check for updates again'
+          : '⚠️ Update previously failed on this device'
         : 'ℹ️ Bundle already applied';
 }
 
@@ -225,11 +233,57 @@ function requestRuntimeRestart() {
   restartReactNativeNative();
 }
 
-async function applyAuthoritativeRollback(reason?: string): Promise<void> {
+async function applyAuthoritativeRollback(reason?: string): Promise<ApplyUpdateResult> {
   const result = await rollbackStartupBundle(isCurrentRevokedRollback(reason));
-  if (result?.rolledBack) {
+  if (!result) return { status: 'blocked', reason: 'ROLLBACK_REVALIDATION_FAILED' };
+  // A bookkeeping failure must not prevent confirmed-revocation recovery.
+  await clearPendingRollback().catch(error => {
+    console.warn('⚠️ Failed to clear pending BundleDrop rollback:', error);
+  });
+  if (result.rolledBack) {
     requestRuntimeRestart();
+    return { status: 'applied' };
   }
+  return { status: 'alreadyApplied' };
+}
+
+async function handleDownloadRollback(result: DownloadUpdateResult): Promise<DownloadUpdateResult> {
+  if (result.status !== 'rollback') {
+    await clearPendingRollback();
+    return result;
+  }
+  const runtime = assertBundleDropInitialized();
+  if (runtime.policy === 'manual' && !isCurrentRevokedRollback(result.reason)) {
+    await stageRollback(runtime.channelName, result.reason);
+    return { ...result, pendingApply: true };
+  }
+  await applyAuthoritativeRollback(result.reason);
+  return result;
+}
+
+async function applyPendingRollback(): Promise<ApplyUpdateResult | null> {
+  const intent = await readPendingRollback();
+  if (!intent) return null;
+  const runtime = assertBundleDropInitialized();
+  if (!await isPendingRollbackCurrent(intent, runtime.channelName)) {
+    await clearPendingRollback();
+    return { status: 'blocked', reason: 'ROLLBACK_REVALIDATION_FAILED' };
+  }
+  // Refresh authority before native atomically selects and verifies the fallback.
+  const decision = await checkForUpdateInternal(runtime.channelName);
+  if (decision?.action === 'ROLLBACK' && isCurrentRevokedRollback(decision.reason)) {
+    return applyAuthoritativeRollback(decision.reason);
+  }
+  if (decision?.action !== 'ROLLBACK' || decision.reason !== intent.reason) {
+    if (decision) await clearPendingRollback();
+    return { status: 'blocked', reason: 'ROLLBACK_REVALIDATION_FAILED' };
+  }
+  // A native recovery or another selection may have happened during the check.
+  if (!await isPendingRollbackCurrent(intent, runtime.channelName)) {
+    await clearPendingRollback();
+    return { status: 'blocked', reason: 'ROLLBACK_REVALIDATION_FAILED' };
+  }
+  return applyAuthoritativeRollback(decision.reason);
 }
 
 async function markActiveCandidateHealthy(): Promise<boolean> {
@@ -245,12 +299,17 @@ async function refreshState(cached?: {
   bundlePath?: string | null;
 }) {
   const state = await getUpdateStateInternal(cached);
+  const intent = await readPendingRollback();
+  const pendingRollback = !!intent &&
+    await isPendingRollbackCurrent(intent, assertBundleDropInitialized().channelName);
+  const pendingApply = state.pendingApply || pendingRollback;
   patchSnapshot({
     installedInfo: state.info || null,
-    pendingApply: state.pendingApply,
+    pendingApply,
     hasBundle: state.hasBundle,
   });
-  return state;
+  // Startup automatic bundle application must never consume a manual rollback intent.
+  return { ...state, pendingApply, ...(pendingRollback ? { pendingRollback: true } : {}) };
 }
 
 async function withBusy<T>(fn: () => Promise<T>): Promise<T> {
@@ -323,7 +382,7 @@ async function runStartupFlow() {
 
   const pendingState = await refreshState({ bundlePath });
 
-  if (pendingState.pendingApply) {
+  if (pendingState.pendingApply && !pendingState.pendingRollback) {
     if (runtime.policy === 'immediate') {
       emitStatus('♻️ Applying previously downloaded update...');
       const applied = await applyUpdateInternal(statusCb, () => {
@@ -353,6 +412,9 @@ async function runStartupFlow() {
   if (!decision) return;
 
   if (decision.action === 'ROLLBACK') {
+    if (!isCurrentRevokedRollback(decision.reason) && (runtime.policy === 'manual' || runtime.checkOnly)) {
+      return;
+    }
     emitStatus('↩️ Server requested rollback...');
     await applyAuthoritativeRollback(decision.reason);
     return;
@@ -464,8 +526,11 @@ export function initBundleDrop(options: BundleDropInitOptions): void {
     }
   }
 
-  // Persist for the next cold start and for native path reads in this process.
-  nativeOtaEnabledPromise = setOtaEnabledNative(config.enabled);
+  // Explicit app enablement persists across cold starts. Implicit Expo Debug
+  // suppression is local to this process and must not disable the Release app.
+  if (!useExpoDevelopmentFallback) {
+    nativeOtaEnabledPromise = setOtaEnabledNative(config.enabled);
+  }
 
   patchSnapshot({
     channelName: config.channelName,
@@ -560,13 +625,11 @@ export async function downloadAndStage(extraStatusHandler?: StatusHandler): Prom
   await waitForStartupIfNeeded();
 
   return withBusy(async () => {
-    const result = await downloadUpdateInternal(
+    const downloadResult = await downloadUpdateInternal(
       { channelName: runtime.channelName },
       status => emitStatus(status, extraStatusHandler),
     );
-    if (result.status === 'rollback') {
-      await applyAuthoritativeRollback(result.reason);
-    }
+    const result = await handleDownloadRollback(downloadResult);
     const status = getDownloadStatus(result);
     if (status) {
       emitStatus(status, extraStatusHandler);
@@ -588,9 +651,10 @@ export async function applyDownloadedUpdate(
   await nativeOtaEnabledPromise;
 
   return withBusy(async () => {
-    const result = await applyUpdateInternal(status => emitStatus(status, extraStatusHandler), () => {
-      runtimeRestartRequested = true;
-    });
+    const result = await applyPendingRollback() ?? await applyUpdateInternal(
+      status => emitStatus(status, extraStatusHandler),
+      () => { runtimeRestartRequested = true; },
+    );
     const status = getApplyStatus(result);
     if (status) {
       emitStatus(status, extraStatusHandler);
@@ -682,11 +746,10 @@ export async function installBundleFromListItem(
       (resolvedDecision.bundleHash ?? resolvedDecision.hash) === bundle.hash;
 
     if (usesManagedRuntimeDelivery && resolvedDecision?.action === 'ROLLBACK') {
-      const result: DownloadUpdateResult = {
+      const result = await handleDownloadRollback({
         status: 'rollback',
         reason: resolvedDecision.reason,
-      };
-      await applyAuthoritativeRollback(result.reason);
+      });
       const status = getDownloadStatus(result);
       if (status) emitStatus(status);
       return { result, status };
@@ -700,7 +763,7 @@ export async function installBundleFromListItem(
       };
     }
 
-    const result = canUseResolvedTransport
+    let result = canUseResolvedTransport
       ? await downloadUpdateInternal(
           {
             channelName: runtime.channelName,
@@ -737,9 +800,7 @@ export async function installBundleFromListItem(
           },
         );
 
-    if (usesManagedRuntimeDelivery && result.status === 'rollback') {
-      await applyAuthoritativeRollback(result.reason);
-    }
+    result = await handleDownloadRollback(result);
 
     if (result.status === 'staged') {
       const status = `✅ v${bundle.bundleVersion} downloaded. Will apply on next launch or when you call applyUpdate.`;
@@ -909,7 +970,7 @@ export async function installBundle(
   }
 
   return withBusy(async () => {
-    const result = await installBundleInternal(
+    const downloadResult = await installBundleInternal(
       hash,
       downloadUrl,
       bundleVersion,
@@ -920,6 +981,7 @@ export async function installBundle(
         onStatusUpdate: status => emitStatus(status, onStatusUpdate),
       },
     );
+    const result = await handleDownloadRollback(downloadResult);
 
     const status = getDownloadStatus(result);
     if (status) {

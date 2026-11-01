@@ -56,6 +56,7 @@ export type StartupRollbackResult = {
 };
 
 type BundleDropNativeModule = {
+  nativeRuntimeVersion?: unknown;
   getDownloadedBundlePath?: () => Promise<string | null>;
   restartReactNative?: () => void;
   setOtaEnabled?: (enabled: boolean) => Promise<void>;
@@ -90,6 +91,17 @@ const BundleDropExpoIdentity = NativeModules.BundleDropExpoIdentity as
 // the running identity or the attempt acknowledged by reportHealthy().
 const startupRecoverySelectedHash = readStartupRecoverySelectedHash(BundleDrop);
 const startupRecoveryAttempt = readStartupRecoveryAttempt(BundleDrop);
+// New Architecture host objects expose constants through getters without own
+// property descriptors. Read the value once rather than testing hasOwnProperty.
+const capturedNativeRuntime = BundleDrop?.nativeRuntimeVersion;
+const nativeRuntimeVersion = capturedNativeRuntime === undefined
+  ? undefined
+  : nonEmptyString(capturedNativeRuntime);
+
+/** undefined identifies an older binary; null identifies missing required native data. */
+export function getNativeRuntimeVersion(): string | null | undefined {
+  return nativeRuntimeVersion;
+}
 let hasWarnedAboutStartupRecoveryCapability = false;
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -107,11 +119,10 @@ function canonicalHash(value: unknown): string | null {
 function readStartupRecoverySelectedHash(
   nativeModule: { startupRecoverySelectedHash?: unknown } | undefined,
 ): string | null | undefined {
-  if (!nativeModule || !Object.prototype.hasOwnProperty.call(nativeModule, 'startupRecoverySelectedHash')) {
-    return undefined;
-  }
-  if (nativeModule.startupRecoverySelectedHash == null) return null;
-  return canonicalHash(nativeModule.startupRecoverySelectedHash);
+  // New Architecture constants can be getter-backed without an own descriptor.
+  const selectedHash = nativeModule?.startupRecoverySelectedHash;
+  if (selectedHash === undefined) return undefined;
+  return canonicalHash(selectedHash);
 }
 
 function nonNegativeInteger(value: unknown): number | null {

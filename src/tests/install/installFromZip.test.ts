@@ -967,6 +967,33 @@ describe('install/installFromZip', () => {
     expect(getMockFile(`/mock/doc/bundle-drop/bundles/${targetManifest.bundleHash}/main.jsbundle`)).toBeUndefined();
   });
 
+  it.each(['patch-set', 'manifest', 'missing-assets'])('identifies only patch ZIP download denial: %s', async source => {
+    const baseHash = sha256('base');
+    const targetHash = sha256('target');
+    setMockFile('/mock/doc/bundle-drop/current.json', JSON.stringify({
+      hash: baseHash,
+      bundlePath: `/mock/doc/bundle-drop/bundles/${baseHash}/main.jsbundle`,
+    }));
+    configureUnzipEntries(source === 'manifest' ? {} : { [BUNDLE_MANIFEST]: '{}' });
+    const denial = new Error('HTTP 403: denied');
+    mockDownloadFile.mockImplementation(async (url, path) => {
+      if (url === `https://cdn.example.com/${source}`) throw denial;
+      setMockFile(path, '__downloaded_zip__');
+    });
+    await expect(installFromPatchSet({
+      patchesUrl: 'https://cdn.example.com/patch-set',
+      patchSetHash: DOWNLOADED_ZIP_HASH,
+      manifestUrl: 'https://cdn.example.com/manifest',
+      missingAssetsUrl: 'https://cdn.example.com/missing-assets',
+      missingAssetsHash: DOWNLOADED_ZIP_HASH,
+      baseHash, targetHash, algorithm: XDELTA_PATCH_ALGORITHM, platform: 'android',
+    })).rejects.toMatchObject({
+      phase: 'download', originalCause: denial,
+      downloadSource: source === 'patch-set' ? 'patch-set' : undefined,
+    });
+    expect(getMockFile(`/mock/doc/bundle-drop/bundles/${targetHash}/main.jsbundle`)).toBeUndefined();
+  });
+
   it('downloads the target manifest when a patch set omits embedded manifest metadata', async () => {
     setMockPlatform('android');
     const baseManifest = makeManifest({
