@@ -5,6 +5,13 @@ All notable changes to this package are documented here.
 This project uses [Conventional Commits](https://www.conventionalcommits.org/) and
 [release-please](https://github.com/googleapis/release-please) to prepare releases.
 
+## [0.11.0](https://github.com/GFean/react-native-bundle-drop/compare/v0.10.0...v0.11.0) (2026-11-01)
+
+
+### Features
+
+* add native fingerprinting beta and runtime safety fixes ([#59](https://github.com/GFean/react-native-bundle-drop/issues/59)) ([2de6d2b](https://github.com/GFean/react-native-bundle-drop/commit/2de6d2b6ca2e79c2bab6c6f683f0a63e1877bf46))
+
 ## [0.10.0](https://github.com/GFean/react-native-bundle-drop/compare/v0.9.0...v0.10.0) (2026-10-16)
 
 
