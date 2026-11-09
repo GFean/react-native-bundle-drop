@@ -574,6 +574,9 @@ export async function runUpload(
     try {
       writeArtifactResult(artifactDir, {
         success: false,
+        projectId: null,
+        channelId: null,
+        serverUrl: normalizeServerUrl(serverUrl),
         status: 'failed',
         error: uploadError,
         platform,
@@ -609,6 +612,11 @@ export async function runUpload(
   const hasSourceMap = Boolean(options.sourcemap && artifact.sourceMapPath &&
     fs.existsSync(artifact.sourceMapPath));
   const result: Record<string, unknown> = {
+    success: true,
+    projectId: responseData.projectId ?? null,
+    channelId: responseData.channelId ?? null,
+    // Keep the artifact bound to the endpoint actually used for this upload.
+    serverUrl: normalizeServerUrl(serverUrl),
     platform,
     appVersion: version,
     channel,

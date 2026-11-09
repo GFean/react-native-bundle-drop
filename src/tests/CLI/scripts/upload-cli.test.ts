@@ -351,6 +351,10 @@ describe('CLI/scripts/upload-cli', () => {
         platform: 'android',
         appVersion: '1.2.3',
         channel: 'General',
+        success: true,
+        projectId: null,
+        channelId: null,
+        serverUrl: 'https://api.example.com',
         runtimeVersion: '2.0.0',
         packageVersion: '0.4.1',
         bundleId: 'bundle-1',
@@ -454,6 +458,7 @@ describe('CLI/scripts/upload-cli', () => {
     fs.writeFileSync(path.join(distDir, 'main.jsbundle.map'), 'source-map', 'utf8');
     const artifactDir = path.join(tempPackageRoot, 'ci-artifacts');
     mockAxiosNodePost.mockResolvedValue({ data: {
+      success: true, projectId: 'project-123', channelId: 'channel-456', serverUrl: 'https://untrusted.example.test',
       bundleId: 'bundle-123', bundleVersion: 12, bundleVersionLabel: 'v12',
       hash: 'returned-hash', runtimeVersion: '2.0.0',
     } });
@@ -468,6 +473,7 @@ describe('CLI/scripts/upload-cli', () => {
 
     const result = JSON.parse(fs.readFileSync(path.join(artifactDir, 'bundle-drop-result.json'), 'utf8'));
     expect(result).toEqual(expect.objectContaining({
+      success: true, projectId: 'project-123', channelId: 'channel-456', serverUrl: 'https://api.example.com',
       orgSlug: 'alpha-org', projectSlug: 'demo-app', channel: 'develop', platform: 'android',
       appVersion: '1.2.3', runtimeVersion: '2.0.0',
       bundleVersion: 12, bundleVersionLabel: 'v12', hash: 'returned-hash',
@@ -503,6 +509,7 @@ describe('CLI/scripts/upload-cli', () => {
 
     const result = JSON.parse(fs.readFileSync(path.join(distDir, 'bundle-drop-result.json'), 'utf8'));
     expect(result.dashboardUrl).toBe(dashboardUrl);
+    expect(result.serverUrl).toBe('https://api-staging.bundledrop.app');
     expect(consoleLogSpy.mock.calls.flat().join(' ')).toContain(result.dashboardUrl);
   });
 
@@ -526,6 +533,7 @@ describe('CLI/scripts/upload-cli', () => {
     expect(result.dashboardUrl).toBe(
       'https://developer.bundledrop.app/organizations/alpha-org/projects/demo-app',
     );
+    expect(result.serverUrl).toBe('https://api.bundledrop.app');
     expect(consoleLogSpy.mock.calls.flat().join(' ')).toContain(result.dashboardUrl);
   });
 
@@ -1596,6 +1604,9 @@ describe('CLI/scripts/upload-cli', () => {
         success: false,
         status: 'failed',
         error: 'network down',
+        projectId: null,
+        channelId: null,
+        serverUrl: 'https://api.example.com',
         orgSlug: 'alpha-org',
         projectSlug: 'demo-app',
         channel: 'General',
