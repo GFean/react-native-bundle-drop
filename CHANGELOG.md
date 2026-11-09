@@ -5,6 +5,13 @@ All notable changes to this package are documented here.
 This project uses [Conventional Commits](https://www.conventionalcommits.org/) and
 [release-please](https://github.com/googleapis/release-please) to prepare releases.
 
+## [0.12.0](https://github.com/GFean/react-native-bundle-drop/compare/v0.11.0...v0.12.0) (2026-11-09)
+
+
+### Features
+
+* **cli:** add upload result identity metadata ([#62](https://github.com/GFean/react-native-bundle-drop/issues/62)) ([2afb933](https://github.com/GFean/react-native-bundle-drop/commit/2afb933a952dd9848f9f00d9194fb71d8b16b0ba))
+
 ## [0.11.0](https://github.com/GFean/react-native-bundle-drop/compare/v0.10.0...v0.11.0) (2026-11-01)
 
 
