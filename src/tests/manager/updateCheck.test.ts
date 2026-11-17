@@ -21,6 +21,7 @@ import {
 } from '../mocks/context';
 import {
   mockSupportsXdelta,
+  mockReadFile,
   mockVerifyEs256Signature,
   resetNativeFsMocks,
   setMockFile,
@@ -46,6 +47,14 @@ const USER_PROPERTIES_PATH = '/mock/doc/bundle-drop/user-properties.json';
 const INSTALL_ID_PATH = '/mock/doc/bundle-drop/install-id.txt';
 const RUNTIME_DELIVERY_STATE_PATH = '/mock/doc/bundle-drop/runtime-delivery-state.json';
 const v2Hash = (character: string) => character.repeat(64);
+const runningBundleInfo = {
+  hash: v2Hash('9'),
+  bundleVersion: 28,
+  channelName: 'General',
+  platform: 'android',
+  runtimeVersion: '1.0.0',
+  pendingApply: false,
+};
 
 const makeV2Envelope = (overrides: Record<string, unknown> = {}) => {
   const protectedHeader = Buffer.from(JSON.stringify({
@@ -91,6 +100,12 @@ const makeV2Envelope = (overrides: Record<string, unknown> = {}) => {
     signature: 'A'.repeat(86),
   });
 };
+
+const makeManagedV2Envelope = (overrides: Record<string, unknown> = {}) => makeV2Envelope({
+  publishingMode: 'managed',
+  publishedRollouts: [{ releaseRef: 'release-next', rolloutPercentage: 100, status: 'completed' }],
+  ...overrides,
+});
 
 const manifestResponse = (body = makeV2Envelope()): Response => new Response(body, {
   status: 200,
@@ -159,6 +174,181 @@ describe('manager/updateCheck', () => {
     mockPostOtaResolve.mockReset();
     mockPostOtaArtifactAuthorization.mockReset();
     mockPostOtaActiveInstallHeartbeat.mockReset().mockResolvedValue({ data: undefined } as never);
+  });
+
+  it('retains a newer running bundle when a signed lane omits its paused rollout', async () => {
+    enableRuntimeDelivery();
+    const runningHash = v2Hash('9');
+    mockGetStartupRecoverySelectedHashNative.mockReturnValue(runningHash);
+    setMockFile(CURRENT_POINTER_PATH, JSON.stringify({ hash: runningHash }));
+    setMockFile(BUNDLE_INFO_PATH, JSON.stringify(runningBundleInfo));
+    setMockFile(INSTALL_ID_PATH, 'install-1');
+    mockVerifyEs256Signature.mockResolvedValue(true);
+    const fetchSpy = mockV2Fetch(makeManagedV2Envelope());
+    try {
+      await expect(checkForUpdate()).resolves.toEqual(expect.objectContaining({
+        action: 'NOOP',
+        reason: 'CURRENT_BUNDLE_NEWER',
+      }));
+      expect(mockPostOtaResolve).not.toHaveBeenCalled();
+      expect(mockPostOtaArtifactAuthorization).not.toHaveBeenCalled();
+      expect(fetchSpy).toHaveBeenCalledTimes(2);
+      expect(mockReadFile.mock.calls.filter(([path]) => path === BUNDLE_INFO_PATH)).toHaveLength(1);
+      expect(mockGetStartupRecoveryStateNative).toHaveBeenCalledTimes(1);
+    } finally {
+      fetchSpy.mockRestore();
+    }
+  });
+
+  it.each([
+    ['staged metadata for a different hash', { hash: v2Hash('8'), pendingApply: true }],
+    ['explicit channel change', { channelName: 'Beta' }],
+    ['different platform', { platform: 'ios' }],
+    ['different runtime', { runtimeVersion: '2.0.0' }],
+    ['missing channel', { channelName: undefined }],
+    ['empty channel', { channelName: '' }],
+    ['missing version', { bundleVersion: undefined }],
+    ['non-numeric version', { bundleVersion: '28' }],
+    ['fractional version', { bundleVersion: 28.5 }],
+    ['negative version', { bundleVersion: -1 }],
+  ] as const)('does not infer running-version retention from %s', async (_label, overrides) => {
+    enableRuntimeDelivery();
+    mockGetStartupRecoverySelectedHashNative.mockReturnValue(runningBundleInfo.hash);
+    setMockFile(CURRENT_POINTER_PATH, JSON.stringify({ hash: v2Hash('8') }));
+    setMockFile(BUNDLE_INFO_PATH, JSON.stringify({ ...runningBundleInfo, ...overrides }));
+    setMockFile(INSTALL_ID_PATH, 'install-1');
+    mockVerifyEs256Signature.mockResolvedValue(true);
+    const fetchSpy = mockV2Fetch(makeManagedV2Envelope());
+    try {
+      await expect(checkForUpdate()).resolves.toEqual(expect.objectContaining({
+        action: 'INSTALL', bundleVersion: 4,
+      }));
+      expect(mockPostOtaResolve).not.toHaveBeenCalled();
+      expect(fetchSpy).toHaveBeenCalledTimes(2);
+    } finally {
+      fetchSpy.mockRestore();
+    }
+  });
+
+  it('uses captured running metadata when the native pointer and on-disk metadata are staged later', async () => {
+    enableRuntimeDelivery();
+    mockGetStartupRecoverySelectedHashNative.mockReturnValue(runningBundleInfo.hash);
+    setMockFile(BUNDLE_INFO_PATH, JSON.stringify(runningBundleInfo));
+    setMockFile(CURRENT_POINTER_PATH, JSON.stringify({ hash: v2Hash('8') }));
+    setMockFile(INSTALL_ID_PATH, 'install-1');
+    mockVerifyEs256Signature.mockResolvedValue(true);
+    const fetchSpy = mockV2Fetch(makeManagedV2Envelope());
+    const respond = fetchSpy.getMockImplementation();
+    fetchSpy.mockImplementation(input => {
+      setMockFile(BUNDLE_INFO_PATH, JSON.stringify({ ...runningBundleInfo, hash: v2Hash('8'), pendingApply: true }));
+      return respond!(input);
+    });
+    try {
+      await expect(checkForUpdate()).resolves.toEqual(expect.objectContaining({
+        action: 'NOOP', reason: 'CURRENT_BUNDLE_NEWER', upToDate: true,
+      }));
+      expect(mockPostOtaResolve).not.toHaveBeenCalled();
+      expect(fetchSpy).toHaveBeenCalledTimes(2);
+    } finally {
+      fetchSpy.mockRestore();
+    }
+  });
+
+  it.each([null, undefined] as const)('omits source provenance when native running identity is %s', async selectedHash => {
+    mockGetStartupRecoverySelectedHashNative.mockReturnValue(selectedHash);
+    mockGetDownloadedBundlePathNative.mockResolvedValue(`/bundles/${runningBundleInfo.hash}/main.jsbundle`);
+    setMockFile(CURRENT_POINTER_PATH, JSON.stringify({ hash: runningBundleInfo.hash }));
+    setMockFile(BUNDLE_INFO_PATH, JSON.stringify(runningBundleInfo));
+    mockPostOtaResolve.mockResolvedValue({ data: { action: 'NOOP', reason: 'UP_TO_DATE' } } as never);
+    await checkForUpdate();
+    expect(mockPostOtaResolve).toHaveBeenCalledTimes(1);
+    expect(mockPostOtaResolve.mock.calls[0][1]).not.toHaveProperty('currentChannelName');
+    expect(mockReadFile.mock.calls.filter(([path]) => path === BUNDLE_INFO_PATH)).toHaveLength(0);
+  });
+
+  it('keeps missing running metadata conservative without another resolve request', async () => {
+    enableRuntimeDelivery();
+    mockGetStartupRecoverySelectedHashNative.mockReturnValue(runningBundleInfo.hash);
+    setMockFile(INSTALL_ID_PATH, 'install-1');
+    mockVerifyEs256Signature.mockResolvedValue(true);
+    const fetchSpy = mockV2Fetch(makeManagedV2Envelope());
+    try {
+      await expect(checkForUpdate()).resolves.toEqual(expect.objectContaining({ action: 'INSTALL' }));
+      expect(fetchSpy).toHaveBeenCalledTimes(2);
+      expect(mockPostOtaResolve).not.toHaveBeenCalled();
+    } finally {
+      fetchSpy.mockRestore();
+    }
+  });
+
+  it.each(['origin', 'artifact authorization'] as const)(
+    'sends running source-channel provenance to %s without suppressing safety INSTALLs', async path => {
+      mockGetStartupRecoverySelectedHashNative.mockReturnValue(runningBundleInfo.hash);
+      setMockFile(BUNDLE_INFO_PATH, JSON.stringify(runningBundleInfo));
+      setMockFile(CURRENT_POINTER_PATH, JSON.stringify({ hash: v2Hash('8') }));
+      const response = { data: {
+        action: 'INSTALL', mode: 'full', target: {
+          bundleHash: v2Hash('a'), bundleVersion: 27, runtimeVersion: '1.0.0',
+          manifestUrl: 'https://cdn.example.com/manifest.json', downloadUrl: 'https://cdn.example.com/bundle.zip',
+        },
+      } };
+      mockPostOtaResolve.mockResolvedValue(response as never);
+      mockPostOtaArtifactAuthorization.mockResolvedValue(response as never);
+      const result = path === 'origin'
+        ? await checkForUpdate('Beta')
+        : await authorizeRuntimeDeliveryUpdate({
+          action: 'INSTALL', channelName: 'Beta', hash: v2Hash('a'),
+          runtimeDelivery: { generation: 4, targetReleaseRef: 'release-next', selectedMode: 'full' },
+        });
+      expect(result).toEqual(expect.objectContaining({ action: 'INSTALL', bundleVersion: 27 }));
+      const request = path === 'origin' ? mockPostOtaResolve : mockPostOtaArtifactAuthorization;
+      expect(request).toHaveBeenCalledTimes(1);
+      expect(request.mock.calls[0][1]).toEqual(expect.objectContaining({
+        channelName: 'Beta', currentHash: runningBundleInfo.hash, currentChannelName: 'General',
+      }));
+      expect(request.mock.calls[0][1]).not.toHaveProperty('currentBundleVersion');
+      expect(mockReadFile.mock.calls.filter(([file]) => file === BUNDLE_INFO_PATH)).toHaveLength(1);
+    },
+  );
+
+  it('preserves authoritative origin targeting-exclusion retention after dynamic manifest fallback', async () => {
+    enableRuntimeDelivery();
+    mockGetStartupRecoverySelectedHashNative.mockReturnValue(runningBundleInfo.hash);
+    setMockFile(BUNDLE_INFO_PATH, JSON.stringify(runningBundleInfo));
+    setMockFile(INSTALL_ID_PATH, 'install-1');
+    mockVerifyEs256Signature.mockResolvedValue(true);
+    mockPostOtaResolve.mockResolvedValue({ data: { action: 'NOOP', reason: 'CURRENT_BUNDLE_NEWER' } } as never);
+    const fetchSpy = mockV2Fetch(makeV2Envelope({ resolutionMode: 'dynamic', dynamicReason: 'targeted_rollouts' }));
+    try {
+      await expect(checkForUpdate()).resolves.toEqual(expect.objectContaining({
+        action: 'NOOP', reason: 'CURRENT_BUNDLE_NEWER', upToDate: true,
+      }));
+      expect(fetchSpy).toHaveBeenCalledTimes(2);
+      expect(mockPostOtaResolve).toHaveBeenCalledTimes(1);
+      expect(mockPostOtaResolve.mock.calls[0][1]).toEqual(expect.objectContaining({ currentChannelName: 'General' }));
+      expect(mockPostOtaArtifactAuthorization).not.toHaveBeenCalled();
+    } finally {
+      fetchSpy.mockRestore();
+    }
+  });
+
+  it('accepts an authoritative artifact-authorization retention decision without falling back to resolve', async () => {
+    mockGetStartupRecoverySelectedHashNative.mockReturnValue(runningBundleInfo.hash);
+    setMockFile(BUNDLE_INFO_PATH, JSON.stringify(runningBundleInfo));
+    mockPostOtaArtifactAuthorization.mockResolvedValue({
+      data: { action: 'NOOP', reason: 'CURRENT_BUNDLE_NEWER' },
+    } as never);
+    await expect(authorizeRuntimeDeliveryUpdate({
+      action: 'INSTALL', channelName: 'General', hash: v2Hash('a'),
+      runtimeDelivery: { generation: 4, targetReleaseRef: 'release-next', selectedMode: 'full' },
+    })).resolves.toEqual(expect.objectContaining({
+      action: 'NOOP', reason: 'CURRENT_BUNDLE_NEWER', upToDate: true,
+    }));
+    expect(mockPostOtaArtifactAuthorization).toHaveBeenCalledTimes(1);
+    expect(mockPostOtaArtifactAuthorization.mock.calls[0][1]).toEqual(expect.objectContaining({
+      currentHash: runningBundleInfo.hash, currentChannelName: 'General',
+    }));
+    expect(mockPostOtaResolve).not.toHaveBeenCalled();
   });
 
   it('uses a verified complete v2 manifest without calling /resolve', async () => {

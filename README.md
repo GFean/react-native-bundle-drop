@@ -736,6 +736,18 @@ delivery.
 `on-next-launch` is a good default for most apps: users do not see a reload in the
 middle of a session, and the update is ready for the next launch.
 
+On managed channels, pausing a rollout, lowering its percentage or narrowing its
+audience stops offering that release to excluded installations. It does not
+replace a newer bundle already running in the same channel/platform/runtime with
+an older eligible release. A retained update check returns `NOOP` with reason
+`CURRENT_BUNDLE_NEWER`.
+
+Local signed-manifest checks use metadata matched to the native-selected running
+hash, rather than a downloaded candidate. Unknown or mismatched metadata does not
+establish a newer running version; origin decisions remain authoritative. An
+explicit channel change can select a lower version. Revocation, failed-bundle
+recovery, runtime compatibility checks and manual apply boundaries remain intact.
+
 ## Driving Updates Manually
 
 For custom update UI, use the `useBundleDrop()` hook. It subscribes to the singleton
