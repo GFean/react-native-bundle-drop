@@ -4,6 +4,7 @@ import type { BundleInfo } from './bundleInfo';
 import type { AvailableBundlesPage, GetAvailableBundlesOptions } from './manager/updateCheck';
 import type { DownloadUpdateResult } from './manager/downloadAndInstall';
 import type { ApplyUpdateResult } from './manager/updateState';
+import type { UpdatePhase } from './types';
 import type { UpdateCheckResponse, BundleListItem } from './api/types';
 import { getBundleDropRuntimeConfigOrWarn } from './runtime/initState';
 import {
@@ -29,6 +30,8 @@ export type UseBundleDropReturn = {
   isEnabled: boolean;
   /** True while any bundle-drop action is running; use to disable UI. */
   isBusy: boolean;
+  /** Current update phase. Downloading includes verification and staging. Applying includes rollback. */
+  updatePhase: UpdatePhase;
   /** Active runtime channel used by singleton OTA actions. */
   channelName: string;
   /** Locally stored bundle metadata (bundleVersion, hash, etc.), if any. */
@@ -75,6 +78,7 @@ export function useBundleDrop(): UseBundleDropReturn {
     status: state.status,
     isEnabled: state.isEnabled,
     isBusy: state.isBusy,
+    updatePhase: state.updatePhase,
     channelName: state.channelName,
     installedInfo: state.installedInfo as BundleInfo | null,
     pendingApply: state.pendingApply,

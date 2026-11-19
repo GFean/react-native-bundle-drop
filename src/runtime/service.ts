@@ -44,6 +44,7 @@ import {
   reconcileAppliedBundleOnLaunch,
 } from '../manager/updateState';
 import type { AvailableBundlesPage, GetAvailableBundlesOptions } from '../manager/updateCheck';
+import type { UpdatePhase } from '../types';
 import {
   assertBundleDropInitialized,
   getBundleDropRuntimeConfig,
@@ -72,6 +73,7 @@ const MANAGED_DIRECT_INSTALL_NOT_AUTHORIZED_STATUS =
 type BundleDropRuntimeSnapshot = {
   status: string;
   isBusy: boolean;
+  updatePhase: UpdatePhase;
   isEnabled: boolean;
   channelName: string;
   installedInfo: BundleInfo | null;
@@ -98,6 +100,7 @@ let hasWarnedAboutExpoDevelopmentFallback = false;
 let snapshot: BundleDropRuntimeSnapshot = {
   status: DISABLED_STATUS,
   isBusy: false,
+  updatePhase: 'idle',
   isEnabled: false,
   channelName: defaultChannel,
   installedInfo: null,
@@ -124,6 +127,7 @@ function setDisabledSnapshot(channelName = snapshot.channelName) {
   patchSnapshot({
     status: DISABLED_STATUS,
     isBusy: false,
+    updatePhase: 'idle',
     isEnabled: false,
     channelName,
     installedInfo: null,
@@ -233,7 +237,27 @@ function requestRuntimeRestart() {
   restartReactNativeNative();
 }
 
+function checkChannelForUpdate(...args: Parameters<typeof checkForUpdateInternal>) {
+  patchSnapshot({ updatePhase: 'checking' });
+  return checkForUpdateInternal(...args);
+}
+
+function startDownloading() {
+  patchSnapshot({ updatePhase: 'downloading' });
+}
+
+function startApplying() {
+  patchSnapshot({ updatePhase: 'applying' });
+}
+
+function applyStagedBundle(onStatusUpdate: StatusHandler) {
+  return applyUpdateInternal(onStatusUpdate, () => {
+    runtimeRestartRequested = true;
+  }, startApplying);
+}
+
 async function applyAuthoritativeRollback(reason?: string): Promise<ApplyUpdateResult> {
+  startApplying();
   const result = await rollbackStartupBundle(isCurrentRevokedRollback(reason));
   if (!result) return { status: 'blocked', reason: 'ROLLBACK_REVALIDATION_FAILED' };
   // A bookkeeping failure must not prevent confirmed-revocation recovery.
@@ -270,7 +294,7 @@ async function applyPendingRollback(): Promise<ApplyUpdateResult | null> {
     return { status: 'blocked', reason: 'ROLLBACK_REVALIDATION_FAILED' };
   }
   // Refresh authority before native atomically selects and verifies the fallback.
-  const decision = await checkForUpdateInternal(runtime.channelName);
+  const decision = await checkChannelForUpdate(runtime.channelName);
   if (decision?.action === 'ROLLBACK' && isCurrentRevokedRollback(decision.reason)) {
     return applyAuthoritativeRollback(decision.reason);
   }
@@ -326,7 +350,7 @@ async function withBusy<T>(fn: () => Promise<T>): Promise<T> {
     return result;
   } finally {
     updateFlowActive = false;
-    patchSnapshot({ isBusy: false });
+    patchSnapshot({ isBusy: false, updatePhase: 'idle' });
   }
 }
 
@@ -385,9 +409,7 @@ async function runStartupFlow() {
   if (pendingState.pendingApply && !pendingState.pendingRollback) {
     if (runtime.policy === 'immediate') {
       emitStatus('♻️ Applying previously downloaded update...');
-      const applied = await applyUpdateInternal(statusCb, () => {
-        runtimeRestartRequested = true;
-      });
+      const applied = await applyStagedBundle(statusCb);
       if (applied.status === 'applied') {
         return;
       }
@@ -403,7 +425,7 @@ async function runStartupFlow() {
     return;
   }
 
-  const decision = await checkForUpdateInternal(runtime.channelName, statusCb);
+  const decision = await checkChannelForUpdate(runtime.channelName, statusCb);
   const finalStatus = getCheckStatus(decision);
   if (!isSameStatus(snapshot.status, finalStatus)) {
     emitStatus(finalStatus);
@@ -450,6 +472,7 @@ async function runStartupFlow() {
   const downloadResult = await downloadUpdateInternal(
     {
       channelName: runtime.channelName,
+      onDownloadStart: startDownloading,
       resolvedTarget,
     },
     statusCb,
@@ -473,9 +496,7 @@ async function runStartupFlow() {
   }
 
   if (downloadResult.status === 'staged') {
-    await applyUpdateInternal(statusCb, () => {
-      runtimeRestartRequested = true;
-    });
+    await applyStagedBundle(statusCb);
     return;
   }
 
@@ -603,7 +624,7 @@ export async function checkLatest(extraStatusHandler?: StatusHandler): Promise<C
   await waitForStartupIfNeeded();
 
   return withBusy(async () => {
-    const response = await checkForUpdateInternal(runtime.channelName, status =>
+    const response = await checkChannelForUpdate(runtime.channelName, status =>
       emitStatus(status, extraStatusHandler)
     );
     const status = getCheckStatus(response);
@@ -625,8 +646,9 @@ export async function downloadAndStage(extraStatusHandler?: StatusHandler): Prom
   await waitForStartupIfNeeded();
 
   return withBusy(async () => {
+    patchSnapshot({ updatePhase: 'checking' });
     const downloadResult = await downloadUpdateInternal(
-      { channelName: runtime.channelName },
+      { channelName: runtime.channelName, onDownloadStart: startDownloading },
       status => emitStatus(status, extraStatusHandler),
     );
     const result = await handleDownloadRollback(downloadResult);
@@ -651,9 +673,8 @@ export async function applyDownloadedUpdate(
   await nativeOtaEnabledPromise;
 
   return withBusy(async () => {
-    const result = await applyPendingRollback() ?? await applyUpdateInternal(
+    const result = await applyPendingRollback() ?? await applyStagedBundle(
       status => emitStatus(status, extraStatusHandler),
-      () => { runtimeRestartRequested = true; },
     );
     const status = getApplyStatus(result);
     if (status) {
@@ -737,7 +758,7 @@ export async function installBundleFromListItem(
   }
 
   return withBusy(async () => {
-    const resolvedDecision = await checkForUpdateInternal(runtime.channelName, emitStatus).catch(
+    const resolvedDecision = await checkChannelForUpdate(runtime.channelName, emitStatus).catch(
       () => null,
     );
     const usesManagedRuntimeDelivery = isRuntimeDeliveryConfigured(projectConfig.runtimeDelivery);
@@ -767,6 +788,7 @@ export async function installBundleFromListItem(
       ? await downloadUpdateInternal(
           {
             channelName: runtime.channelName,
+            onDownloadStart: startDownloading,
             resolvedTarget: {
               hash: bundle.hash,
               downloadUrl:
@@ -797,6 +819,7 @@ export async function installBundleFromListItem(
           {
             channelName: runtime.channelName,
             onStatusUpdate: emitStatus,
+            onDownloadStart: startDownloading,
           },
         );
 
@@ -979,6 +1002,7 @@ export async function installBundle(
       {
         channelName: runtime.channelName,
         onStatusUpdate: status => emitStatus(status, onStatusUpdate),
+        onDownloadStart: startDownloading,
       },
     );
     const result = await handleDownloadRollback(downloadResult);
@@ -1000,6 +1024,7 @@ export function resetBundleDropRuntimeServiceForTests() {
   snapshot = {
     status: DISABLED_STATUS,
     isBusy: false,
+    updatePhase: 'idle',
     isEnabled: false,
     channelName: defaultChannel,
     installedInfo: null,

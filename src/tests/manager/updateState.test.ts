@@ -358,8 +358,9 @@ describe('manager/updateState', () => {
       bundleInfo: { pendingApply: true },
     });
     const noBundleStatus = jest.fn();
+    const onApplyStart = jest.fn();
 
-    await expect(noBundle.module.applyUpdate(noBundleStatus)).resolves.toEqual({
+    await expect(noBundle.module.applyUpdate(noBundleStatus, undefined, onApplyStart)).resolves.toEqual({
       status: 'noBundle',
     });
     expect(noBundleStatus).toHaveBeenCalledWith('⚠️ No downloaded bundle to apply');
@@ -371,11 +372,12 @@ describe('manager/updateState', () => {
     });
     const alreadyAppliedStatus = jest.fn();
 
-    await expect(alreadyApplied.module.applyUpdate(alreadyAppliedStatus)).resolves.toEqual({
+    await expect(alreadyApplied.module.applyUpdate(alreadyAppliedStatus, undefined, onApplyStart)).resolves.toEqual({
       status: 'alreadyApplied',
     });
     expect(alreadyAppliedStatus).toHaveBeenCalledWith('ℹ️ Bundle already applied');
     expect(alreadyApplied.mocks.restartReactNativeNative).not.toHaveBeenCalled();
+    expect(onApplyStart).not.toHaveBeenCalled();
   });
 
   it('applies the downloaded bundle and defers install reporting until restart', async () => {
@@ -390,8 +392,9 @@ describe('manager/updateState', () => {
     });
     const statusSpy = jest.fn();
     const beforeRestartSpy = jest.fn();
+    const onApplyStart = jest.fn();
 
-    await expect(module.applyUpdate(statusSpy, beforeRestartSpy)).resolves.toEqual({
+    await expect(module.applyUpdate(statusSpy, beforeRestartSpy, onApplyStart)).resolves.toEqual({
       status: 'applied',
     });
 
@@ -403,6 +406,10 @@ describe('manager/updateState', () => {
       })
     );
     expect(mocks.reportInstalledIfReady).not.toHaveBeenCalled();
+    expect(onApplyStart).toHaveBeenCalledTimes(1);
+    expect(onApplyStart.mock.invocationCallOrder[0]).toBeLessThan(
+      mocks.updateBundleInfo.mock.invocationCallOrder[0],
+    );
     expect(beforeRestartSpy).toHaveBeenCalledTimes(1);
     expect(beforeRestartSpy.mock.invocationCallOrder[0]).toBeLessThan(
       mocks.restartReactNativeNative.mock.invocationCallOrder[0],

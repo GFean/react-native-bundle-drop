@@ -27,6 +27,10 @@ import type { RuntimeDeliveryLaneIdentity, RuntimeDeliveryLaneManifest } from '.
 export type RuntimeDeliveryResolveContext = {
   channelName: string;
   currentHash: string | null;
+  /** Hash-matched running metadata for this lane; never a staged candidate's version. */
+  currentBundleVersion?: number;
+  /** Source channel of the hash-matched running bundle, including across channel changes. */
+  currentChannelName?: string;
   rejectedHashes: string[];
   installId: string;
   patchAlgorithms: string[];
@@ -425,6 +429,8 @@ export async function resolveFromRuntimeDeliveryManifest(
 ): Promise<UpdateCheckResponse> {
   const decision = await resolveRuntimeDeliveryLane(manifest, {
     currentHash: context.currentHash,
+    currentBundleVersion: context.currentBundleVersion,
+    currentChannelName: context.currentChannelName,
     rejectedHashes: context.rejectedHashes,
     installId: context.installId,
     patchAlgorithms: context.patchAlgorithms,
@@ -434,7 +440,7 @@ export async function resolveFromRuntimeDeliveryManifest(
     const incompatible = decision.reason === 'NO_COMPATIBLE_BUNDLE';
     return {
       action: 'NOOP',
-      upToDate: decision.reason === 'UP_TO_DATE',
+      upToDate: decision.reason === 'UP_TO_DATE' || decision.reason === 'CURRENT_BUNDLE_NEWER',
       channelName: context.channelName,
       reason: decision.reason,
       incompatible: incompatible || undefined,

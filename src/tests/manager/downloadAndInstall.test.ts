@@ -66,6 +66,7 @@ describe('manager/downloadAndInstall', () => {
 
   it('returns upToDate and incompatible states without downloading', async () => {
     const statusSpy = jest.fn();
+    const onDownloadStart = jest.fn();
 
     mockCheckForUpdate.mockResolvedValueOnce({
       action: 'NOOP',
@@ -74,7 +75,7 @@ describe('manager/downloadAndInstall', () => {
       reason: 'UP_TO_DATE',
     });
 
-    await expect(downloadUpdate(undefined, statusSpy)).resolves.toEqual({
+    await expect(downloadUpdate({ onDownloadStart }, statusSpy)).resolves.toEqual({
       status: 'upToDate',
       reason: 'UP_TO_DATE',
     });
@@ -87,7 +88,8 @@ describe('manager/downloadAndInstall', () => {
       reason: 'NO_COMPATIBLE_BUNDLE',
     });
 
-    await expect(downloadUpdate()).resolves.toEqual({ status: 'incompatible' });
+    await expect(downloadUpdate({ onDownloadStart })).resolves.toEqual({ status: 'incompatible' });
+    expect(onDownloadStart).not.toHaveBeenCalled();
     expect(statusSpy).toHaveBeenCalledWith('✅ You have the latest version');
   });
 
@@ -275,10 +277,15 @@ describe('manager/downloadAndInstall', () => {
         metadataFromZip: { runtimeVersion: '1.0.0' },
       });
     const statusSpy = jest.fn();
+    const onDownloadStart = jest.fn();
 
-    await expect(downloadUpdate(undefined, statusSpy)).resolves.toMatchObject({
+    await expect(downloadUpdate({ onDownloadStart }, statusSpy)).resolves.toMatchObject({
       status: 'staged', hash,
     });
+    expect(onDownloadStart).toHaveBeenCalledTimes(1);
+    const [started] = onDownloadStart.mock.invocationCallOrder;
+    expect(started).toBeGreaterThan(mockAuthorizeRuntimeDeliveryUpdate.mock.invocationCallOrder[0]);
+    expect(started).toBeLessThan(mockInstallFromZip.mock.invocationCallOrder[0]);
     expect(mockAuthorizeRuntimeDeliveryUpdate).toHaveBeenCalledTimes(2);
     expect(mockInstallFromZip).toHaveBeenNthCalledWith(1, expect.objectContaining({
       downloadUrl: 'https://cdn.example.com/expired.zip',
@@ -289,6 +296,43 @@ describe('manager/downloadAndInstall', () => {
     expect(statusSpy).toHaveBeenCalledWith(
       '🔐 Download authorization expired; refreshing once...',
     );
+  });
+
+  it('retains the current bundle when authorization refresh no longer offers an upgrade', async () => {
+    const selection = {
+      action: 'INSTALL' as const,
+      channelName: 'General',
+      hash: '4'.repeat(64),
+      runtimeVersion: '1.0.0',
+      mode: 'full' as const,
+      runtimeDelivery: {
+        generation: 8,
+        targetReleaseRef: 'release-8',
+        selectedMode: 'full' as const,
+      },
+    };
+    mockCheckForUpdate.mockResolvedValue(selection);
+    mockAuthorizeRuntimeDeliveryUpdate
+      .mockResolvedValueOnce({ ...selection, downloadUrl: 'https://cdn.example.com/expired.zip' })
+      .mockResolvedValueOnce({
+        action: 'NOOP',
+        channelName: 'General',
+        reason: 'CURRENT_BUNDLE_NEWER',
+        upToDate: true,
+      });
+    mockInstallFromZip.mockRejectedValueOnce(
+      new InstallPhaseError('download', new Error('HTTP 403: expired')),
+    );
+    const statusSpy = jest.fn();
+
+    await expect(downloadUpdate(undefined, statusSpy)).resolves.toEqual({
+      status: 'upToDate',
+      reason: 'CURRENT_BUNDLE_NEWER',
+    });
+    expect(mockAuthorizeRuntimeDeliveryUpdate).toHaveBeenCalledTimes(2);
+    expect(mockInstallFromZip).toHaveBeenCalledTimes(1);
+    expect(mockActivateStartupCandidateNative).not.toHaveBeenCalled();
+    expect(statusSpy).toHaveBeenLastCalledWith('✅ You have the latest version');
   });
 
   it('does not retry when reauthorization changes the signed target identity', async () => {
@@ -974,6 +1018,7 @@ describe('manager/downloadAndInstall', () => {
   });
 
   it('installs a bundle directly when the resolved target is provided by the caller', async () => {
+    const onDownloadStart = jest.fn();
     mockInstallFromZip.mockResolvedValue({
       bundlePath: '/mock/doc/bundle-drop/bundles/2222222222222222222222222222222222222222222222222222222222222222/main.jsbundle',
       metadataFromZip: {
@@ -986,6 +1031,7 @@ describe('manager/downloadAndInstall', () => {
     await expect(
       installBundle('2222222222222222222222222222222222222222222222222222222222222222', 'https://cdn.example.com/direct.zip', 11, '2.0.0', '2.0.0', {
         channelName: 'Beta',
+        onDownloadStart,
       })
     ).resolves.toEqual({
       status: 'staged',
@@ -994,6 +1040,7 @@ describe('manager/downloadAndInstall', () => {
     });
 
     expect(mockCheckForUpdate).not.toHaveBeenCalled();
+    expect(onDownloadStart).toHaveBeenCalledTimes(1);
     expect(getMockFile(BUNDLE_INFO_PATH)).toContain('"channelName": "Beta"');
   });
 

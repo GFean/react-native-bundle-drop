@@ -49,11 +49,16 @@ const loadRuntimeServiceModule = (overrides?: {
 }) => {
   jest.resetModules();
 
-  const downloadUpdate = jest.fn(async (_payload, onStatusUpdate?: (status: string) => void) => {
+  const downloadUpdate = jest.fn(async (
+    options?: Parameters<typeof import('../../manager/downloadAndInstall').downloadUpdate>[0],
+    onStatusUpdate?: (status: string) => void,
+  ) => {
+    const result = overrides?.downloadResult ?? { status: 'staged' as const };
+    if (result.status === 'staged') options?.onDownloadStart?.();
     if (overrides?.invokeDownloadCallback) {
       onStatusUpdate?.('download progress');
     }
-    return overrides?.downloadResult ?? { status: 'staged' };
+    return result;
   });
   const installBundle = jest.fn(
     async (
@@ -62,12 +67,14 @@ const loadRuntimeServiceModule = (overrides?: {
       _bundleVersion?: number,
       _version?: string,
       _runtimeVersion?: string,
-      options?: { onStatusUpdate?: (status: string) => void },
+      options?: import('../../manager/downloadAndInstall').InstallBundleOptions,
     ) => {
+      const result = overrides?.installResult ?? { status: 'staged' as const };
+      if (result.status === 'staged') options?.onDownloadStart?.();
       if (overrides?.invokeInstallCallback) {
         options?.onStatusUpdate?.('install progress');
       }
-      return overrides?.installResult ?? { status: 'staged' };
+      return result;
     },
   );
   const checkForUpdate = jest.fn(async (_channelName?: string, onStatusUpdate?: (status: string) => void) => {
@@ -102,11 +109,13 @@ const loadRuntimeServiceModule = (overrides?: {
   const applyUpdate = jest.fn(async (
     onStatusUpdate?: (status: string) => void,
     onBeforeRestart?: () => void,
+    onApplyStart?: () => void,
   ) => {
+    const result = overrides?.applyResult ?? { status: 'applied' as const };
+    if (result.status === 'applied') onApplyStart?.();
     if (overrides?.invokeApplyCallback) {
       onStatusUpdate?.('apply progress');
     }
-    const result = overrides?.applyResult ?? { status: 'applied' as const };
     if (result.status === 'applied') {
       onBeforeRestart?.();
     }
@@ -373,6 +382,7 @@ describe('runtime/service', () => {
       expect(service.getBundleDropSnapshot()).toEqual({
         status: DISABLED_STATUS,
         isBusy: false,
+        updatePhase: 'idle',
         isEnabled: false,
         channelName: 'Dev',
         installedInfo: null,
@@ -545,7 +555,7 @@ describe('runtime/service', () => {
     });
     await service.reportHealthy();
 
-    expect(mocks.applyUpdate).toHaveBeenCalledWith(expect.any(Function), expect.any(Function));
+    expect(mocks.applyUpdate).toHaveBeenCalledWith(expect.any(Function), expect.any(Function), expect.any(Function));
     expect(mocks.reportActiveBundleHealthy).not.toHaveBeenCalled();
   });
 
@@ -590,6 +600,7 @@ describe('runtime/service', () => {
     expect(service.getBundleDropSnapshot()).toEqual({
       status: 'BundleDrop is disabled',
       isBusy: false,
+      updatePhase: 'idle',
       isEnabled: false,
       channelName: 'General',
       installedInfo: null,
@@ -620,6 +631,89 @@ describe('runtime/service', () => {
     await expect(pendingCheck).resolves.toEqual({
       response: { action: 'NOOP' },
       status: '✅ You have the latest version',
+    });
+  });
+
+  it('reports the startup check, download, and immediate apply in order', async () => {
+    let releaseCheck!: () => void;
+    const waitForCheck = new Promise<void>(resolve => { releaseCheck = resolve; });
+    let signalCheckStarted!: () => void;
+    const checkStarted = new Promise<void>(resolve => { signalCheckStarted = resolve; });
+    const { service, mocks } = loadRuntimeServiceModule({
+      decision: {
+        action: 'INSTALL',
+        hash: 'hash-2',
+        downloadUrl: 'https://cdn.example.com/hash-2.zip',
+      },
+      waitForCheck,
+      onCheckStarted: signalCheckStarted,
+    });
+    const phases = [service.getBundleDropSnapshot().updatePhase];
+    service.subscribeBundleDropState(() => {
+      const { updatePhase } = service.getBundleDropSnapshot();
+      if (updatePhase !== phases[phases.length - 1]) phases.push(updatePhase);
+    });
+    mocks.applyUpdate.mockImplementationOnce(async (_status, onBeforeRestart, onApplyStart) => {
+      expect(service.getBundleDropSnapshot().updatePhase).toBe('downloading');
+      onApplyStart?.();
+      expect(service.getBundleDropSnapshot().updatePhase).toBe('applying');
+      onBeforeRestart?.();
+      return { status: 'applied' };
+    });
+
+    service.initBundleDrop({ environment: 'production', policy: 'immediate' });
+    await checkStarted;
+    expect(service.getBundleDropSnapshot()).toMatchObject({
+      isBusy: true,
+      updatePhase: 'checking',
+    });
+    expect(mocks.downloadUpdate).not.toHaveBeenCalled();
+
+    releaseCheck();
+    await service.waitForBundleDropStartupForTests();
+    expect(mocks.applyUpdate).toHaveBeenCalledTimes(1);
+    expect(phases).toEqual(['idle', 'checking', 'downloading', 'applying', 'idle']);
+  });
+
+  it('returns to idle while a staged bundle waits for a manual apply', async () => {
+    const { service, mocks } = loadRuntimeServiceModule();
+    service.initBundleDrop({ environment: 'production', policy: 'manual' });
+    await service.waitForBundleDropStartupForTests();
+
+    const phases = [service.getBundleDropSnapshot().updatePhase];
+    service.subscribeBundleDropState(() => {
+      const { updatePhase } = service.getBundleDropSnapshot();
+      if (updatePhase !== phases[phases.length - 1]) phases.push(updatePhase);
+    });
+    mocks.getUpdateState.mockResolvedValueOnce({
+      hasBundle: true, info: { hash: 'hash-2' }, pendingApply: true,
+    });
+
+    await service.downloadUpdate();
+    expect(service.getBundleDropSnapshot()).toMatchObject({
+      pendingApply: true,
+      updatePhase: 'idle',
+    });
+    await service.applyUpdate();
+
+    expect(phases).toEqual(['idle', 'checking', 'downloading', 'idle', 'applying', 'idle']);
+  });
+
+  it('returns to idle when a download fails after starting', async () => {
+    const { service, mocks } = loadRuntimeServiceModule();
+    service.initBundleDrop({ environment: 'production', policy: 'manual' });
+    await service.waitForBundleDropStartupForTests();
+    mocks.downloadUpdate.mockImplementationOnce(async options => {
+      expect(service.getBundleDropSnapshot().updatePhase).toBe('checking');
+      options?.onDownloadStart?.();
+      expect(service.getBundleDropSnapshot().updatePhase).toBe('downloading');
+      throw new Error('download failed');
+    });
+
+    await expect(service.downloadUpdate()).rejects.toThrow('download failed');
+    expect(service.getBundleDropSnapshot()).toMatchObject({
+      isBusy: false,
+      updatePhase: 'idle',
     });
   });
 
@@ -682,7 +776,7 @@ describe('runtime/service', () => {
     expect(mocks.reconcileAppliedBundleOnLaunch).toHaveBeenCalled();
     expect(mocks.reportActiveBundleHealthy).not.toHaveBeenCalled();
     expect(statusSpy).toHaveBeenCalledWith('♻️ Applying previously downloaded update...');
-    expect(mocks.applyUpdate).toHaveBeenCalledWith(expect.any(Function), expect.any(Function));
+    expect(mocks.applyUpdate).toHaveBeenCalledWith(expect.any(Function), expect.any(Function), expect.any(Function));
     expect(mocks.checkForUpdate).not.toHaveBeenCalled();
   });
 
@@ -738,6 +832,10 @@ describe('runtime/service', () => {
       },
     });
     const rollbackStatus = jest.fn();
+    rollback.mocks.rollbackStartupBundle.mockImplementationOnce(async forceEmbedded => {
+      expect(rollback.service.getBundleDropSnapshot().updatePhase).toBe('applying');
+      return { rolledBack: true, toEmbedded: forceEmbedded };
+    });
 
     rollback.service.initBundleDrop({
       environment: 'production',
@@ -749,6 +847,7 @@ describe('runtime/service', () => {
     expect(rollback.mocks.rollbackStartupBundle).toHaveBeenCalledTimes(1);
     expect(rollback.mocks.rollbackStartupBundle).toHaveBeenCalledWith(true);
     expect(rollback.mocks.restartReactNativeNative).toHaveBeenCalledTimes(1);
+    expect(rollback.service.getBundleDropSnapshot().updatePhase).toBe('idle');
 
     const incompatible = loadRuntimeServiceModule({
       pendingState: {
@@ -783,6 +882,10 @@ describe('runtime/service', () => {
       },
     });
     const upToDateStatus = jest.fn();
+    const onPhase = jest.fn();
+    upToDate.service.subscribeBundleDropState(() => {
+      onPhase(upToDate.service.getBundleDropSnapshot().updatePhase);
+    });
 
     upToDate.service.initBundleDrop({
       environment: 'production',
@@ -791,6 +894,10 @@ describe('runtime/service', () => {
     });
     await upToDate.service.waitForBundleDropStartupForTests();
     expect(upToDateStatus).toHaveBeenCalledWith('✅ You have the latest version');
+    expect(onPhase).toHaveBeenCalledWith('checking');
+    expect(onPhase).not.toHaveBeenCalledWith('downloading');
+    expect(onPhase).not.toHaveBeenCalledWith('applying');
+    expect(onPhase).toHaveBeenLastCalledWith('idle');
   });
 
   it.each([
@@ -926,6 +1033,7 @@ describe('runtime/service', () => {
     expect(nextLaunch.mocks.downloadUpdate).toHaveBeenCalledWith(
       {
         channelName: 'Beta',
+        onDownloadStart: expect.any(Function),
         resolvedTarget: {
           hash: 'hash-4',
           downloadUrl: 'https://cdn.example.com/hash-4.zip',
@@ -975,6 +1083,7 @@ describe('runtime/service', () => {
     expect(patchDecision.mocks.downloadUpdate).toHaveBeenCalledWith(
       {
         channelName: 'General',
+        onDownloadStart: expect.any(Function),
         resolvedTarget: {
           hash: 'hash-patch-target',
           downloadUrl: 'https://cdn.example.com/hash-patch-target.zip',
@@ -1024,7 +1133,7 @@ describe('runtime/service', () => {
     await immediate.service.waitForBundleDropStartupForTests();
 
     expect(immediate.mocks.downloadUpdate).toHaveBeenCalled();
-    expect(immediate.mocks.applyUpdate).toHaveBeenCalledWith(expect.any(Function), expect.any(Function));
+    expect(immediate.mocks.applyUpdate).toHaveBeenCalledWith(expect.any(Function), expect.any(Function), expect.any(Function));
 
     const upToDate = loadRuntimeServiceModule({
       pendingState: {
@@ -1107,6 +1216,7 @@ describe('runtime/service', () => {
     await nextLaunch.service.waitForBundleDropStartupForTests();
     expect(nextLaunch.mocks.downloadUpdate).toHaveBeenCalledWith({
       channelName: 'General',
+      onDownloadStart: expect.any(Function),
       resolvedTarget: expect.objectContaining({
         hash: 'hash-v2',
         downloadUrl: undefined,
@@ -1575,6 +1685,7 @@ describe('runtime/service', () => {
     expect(mocks.downloadUpdate).toHaveBeenCalledWith(
       {
         channelName: 'General',
+        onDownloadStart: expect.any(Function),
         resolvedTarget: expect.objectContaining({
           hash: 'hash-12',
           downloadUrl: 'https://cdn.example.com/hash-12-full.zip',
@@ -1703,6 +1814,7 @@ describe('runtime/service', () => {
         '1.0.0',
         expect.objectContaining({
           channelName: 'General',
+          onDownloadStart: expect.any(Function),
         }),
       );
     },
@@ -1783,7 +1895,7 @@ describe('runtime/service', () => {
 
     expect(mocks.checkForUpdate).toHaveBeenNthCalledWith(1, 'Beta', expect.any(Function));
     expect(mocks.downloadUpdate).toHaveBeenCalledWith(
-      { channelName: 'Beta' },
+      { channelName: 'Beta', onDownloadStart: expect.any(Function) },
       expect.any(Function),
     );
     expect(mocks.getAvailableBundles).toHaveBeenNthCalledWith(1, {

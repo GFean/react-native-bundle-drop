@@ -121,6 +121,7 @@ export const reconcileAppliedBundleOnLaunch = async (cached?: {
 export const applyUpdate = async (
   onStatusUpdate?: (status: string) => void,
   onBeforeRestart?: () => void,
+  onApplyStart?: () => void,
 ): Promise<ApplyUpdateResult> => {
   try {
     const info = await readBundleInfo();
@@ -145,6 +146,7 @@ export const applyUpdate = async (
       };
     }
 
+    onApplyStart?.();
     onStatusUpdate?.('♻️ Applying downloaded bundle...');
     await updateBundleInfo({ pendingApply: false, installedAt: new Date().toISOString() });
 

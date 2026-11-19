@@ -25,7 +25,7 @@ export {
 export type { UserProperties, UserPropertyValue } from './fs/userProperties';
 
 export type { BundleInfo } from './bundleInfo';
-export type { UpdatePolicy } from './types';
+export type { UpdatePhase, UpdatePolicy } from './types';
 export type { BundleListItem } from './api/types';
 export type { BundleDropProjectConfig } from './loadConfig';
 export type { BundleDropConfig } from './context';
