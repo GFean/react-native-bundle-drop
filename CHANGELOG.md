@@ -5,6 +5,13 @@ All notable changes to this package are documented here.
 This project uses [Conventional Commits](https://www.conventionalcommits.org/) and
 [release-please](https://github.com/googleapis/release-please) to prepare releases.
 
+## [0.12.1](https://github.com/GFean/react-native-bundle-drop/compare/v0.12.0...v0.12.1) (2026-11-19)
+
+
+### Bug Fixes
+
+* **runtime:** retain running rollout bundles and expose updatePhase ([#68](https://github.com/GFean/react-native-bundle-drop/issues/68)) ([d5c55d2](https://github.com/GFean/react-native-bundle-drop/commit/d5c55d2cd6db6809b07bb8ff0d4c67b7ea3a4218))
+
 ## [0.12.0](https://github.com/GFean/react-native-bundle-drop/compare/v0.11.0...v0.12.0) (2026-11-09)
 
 
