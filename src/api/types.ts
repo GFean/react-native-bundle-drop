@@ -7,6 +7,8 @@ export type OtaResolveRequest = {
   runtimeVersion: string | null;
   environment: string | null;
   currentHash: string | null;
+  /** Known source channel of the running hash; omitted for unknown/legacy metadata. */
+  currentChannelName?: string;
   currentUserProperties: UserProperties;
   rejectedHashes: string[];
   installId: string;
@@ -29,6 +31,7 @@ export type OtaArtifactAuthorizationRequest = {
   mode: 'full' | 'patch';
   patchArtifactRef: string | null;
   currentHash: string | null;
+  currentChannelName?: string;
   rejectedHashes: string[];
   installId: string;
   transport: OtaResolveRequest['transport'];
@@ -68,6 +71,7 @@ export type OtaResolveResponse =
       action: 'NOOP';
       reason?:
         | 'UP_TO_DATE'
+        | 'CURRENT_BUNDLE_NEWER'
         | 'ROLLOUT_PAUSED'
         | 'ROLLOUT_NOT_ELIGIBLE'
         | 'TARGETING_NOT_MATCHED'

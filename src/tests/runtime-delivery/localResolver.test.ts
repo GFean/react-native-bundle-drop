@@ -99,6 +99,82 @@ describe('runtime-delivery/localResolver', () => {
     await expect(rolloutBucket('install-1')).rejects.toThrow('invalid digest');
   });
 
+  it.each(['paused', 'percentage lowered'])(
+    'retains the newer running bundle when its rollout is %s', async scenario => {
+      const manifest = automaticManifest();
+      manifest.publishingMode = 'managed';
+      manifest.publishedRollouts = [
+        ...(scenario === 'paused'
+          ? []
+          : [{ releaseRef: 'new', rolloutPercentage: 25, status: 'active' as const }]),
+        { releaseRef: 'old', rolloutPercentage: 100, status: 'completed' },
+      ];
+      if (scenario === 'paused') manifest.releases = manifest.releases.slice(1);
+      await expect(resolveRuntimeDeliveryLane(manifest, {
+        currentHash: hash('1'),
+        currentBundleVersion: 2,
+        currentChannelName: 'General',
+        rejectedHashes: [],
+        installId: 'install-1', // Stable bucket 30 is excluded by the lowered 25% offer.
+        patchAlgorithms: [],
+        supportsContentAddressedAssets: true,
+      })).resolves.toEqual({ action: 'NOOP', reason: 'CURRENT_BUNDLE_NEWER' });
+    },
+  );
+
+  it.each([
+    ['unknown version', { currentBundleVersion: undefined }],
+    ['invalid version', { currentBundleVersion: NaN }],
+    ['negative version', { currentBundleVersion: -1 }],
+    ['equal version', { currentBundleVersion: 1 }],
+    ['newer target', { currentBundleVersion: 0 }],
+    ['embedded runtime', { currentHash: null }],
+    ['different source channel', { currentChannelName: 'Beta' }],
+    ['unknown source channel', { currentChannelName: undefined }],
+    ['failed current bundle', { rejectedHashes: [hash('1')] as string[] }],
+  ] as const)('preserves target selection for %s', async (_label, overrides) => {
+    const manifest = automaticManifest();
+    manifest.publishingMode = 'managed';
+    manifest.publishedRollouts = [{ releaseRef: 'old', rolloutPercentage: 100, status: 'completed' }];
+    manifest.releases = manifest.releases.slice(1);
+    await expect(resolveRuntimeDeliveryLane(manifest, {
+      currentHash: hash('1'),
+      currentBundleVersion: 2,
+      currentChannelName: 'General',
+      rejectedHashes: [],
+      installId: 'install-1',
+      patchAlgorithms: [],
+      supportsContentAddressedAssets: true,
+      ...overrides,
+    })).resolves.toEqual(expect.objectContaining({ action: 'INSTALL', target: manifest.releases[0] }));
+  });
+
+  it('preserves an older safe replacement for a revoked newer running bundle', async () => {
+    const manifest = automaticManifest();
+    manifest.publishingMode = 'managed';
+    manifest.publishedRollouts = [{ releaseRef: 'old', rolloutPercentage: 100, status: 'completed' }];
+    manifest.releases = manifest.releases.slice(1);
+    manifest.revokedHashes = [hash('1')];
+    await expect(resolveRuntimeDeliveryLane(manifest, {
+      currentHash: hash('1'),
+      currentBundleVersion: 2,
+      currentChannelName: 'General',
+      rejectedHashes: [],
+      installId: 'install-1',
+      patchAlgorithms: [],
+      supportsContentAddressedAssets: true,
+    })).resolves.toEqual(expect.objectContaining({ action: 'INSTALL', mode: 'full' }));
+  });
+
+  it('preserves automatic publishing selection independently of rollout retention', async () => {
+    const manifest = automaticManifest();
+    manifest.releases = manifest.releases.slice(1);
+    await expect(resolveRuntimeDeliveryLane(manifest, {
+      currentHash: hash('1'), currentBundleVersion: 2, currentChannelName: 'General',
+      rejectedHashes: [], installId: 'install-1', patchAlgorithms: [], supportsContentAddressedAssets: true,
+    })).resolves.toEqual(expect.objectContaining({ action: 'INSTALL', target: manifest.releases[0] }));
+  });
+
   it('preserves fractional managed-rollout membership using integerBucket < percentage', async () => {
     const manifest = automaticManifest();
     manifest.publishingMode = 'managed';

@@ -12,6 +12,8 @@ import {
 import type { OtaPatchSet, UpdateCheckResponse } from '../api/types';
 import { isArtifactCapabilityRejected } from '../runtime-delivery/artifactCapability';
 
+const UP_TO_DATE_STATUS = '✅ You have the latest version';
+
 export type DownloadUpdateResult =
   | { status: 'staged'; bundlePath: string; hash: string }
   | { status: 'upToDate'; reason?: string; skippedFailedBundle?: boolean; skippedHash?: string }
@@ -21,6 +23,7 @@ export type DownloadUpdateResult =
 
 type DownloadOptions = {
   channelName?: string;
+  onDownloadStart?: () => void;
   resolvedTarget?: {
     hash: string;
     downloadUrl?: string;
@@ -120,7 +123,7 @@ async function downloadAndStageUpdate(
     statusCb?.(
       checkResult.skippedFailedBundle
         ? '✅ Current bundle retained; requested update previously failed on this device'
-        : '✅ You have the latest version',
+        : UP_TO_DATE_STATUS,
     );
     return checkResult.skippedFailedBundle
       ? {
@@ -178,6 +181,9 @@ async function downloadAndStageUpdate(
         });
       }
 
+      if (!capabilityRefreshAttempted) {
+        options?.onDownloadStart?.();
+      }
       try {
         installResult = patchFallbackSelected ? null : await tryInstallPatchTransport({
           target: {
@@ -232,6 +238,10 @@ async function downloadAndStageUpdate(
           capabilityRefreshAttempted = true;
           statusCb?.('🔐 Download authorization expired; refreshing once...');
           const refreshed = await authorizeRuntimeDeliveryUpdate(unresolvedCheckResult);
+          if (refreshed?.action === 'NOOP' && refreshed.reason === 'CURRENT_BUNDLE_NEWER') {
+            statusCb?.(UP_TO_DATE_STATUS);
+            return { status: 'upToDate', reason: refreshed.reason };
+          }
           if (!isSameRuntimeDeliverySelection(unresolvedCheckResult, refreshed)) {
             throw new BundleDropError({
               message: 'Refreshed download authorization changed update identity',
@@ -349,6 +359,7 @@ export const downloadUpdate = async (
 export type InstallBundleOptions = {
   channelName?: string;
   onStatusUpdate?: (status: string) => void;
+  onDownloadStart?: () => void;
 };
 
 export const installBundle = async (
@@ -362,6 +373,7 @@ export const installBundle = async (
   return downloadAndStageUpdate(
     {
       channelName: options?.channelName,
+      onDownloadStart: options?.onDownloadStart,
       resolvedTarget: { hash, downloadUrl, bundleVersion, version, runtimeVersion },
     },
     options?.onStatusUpdate,

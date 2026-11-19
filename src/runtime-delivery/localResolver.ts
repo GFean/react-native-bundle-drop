@@ -17,6 +17,9 @@ export type LocalResolution =
 
 export type LocalResolutionInput = {
   currentHash: string | null;
+  /** Trusted running version, supplied only after matching the current hash and lane. */
+  currentBundleVersion?: number;
+  currentChannelName?: string;
   rejectedHashes: string[];
   installId: string;
   patchAlgorithms: string[];
@@ -98,6 +101,19 @@ export async function resolveRuntimeDeliveryLane(
     return currentRevoked
       ? { action: 'ROLLBACK', reason: 'CURRENT_REVOKED_NO_COMPATIBLE_TARGET' }
       : { action: 'NOOP', reason: 'UP_TO_DATE' };
+  }
+  // Pausing or narrowing a rollout changes offers to other installs, not the
+  // healthy bundle already running here. Revocation and native failure recovery
+  // still allow a safe older target, even if the current release is no longer
+  // present in this manifest's candidate set.
+  if (
+    manifest.publishingMode === 'managed' &&
+    input.currentHash && !currentRevoked && !rejected.has(input.currentHash) &&
+    input.currentChannelName === manifest.channelName &&
+    Number.isSafeInteger(input.currentBundleVersion) &&
+    input.currentBundleVersion >= 0 && input.currentBundleVersion > selected.bundleVersion
+  ) {
+    return { action: 'NOOP', reason: 'CURRENT_BUNDLE_NEWER' };
   }
   const patchEdge = currentRevoked ? undefined : selectPatchEdge(manifest, input, selected, now);
   return {

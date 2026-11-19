@@ -1,4 +1,5 @@
 import type { ReactTestRenderer } from 'react-test-renderer';
+import type { UpdatePhase } from '../index';
 
 type UseBundleDropModule = typeof import('../useBundleDrop');
 const DISABLED_STATUS = 'BundleDrop is disabled';
@@ -15,6 +16,7 @@ const loadUseBundleDropModule = (overrides?: {
     status: string;
     isEnabled: boolean;
     isBusy: boolean;
+    updatePhase: UpdatePhase;
     channelName: string;
     installedInfo: unknown;
     pendingApply: boolean;
@@ -30,6 +32,7 @@ const loadUseBundleDropModule = (overrides?: {
       status: 'Ready',
       isEnabled: true,
       isBusy: false,
+      updatePhase: 'idle',
       channelName: 'General',
       installedInfo: { hash: 'hash-1', pendingApply: true },
       pendingApply: true,
@@ -139,6 +142,7 @@ describe('useBundleDrop', () => {
         status: DISABLED_STATUS,
         isEnabled: false,
         isBusy: false,
+        updatePhase: 'idle',
         channelName: 'General',
         installedInfo: null,
         pendingApply: false,
@@ -153,6 +157,7 @@ describe('useBundleDrop', () => {
       status: DISABLED_STATUS,
       isEnabled: false,
       isBusy: false,
+      updatePhase: 'idle',
       channelName: 'General',
       installedInfo: null,
       pendingApply: false,
@@ -171,6 +176,7 @@ describe('useBundleDrop', () => {
       status: 'Ready',
       isEnabled: true,
       isBusy: false,
+      updatePhase: 'idle',
       channelName: 'General',
       installedInfo: { hash: 'hash-1', pendingApply: true },
       pendingApply: true,
@@ -188,9 +194,18 @@ describe('useBundleDrop', () => {
     expect(harness.getLatest().setChannel).toBe(harness.mocks.setChannel);
 
     await harness.emit({
-      status: 'Updated',
+      ...harness.getLatest(),
+      status: 'Checking',
+      isBusy: true,
+      updatePhase: 'checking',
+    });
+    expect(harness.getLatest().updatePhase).toBe('checking');
+
+    await harness.emit({
+      status: 'Applying',
       isEnabled: true,
       isBusy: true,
+      updatePhase: 'applying',
       channelName: 'Beta',
       installedInfo: { hash: 'hash-2', pendingApply: false },
       pendingApply: false,
@@ -199,9 +214,10 @@ describe('useBundleDrop', () => {
     });
 
     expect(harness.getLatest()).toMatchObject({
-      status: 'Updated',
+      status: 'Applying',
       isEnabled: true,
       isBusy: true,
+      updatePhase: 'applying',
       channelName: 'Beta',
       installedInfo: { hash: 'hash-2', pendingApply: false },
       pendingApply: false,

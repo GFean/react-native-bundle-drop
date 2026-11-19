@@ -103,17 +103,30 @@ export async function getAvailableChannels(): Promise<string[]> {
 
 async function readResolveContext(channelName: string): Promise<RuntimeDeliveryResolveContext> {
   const selectedHash = getStartupRecoverySelectedHashNative();
-  const [pointerHash, nativeBundlePath, userProperties, installId, rejectedHashes] = await Promise.all([
+  const [pointerHash, nativeBundlePath, userProperties, installId, rejectedHashes, bundleInfo] = await Promise.all([
     readCurrentBundleHash(),
     getDownloadedBundlePathNative(),
     getCurrentUserProperties(),
     getOrCreateInstallId(),
     getFailedBundleHashes(),
+    selectedHash ? readBundleInfo() : Promise.resolve(null),
   ]);
   const supportsXdelta = await Promise.resolve()
     .then(() => require('../native/fs') as typeof import('../native/fs'))
     .then(module => module.default.supportsXdelta())
     .catch(() => false);
+  // bundle-info/current.json may already describe a staged candidate. Only
+  // metadata for this React runtime's native-selected hash can prevent a
+  // same-lane downgrade; an explicit channel change remains eligible.
+  const currentChannelName = selectedHash && bundleInfo?.hash === selectedHash &&
+    bundleInfo.platform === platform && runtimeVersion && bundleInfo.runtimeVersion === runtimeVersion &&
+    typeof bundleInfo.channelName === 'string' && bundleInfo.channelName.length > 0
+    ? bundleInfo.channelName
+    : undefined;
+  const currentBundleVersion = currentChannelName === channelName &&
+    Number.isSafeInteger(bundleInfo.bundleVersion) && bundleInfo.bundleVersion >= 0
+    ? bundleInfo.bundleVersion
+    : undefined;
   return {
     channelName,
     // Only adapters that predate startupRecoverySelectedHash infer the running
@@ -122,6 +135,8 @@ async function readResolveContext(channelName: string): Promise<RuntimeDeliveryR
     currentHash: selectedHash === undefined
       ? nativeBundlePath && pointerHash ? pointerHash : null
       : selectedHash,
+    currentBundleVersion,
+    currentChannelName,
     rejectedHashes,
     installId,
     patchAlgorithms: advertisedPatchAlgorithms(supportsXdelta),
@@ -198,6 +213,7 @@ async function resolveWithServer(
     runtimeVersion: runtimeVersion ?? null,
     environment: context.environment,
     currentHash: context.currentHash,
+    ...(context.currentChannelName ? { currentChannelName: context.currentChannelName } : {}),
     currentUserProperties: context.userProperties,
     rejectedHashes: context.rejectedHashes,
     installId: context.installId,
@@ -303,6 +319,7 @@ export async function authorizeRuntimeDeliveryUpdate(
       mode: decision.runtimeDelivery.selectedMode,
       patchArtifactRef: decision.runtimeDelivery.patchArtifactRef ?? null,
       currentHash: context.currentHash,
+      ...(context.currentChannelName ? { currentChannelName: context.currentChannelName } : {}),
       rejectedHashes: context.rejectedHashes,
       installId: context.installId,
       transport: {
