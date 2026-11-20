@@ -142,14 +142,14 @@ describe('CLI/cli', () => {
       '--prebuild',
       '--yes',
     );
-    expect(mockRunPostInitPrompts).toHaveBeenCalledWith(expect.objectContaining({
+    expect(mockRunPostInitPrompts).toHaveBeenCalledWith({
       projectType: 'expo',
       dryRun: true,
       migrateCodePush: true,
       migrateExpoUpdates: true,
       prebuild: true,
       yes: true,
-    }));
+    });
 
     await parseCommand(
       'upload',
