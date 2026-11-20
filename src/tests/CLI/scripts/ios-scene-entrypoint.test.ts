@@ -7,6 +7,7 @@ import { validateAppliedSetupChanges, validateSetupChangesBeforeApply } from '..
 import { applySetupPatchPlans } from '../../../CLI/scripts/aipowered/apply-setup-plan';
 import { inspectProject } from '../../../CLI/scripts/doctor';
 import { findBareIosSceneEntrypoint } from '../../../CLI/scripts/native-entrypoint-authority';
+import { findMissingBareNativeStartupStructure } from '../../../CLI/scripts/native-startup-validator';
 import { createTempProjectDir, removeTempDir } from '../../utils/tempDir';
 
 const scenePath = 'ios/Demo/SceneDelegate.swift';
@@ -113,6 +114,29 @@ describe('bare iOS scene startup', () => {
   });
 
   afterEach(() => removeTempDir(projectRoot));
+
+  it('allows a comment inside bundleURL while guarding edits outside it', () => {
+    const withResolverComment = integrated.replace(
+      '    BundleDropLocator.bundleURL()',
+      '    // Prefer the downloaded bundle.\n    BundleDropLocator.bundleURL()',
+    );
+    const withLinkingChange = withResolverComment.replace(
+      '    RCTLinkingManager.scene',
+      '    print("Forwarding the activity")\n    RCTLinkingManager.scene',
+    );
+
+    expect(findMissingBareNativeStartupStructure(scenePath, sceneDelegate, withResolverComment))
+      .toEqual([]);
+    expect(findMissingBareNativeStartupStructure(scenePath, sceneDelegate, withLinkingChange))
+      .toEqual(['SceneDelegate code outside bundleURL']);
+  });
+
+  it('rejects a setup patch that leaves the scene class unclosed', () => {
+    const withoutClassClosingBrace = integrated.trimEnd().slice(0, -1);
+
+    expect(findMissingBareNativeStartupStructure(scenePath, sceneDelegate, withoutClassClosingBrace))
+      .toContain('bundleURL');
+  });
 
   it('shares only the active bundle owner and reports it integrated after review', async () => {
     write('ios/Unused/SceneDelegate.swift', sceneDelegate);

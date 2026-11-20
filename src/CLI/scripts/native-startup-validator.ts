@@ -4,6 +4,7 @@ import {
   IOS_BUNDLE_DROP_LOCATOR_HEADER,
   IOS_BUNDLE_DROP_MODULE,
   stripCommentsAndStrings,
+  stripCommentsAndStringsWithSourceOffsets,
 } from './native-setup-contract';
 
 type DeclaredMethod = {
@@ -1034,9 +1035,12 @@ const swiftStartupMethod = (nativeCode: string, filePath: string) => {
 };
 
 const withoutSceneResolverEdit = (code: string, method: DeclaredMethod) => {
+  const { code: sanitized, sourceOffsets } = stripCommentsAndStringsWithSourceOffsets(code);
   const openingBrace = method.declarationStart + method.declaration.lastIndexOf('{');
-  const closingBrace = findBalancedBlockEnd(stripCommentsAndStrings(code), openingBrace);
-  return (code.slice(0, openingBrace + 1) + code.slice(closingBrace))
+  const closingBrace = findBalancedBlockEnd(sanitized, openingBrace);
+  if (closingBrace <= openingBrace) return null;
+
+  return (code.slice(0, sourceOffsets[openingBrace] + 1) + code.slice(sourceOffsets[closingBrace]))
     .replace(/^[ \t]*import[ \t]+BundleDrop[ \t]*\r?\n/gm, '');
 };
 
@@ -1257,10 +1261,13 @@ export const findMissingBareNativeStartupStructure = (
     const updatedMethod = swiftStartupMethod(updatedCode, filePath);
     if (!updatedMethod) return [...substantiveMissing, 'bundleURL'];
     const missing = [...substantiveMissing];
-    if (
-      filePath.endsWith('/SceneDelegate.swift') &&
-      withoutSceneResolverEdit(original, originalMethod) !== withoutSceneResolverEdit(updated, updatedMethod)
-    ) missing.push('SceneDelegate code outside bundleURL');
+    if (filePath.endsWith('/SceneDelegate.swift')) {
+      const originalOutsideResolver = withoutSceneResolverEdit(original, originalMethod);
+      if (
+        originalOutsideResolver === null ||
+        originalOutsideResolver !== withoutSceneResolverEdit(updated, updatedMethod)
+      ) missing.push('SceneDelegate code outside bundleURL');
+    }
     if (!preservesSubstantiveNativeTokens(
       originalMethod.body,
       updatedMethod.body,
