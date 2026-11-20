@@ -146,7 +146,7 @@
     "bundle-analysis"
   ],
   "peerDependencies": {
-    "expo": ">=54.0.0 <58.0.0",
+    "expo": ">=54.0.0 <59.0.0",
     "react": ">=17.0.0",
     "react-native": ">=0.71.0"
   },

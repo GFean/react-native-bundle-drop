@@ -3,8 +3,15 @@ export const ANDROID_BUNDLE_DROP_PATHS = 'com.bundledrop.BundleDropNativePaths';
 export const IOS_BUNDLE_DROP_MODULE = 'BundleDrop';
 export const IOS_BUNDLE_DROP_LOCATOR_HEADER = 'BundleDrop/BundleDropLocator.h';
 
-const sanitizeSource = (content: string, preserveStrings: boolean) => {
+const sanitizeSource = (content: string, preserveStrings: boolean, sourceOffsets?: number[]) => {
   let code = '';
+  const append = (start: number, length = 1) => {
+    const end = start + length;
+    code += content.slice(start, end);
+    if (sourceOffsets) {
+      for (let offset = start; offset < end; offset += 1) sourceOffsets.push(offset);
+    }
+  };
   let state:
     | 'code'
     | 'line-comment'
@@ -23,7 +30,7 @@ const sanitizeSource = (content: string, preserveStrings: boolean) => {
     if (state === 'line-comment') {
       if (character === '\n') {
         state = 'code';
-        code += character;
+        append(index);
       }
       continue;
     }
@@ -43,23 +50,23 @@ const sanitizeSource = (content: string, preserveStrings: boolean) => {
     if (state === 'triple-double') {
       const closingDelimiter = `"""${tripleQuoteHashes}`;
       if (content.startsWith(closingDelimiter, index)) {
-        if (preserveStrings) code += closingDelimiter;
+        if (preserveStrings) append(index, closingDelimiter.length);
         index += closingDelimiter.length - 1;
         state = 'code';
         tripleQuoteHashes = '';
       } else if (preserveStrings) {
-        code += character;
+        append(index);
       }
       continue;
     }
     if (state !== 'code') {
       if (escaped) {
-        if (preserveStrings) code += character;
+        if (preserveStrings) append(index);
         escaped = false;
         continue;
       }
       if (character === '\\') {
-        if (preserveStrings) code += character;
+        if (preserveStrings) append(index);
         escaped = true;
         continue;
       }
@@ -67,7 +74,7 @@ const sanitizeSource = (content: string, preserveStrings: boolean) => {
         (state === 'single' && character === "'") ||
         (state === 'double' && character === '"') ||
         (state === 'template' && character === '`');
-      if (preserveStrings) code += character;
+      if (preserveStrings) append(index);
       if (closesState) state = 'code';
       continue;
     }
@@ -86,33 +93,33 @@ const sanitizeSource = (content: string, preserveStrings: boolean) => {
     if (character === '"' && content.startsWith('"""', index)) {
       state = 'triple-double';
       tripleQuoteHashes = '';
-      if (preserveStrings) code += '"""';
+      if (preserveStrings) append(index, 3);
       index += 2;
       continue;
     }
     if (swiftRawTripleQuote) {
       state = 'triple-double';
       tripleQuoteHashes = swiftRawTripleQuote[1];
-      if (preserveStrings) code += swiftRawTripleQuote[0];
+      if (preserveStrings) append(index, swiftRawTripleQuote[0].length);
       index += swiftRawTripleQuote[0].length - 1;
       continue;
     }
     if (character === "'") {
       state = 'single';
-      if (preserveStrings) code += character;
+      if (preserveStrings) append(index);
       continue;
     }
     if (character === '"') {
       state = 'double';
-      if (preserveStrings) code += character;
+      if (preserveStrings) append(index);
       continue;
     }
     if (character === '`') {
       state = 'template';
-      if (preserveStrings) code += character;
+      if (preserveStrings) append(index);
       continue;
     }
-    code += character;
+    append(index);
   }
 
   return code;
@@ -120,6 +127,12 @@ const sanitizeSource = (content: string, preserveStrings: boolean) => {
 
 export const stripCommentsAndStrings = (content: string) => sanitizeSource(content, false);
 export const stripComments = (content: string) => sanitizeSource(content, true);
+
+export const stripCommentsAndStringsWithSourceOffsets = (content: string) => {
+  const sourceOffsets: number[] = [];
+  const code = sanitizeSource(content, false, sourceOffsets);
+  return { code, sourceOffsets };
+};
 
 export {
   findMissingBareNativeStartupStructure,

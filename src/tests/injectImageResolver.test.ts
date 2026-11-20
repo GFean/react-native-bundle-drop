@@ -230,6 +230,37 @@ describe('injectImageResolver', () => {
     });
   });
 
+  it('uses the public React Native asset registry when both registries are present', () => {
+    const getAssetByID = jest.fn(() => ({
+      httpServerLocation: '/assets/new',
+      name: 'chime',
+      type: 'mp3',
+    }));
+    const { reactNative, module } = loadInjectImageResolverModule(({ Image, AssetRegistry }) => {
+      AssetRegistry.registerAsset({
+        httpServerLocation: '/assets/old',
+        name: 'chime',
+        type: 'mp3',
+      });
+      Image.resolveAssetSource.mockReturnValue({
+        uri: 'asset:/new_chime',
+      });
+    });
+    Object.defineProperty(reactNative, 'AssetRegistry', {
+      value: { getAssetByID },
+    });
+
+    module.patchImageResolverWithManifest({
+      'raw/new_chime.mp3': 'bundle-drop/bundles/hash-1/raw/new_chime.mp3',
+      'raw/old_chime.mp3': 'bundle-drop/bundles/hash-1/raw/old_chime.mp3',
+    });
+
+    expect(reactNative.Image.resolveAssetSource(1)?.uri).toBe(
+      'file:///mock/doc/bundle-drop/bundles/hash-1/raw/new_chime.mp3',
+    );
+    expect(getAssetByID).toHaveBeenCalledWith(1);
+  });
+
   it('resolves OTA-added audio assets from exact AssetRegistry metadata without basename fallback', () => {
     const { reactNative, module } = loadInjectImageResolverModule(({ Image, AssetRegistry }) => {
       AssetRegistry.registerAsset({

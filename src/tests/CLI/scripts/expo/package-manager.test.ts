@@ -115,6 +115,7 @@ describe('CLI/scripts/expo/package-manager', () => {
     );
     expect(backup.files).toEqual(['package.json', 'pnpm-lock.yaml']);
     expect(backup.possibleCreatedFiles).toEqual(['pnpm-lock.yaml']);
+    expect(fs.existsSync(path.join(backup.backupDir, 'package.json'))).toBe(true);
     expect(fs.readFileSync(path.join(backup.backupDir, 'pnpm-lock.yaml'), 'utf8')).toBe(
       'original lock',
     );
@@ -127,16 +128,22 @@ describe('CLI/scripts/expo/package-manager', () => {
     expect(fs.readFileSync(path.join(projectRoot, 'pnpm-lock.yaml'), 'utf8')).toBe('original lock');
   });
 
-  it('removes CodePush with the detected package manager and leaves it absent for rescans', () => {
+  it('backs up CodePush package files without exposing a second package manifest to Metro', () => {
     const originalPackage = {
+      name: 'demo',
       packageManager: 'yarn@4.0.0',
       dependencies: {
         'react-native': '0.86.0',
         'react-native-code-push': '9.0.0',
       },
     };
-    writePackage(originalPackage);
-    fs.writeFileSync(path.join(projectRoot, 'yarn.lock'), 'original lock');
+    const packagePath = path.join(projectRoot, 'package.json');
+    const lockPath = path.join(projectRoot, 'yarn.lock');
+    const originalManifest = Buffer.from(`${JSON.stringify(originalPackage, null, 2)}\r\n`);
+    const originalLock = Buffer.from('original lock\r\n');
+    fs.writeFileSync(packagePath, originalManifest);
+    fs.writeFileSync(lockPath, originalLock);
+    fs.writeFileSync(path.join(projectRoot, 'package.json.bak'), 'existing user backup');
     mockSpawnSync.mockImplementation((_command, _args, options) => {
       const packagePath = path.join(options.cwd, 'package.json');
       const pkg = JSON.parse(fs.readFileSync(packagePath, 'utf8'));
@@ -154,11 +161,18 @@ describe('CLI/scripts/expo/package-manager', () => {
       { cwd: projectRoot, stdio: 'inherit', shell: false },
     );
     expect(backup.backupDir).toContain('code-push-');
-    const migratedPackage = JSON.parse(
-      fs.readFileSync(path.join(projectRoot, 'package.json'), 'utf8'),
-    );
+    expect(fs.readdirSync(backup.backupDir).sort()).toEqual(['package.json.bak', 'yarn.lock']);
+    expect(fs.readFileSync(path.join(backup.backupDir, 'package.json.bak'))).toEqual(originalManifest);
+    const migratedPackage = JSON.parse(fs.readFileSync(packagePath, 'utf8'));
     expect(migratedPackage.dependencies).toEqual({ 'react-native': '0.86.0' });
     expect(JSON.stringify(migratedPackage)).not.toContain('react-native-code-push');
+
+    restoreDependencyMigration(backup);
+    expect(fs.readFileSync(packagePath)).toEqual(originalManifest);
+    expect(fs.readFileSync(lockPath)).toEqual(originalLock);
+    expect(fs.readFileSync(path.join(projectRoot, 'package.json.bak'), 'utf8')).toBe(
+      'existing user backup',
+    );
   });
 
   it.each([

@@ -110,6 +110,17 @@ describe('resolveExpoBuildIdentity', () => {
     );
   });
 
+  it('resolves the build and Metro runtime identity for Expo SDK 58', async () => {
+    const root = fixture({ expoVersion: '58.0.26', reactNativeVersion: '0.88.1' });
+
+    await expect(resolveExpoBuildIdentity(root, 'ios')).resolves.toMatchObject({
+      expoSdkVersion: '58.0.26',
+      reactNativeVersion: '0.88.1',
+      runtimeVersion: 'runtime-literal',
+    });
+    await expect(resolveExpoMetroRuntimeVersion(root, 'android')).resolves.toBe('runtime-literal');
+  });
+
   it.each([
     ['appVersion', '4.5.6', 'appVersion'],
     ['nativeVersion', '4.5.6(22)', 'nativeVersion'],
@@ -224,7 +235,7 @@ describe('resolveExpoBuildIdentity', () => {
 
   it.each([
     ['53.0.0', 'outside Bundle Drop'],
-    ['58.0.0', 'outside Bundle Drop'],
+    ['59.0.0', 'outside Bundle Drop'],
     ['canary', 'Could not determine the Expo SDK'],
   ])('rejects unsupported or malformed Expo versions', async (expoVersion, message) => {
     const root = fixture({ expoVersion });

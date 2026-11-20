@@ -33,7 +33,7 @@ type ExpoFingerprintModule = {
 };
 
 const MIN_SUPPORTED_EXPO_SDK = 54;
-const MAX_SUPPORTED_EXPO_SDK = 57;
+const MAX_SUPPORTED_EXPO_SDK = 58;
 
 function requirePackageVersion(projectRoot: string, moduleId: string): string {
   const manifest = loadProjectModule<PackageManifest>(projectRoot, moduleId);

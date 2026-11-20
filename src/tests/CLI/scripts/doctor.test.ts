@@ -1210,6 +1210,25 @@ describe('CLI/scripts/doctor', () => {
     }));
   });
 
+  it.each([
+    ['braced Debug guard', 'if (BuildConfig.DEBUG) { null } else { BundleDropModule.resolveJSBundleFile(applicationContext, null) }', 'pass'],
+    ['unbraced Debug guard', 'if (BuildConfig.DEBUG) null\n      else BundleDropModule.resolveJSBundleFile(applicationContext, null)', 'pass'],
+    ['resolver in the Debug branch', 'if (BuildConfig.DEBUG) BundleDropModule.resolveJSBundleFile(applicationContext, null) else null', 'error'],
+    ['discarded resolver result', 'if (BuildConfig.DEBUG) { null } else { BundleDropModule.resolveJSBundleFile(applicationContext, null); null }', 'error'],
+  ])('checks an inline ReactHost bundle path with %s', async (_, expression, status) => {
+    const projectRoot = createBareProject();
+    writeDoctorNativeProbe(
+      projectRoot,
+      'android/app/src/main/java/com/fixture/MainApplication.kt',
+      modernDoctorProbe('').replace('jsBundleFilePath = getJSBundleFile(),', `jsBundleFilePath = ${expression},`),
+    );
+    const result = await inspectProject({ cwd: projectRoot, projectType: 'bare' });
+    expect(result.checks).toContainEqual(expect.objectContaining({
+      name: 'android OTA startup ownership',
+      status,
+    }));
+  });
+
   it('rejects resolver calls in dead Android and iOS helper methods', async () => {
     const projectRoot = createBareProject();
     const androidEntrypoint = path.join(

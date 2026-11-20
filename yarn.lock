@@ -680,7 +680,7 @@ __metadata:
     ts-node: ^10.9.2
     typescript: ^5.9.3
   peerDependencies:
-    expo: ">=54.0.0 <58.0.0"
+    expo: ">=54.0.0 <59.0.0"
     react: ">=17.0.0"
     react-native: ">=0.71.0"
   peerDependenciesMeta:

@@ -130,6 +130,41 @@ describe('official EAS build proof', () => {
     })).resolves.toEqual({ buildId, identity: identity() });
   });
 
+  it('accepts nested app and runtime metadata when issuing and verifying receipts', async () => {
+    const { project, runtimeVersion, ...fields } = build;
+    easStdout = JSON.stringify({
+      ...fields,
+      app: { id: project.id },
+      runtime: { version: runtimeVersion },
+    });
+
+    await expect(resolveOfficialEasBuild({
+      projectRoot: '/project',
+      platform: 'ios',
+      easBuildId: buildId,
+    })).resolves.toEqual({ buildId, identity: identity() });
+    await expect(resolve()).resolves.toEqual(identity());
+  });
+
+  it('accepts both metadata shapes together when the values agree', async () => {
+    easStdout = JSON.stringify({
+      ...build,
+      app: { id: build.project.id },
+      runtime: { version: build.runtimeVersion },
+    });
+
+    await expect(resolve()).resolves.toEqual(identity());
+  });
+
+  it.each([
+    [{ app: { id: 'other-project' } }, 'project.id and app.id'],
+    [{ runtime: { version: 'other-runtime' } }, 'runtimeVersion and runtime.version'],
+  ])('rejects conflicting metadata aliases %j', async (aliases, fields) => {
+    easStdout = JSON.stringify({ ...build, ...aliases });
+
+    await expect(resolve()).rejects.toThrow(`conflicting values for ${fields}`);
+  });
+
   it('also verifies a fingerprint identity', async () => {
     const fingerprintIdentity = identity({ runtimeVersionPolicy: 'fingerprint' });
     resolveSpy.mockResolvedValue(fingerprintIdentity);

@@ -3,6 +3,8 @@ import path from 'path';
 
 import { inspectProjectFile } from './safe-file-transaction';
 import { stripCommentsAndStrings } from './native-setup-contract';
+import { hasBareIosSceneStartup } from './native-startup-validator';
+import { readIosSceneTarget } from './ios-scene-target';
 
 export type NativeEntrypointPlatform = 'android' | 'ios';
 
@@ -357,6 +359,29 @@ const swiftAuthorityIssue = (
   }
   return null;
 };
+
+export async function findBareIosSceneEntrypoint(projectRoot: string): Promise<string | null> {
+  const { mainFiles, swiftFiles } = findIosAuthoritySources(projectRoot);
+  if (!swiftFiles.some(file => file.endsWith('/SceneDelegate.swift'))) return null;
+
+  const target = await readIosSceneTarget(projectRoot);
+  if (!target) return null;
+  const principalIssue = swiftAuthorityIssue(projectRoot, target.appDelegate, mainFiles, swiftFiles);
+  if (principalIssue) throw new Error(principalIssue);
+
+  const appDelegate = stripCommentsAndStrings(inspectProjectFile(projectRoot, target.appDelegate).content);
+  if (
+    !/\bclass\s+AppDelegate\s*:[^{]*\bUIApplicationDelegate\b/.test(appDelegate) ||
+    /\b(?:configurationForConnecting|startReactNative|RCTReactNativeFactory|bundleURL)\b/.test(appDelegate)
+  ) {
+    throw new Error('AppDelegate uses a custom scene or React Native startup path.');
+  }
+  const sceneDelegate = inspectProjectFile(projectRoot, target.sceneDelegate);
+  if (!sceneDelegate.exists || !hasBareIosSceneStartup(sceneDelegate.content)) {
+    throw new Error('The registered SceneDelegate does not own a supported React Native scene startup path.');
+  }
+  return target.sceneDelegate;
+}
 
 export const findNativeEntrypointAuthorityIssue = (
   projectRoot: string,

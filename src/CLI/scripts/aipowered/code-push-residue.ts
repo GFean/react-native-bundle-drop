@@ -29,19 +29,29 @@ const CODE_PUSH_REFERENCE = /\b(?:react-native-code-push|code[\s_.-]*push|com\.m
 
 const toPosix = (filePath: string) => filePath.split(path.sep).join('/');
 
-const isCodePushResidueCandidate = (relativePath: string) => {
+const isCodePushResidueCandidate = (
+  relativePath: string,
+  iosSceneEntrypoint?: string,
+  verifiedNativePaths?: ReadonlySet<string>,
+) => {
   const parts = relativePath.split('/');
   const basename = parts[parts.length - 1];
 
   if (JS_SOURCE_EXTENSION.test(basename)) return true;
 
   if (parts[0] === 'android') {
-    if (/^MainApplication\.(?:java|kt)$/i.test(basename)) return false;
+    if (verifiedNativePaths
+      ? verifiedNativePaths.has(relativePath)
+      : /^MainApplication\.(?:java|kt)$/i.test(basename)) return false;
     return /\.(?:gradle|gradle\.kts|java|kt|properties|xml)$/i.test(basename);
   }
 
   if (parts[0] === 'ios') {
-    if (/^AppDelegate\.(?:m|mm|swift)$/i.test(basename)) return false;
+    if (verifiedNativePaths
+      ? verifiedNativePaths.has(relativePath)
+      : iosSceneEntrypoint
+        ? relativePath === iosSceneEntrypoint
+        : /^AppDelegate\.(?:m|mm|swift)$/i.test(basename)) return false;
     return basename === 'Podfile' ||
       /\.(?:h|m|mm|pbxproj|plist|podspec|swift|xcconfig)$/i.test(basename);
   }
@@ -58,7 +68,11 @@ const scanLimitError = (detail: string) => new Error(
  * Finds CodePush ownership outside package files and provider-patched native entrypoints.
  * Only relative paths are returned; file contents never leave this local validation boundary.
  */
-export function findCodePushResiduePaths(projectRoot: string): string[] {
+export function findCodePushResiduePaths(
+  projectRoot: string,
+  iosSceneEntrypoint?: string,
+  verifiedNativePaths?: ReadonlySet<string>,
+): string[] {
   const pendingDirectories = [''];
   const residuePaths: string[] = [];
   let visitedEntries = 0;
@@ -106,7 +120,7 @@ export function findCodePushResiduePaths(projectRoot: string): string[] {
       if (!stat.isFile()) continue;
 
       const posixPath = toPosix(relativePath);
-      if (!isCodePushResidueCandidate(posixPath)) continue;
+      if (!isCodePushResidueCandidate(posixPath, iosSceneEntrypoint, verifiedNativePaths)) continue;
 
       candidateFiles += 1;
       if (candidateFiles > MAX_CANDIDATE_FILES) {

@@ -13,6 +13,8 @@ const mockEvaluateExpoConfig = jest.fn();
 const mockScanProjectForAiSetup = jest.fn();
 const mockRequestAiSetupPlan = jest.fn();
 const mockFindCodePushResiduePaths = jest.fn();
+const mockVerifyNativeSetupPlan = jest.fn();
+const mockAssertNativeSetupSnapshot = jest.fn();
 const mockValidateSetupChangesBeforeApply = jest.fn();
 const mockValidateAppliedSetupChanges = jest.fn();
 const mockApplySetupPatchPlans = jest.fn();
@@ -58,12 +60,24 @@ jest.mock('../../../../CLI/scripts/aipowered/scanner', () => ({
   isBundleDropHostedAiPlanningServer: (serverUrl: string) =>
     serverUrl === 'https://api.bundledrop.app',
   scanProjectForAiSetup: (...args: unknown[]) => mockScanProjectForAiSetup(...args),
+  scanProjectForAiSetupV2: (root: string, config: unknown) => {
+    const scan = mockScanProjectForAiSetup('bare', root, config);
+    return {
+      ...scan,
+      snapshot: new Map(),
+      request: { ...scan.request, schemaVersion: 2, nativeEditPaths: [bareChange.file] },
+    };
+  },
 }));
 jest.mock('../../../../CLI/scripts/aipowered/backend-client', () => ({
   requestAiSetupPlan: (...args: unknown[]) => mockRequestAiSetupPlan(...args),
 }));
 jest.mock('../../../../CLI/scripts/aipowered/code-push-residue', () => ({
   findCodePushResiduePaths: (...args: unknown[]) => mockFindCodePushResiduePaths(...args),
+}));
+jest.mock('../../../../CLI/scripts/aipowered/setup-v2', () => ({
+  verifyNativeSetupPlan: (...args: unknown[]) => mockVerifyNativeSetupPlan(...args),
+  assertNativeSetupSnapshot: (...args: unknown[]) => mockAssertNativeSetupSnapshot(...args),
 }));
 jest.mock('../../../../CLI/scripts/aipowered/validate-plan', () => ({
   validateSetupChangesBeforeApply: (...args: unknown[]) =>
@@ -121,6 +135,7 @@ const bareChange: AiPatchPlan = {
   confidence: 'high',
   decisionType: 'safe_auto_patch',
 };
+const nativeScan = expect.objectContaining({ request: expect.objectContaining({ schemaVersion: 2 }) });
 const dynamicConfigChange: AiPatchPlan = {
   file: 'app.config.ts',
   originalSha256: 'dynamic-hash',
@@ -194,6 +209,11 @@ describe('initProjectConfigAi', () => {
     mockScanProjectForAiSetup.mockReturnValue(scanner('bare'));
     mockRequestAiSetupPlan.mockResolvedValue(plan());
     mockFindCodePushResiduePaths.mockReturnValue([]);
+    mockVerifyNativeSetupPlan.mockImplementation((_setup, response: AiSetupPlanResponse) =>
+      new Set(response.changes.filter(change => change.confidence !== 'low' &&
+        ['safe_auto_patch', 'review_only_patch'].includes(change.decisionType)).map(change => change.file))
+    );
+    mockAssertNativeSetupSnapshot.mockReturnValue(undefined);
     mockApplySetupPatchPlans.mockReturnValue({
       projectRoot,
       backupDir: '/project/.bundledrop-backup/native',
@@ -259,7 +279,11 @@ describe('initProjectConfigAi', () => {
     expect(mockRequestAiSetupPlan).toHaveBeenCalledWith({
       serverUrl: 'https://api.example.com',
       authToken: 'pat-token',
-      request: scanner('bare').request,
+      request: {
+        ...scanner('bare').request,
+        schemaVersion: 2,
+        nativeEditPaths: [bareChange.file],
+      },
     });
     expect(mockLoadingStop).toHaveBeenCalledTimes(1);
     expect(mockApplySetupPatchPlans).not.toHaveBeenCalled();
@@ -270,7 +294,7 @@ describe('initProjectConfigAi', () => {
       expect.stringContaining('Provider context size:'),
     );
     expect(consoleLogSpy).toHaveBeenCalledWith(
-      expect.stringContaining('MainApplication.kt (android_entrypoint, full content)'),
+      expect.stringContaining('MainApplication.kt (android_entrypoint, full content, potential native edit)'),
     );
   });
 
@@ -342,7 +366,7 @@ describe('initProjectConfigAi', () => {
     );
   });
 
-  it('skips the AI provider when a migrated bare project rescans as configured', async () => {
+  it('lets the planner assess an existing bare setup without invoking the legacy doctor', async () => {
     mockScanProjectForAiSetup.mockReturnValue(scanner('bare', {
       bundleDropStatus: 'configured',
       codePushDetected: false,
@@ -353,11 +377,12 @@ describe('initProjectConfigAi', () => {
       checks: [{ name: 'Native startup', status: 'pass', message: 'Configured.' }],
     });
 
+    queuePromptResponse({ send: true });
     await initProjectConfigAi();
 
-    expect(mockInspectProject).toHaveBeenCalledWith({ cwd: projectRoot, projectType: 'bare' });
-    expect(mockRequestAiSetupPlan).not.toHaveBeenCalled();
-    expect(mockRunDoctor).toHaveBeenCalledWith({ projectType: 'bare', cwd: projectRoot });
+    expect(mockInspectProject).not.toHaveBeenCalled();
+    expect(mockRequestAiSetupPlan).toHaveBeenCalledTimes(1);
+    expect(mockRunDoctor).not.toHaveBeenCalled();
   });
 
   it('continues through setup when doctor finds a blocking issue', async () => {
@@ -374,7 +399,7 @@ describe('initProjectConfigAi', () => {
     await initProjectConfigAi();
 
     expect(mockRequestAiSetupPlan).toHaveBeenCalledTimes(1);
-    expect(mockRunDoctor).toHaveBeenCalledWith({ projectType: 'bare', cwd: projectRoot });
+    expect(mockRunDoctor).not.toHaveBeenCalled();
   });
 
   it('continues through setup when local doctor inspection cannot determine health', async () => {
@@ -417,6 +442,12 @@ describe('initProjectConfigAi', () => {
     const context = scanner('bare');
     context.serverUrl = 'https://api.bundledrop.app';
     context.request.files[0].kind = 'package_manifest';
+    context.request.files.push({
+      path: 'android/app/build.gradle',
+      kind: 'native_support',
+      content: '{"namespace":"com.demo"}',
+      sha256: 'test',
+    });
     mockScanProjectForAiSetup.mockReturnValue(context);
     queuePromptResponse({ send: false });
 
@@ -429,6 +460,9 @@ describe('initProjectConfigAi', () => {
     );
     expect(consoleLogSpy).toHaveBeenCalledWith(
       expect.stringContaining('package_manifest, summary only'),
+    );
+    expect(consoleLogSpy).toHaveBeenCalledWith(
+      expect.stringContaining('build.gradle (native_support, summary only, read-only build metadata)'),
     );
     expect(mockRequestAiSetupPlan).not.toHaveBeenCalled();
   });
@@ -448,7 +482,7 @@ describe('initProjectConfigAi', () => {
   });
 
   it('stops without validation or mutation when AI confidence is low', async () => {
-    mockRequestAiSetupPlan.mockResolvedValue(plan({ confidence: 'low', changes: [bareChange] }));
+    mockRequestAiSetupPlan.mockResolvedValue(plan({ confidence: 'low' }));
 
     await initProjectConfigAi({ yes: true });
 
@@ -464,7 +498,7 @@ describe('initProjectConfigAi', () => {
     temporaryRoots.push(root);
     cwdSpy.mockReturnValue(root);
     const configContent = 'module.exports = { projectType: "bare" };\n';
-    mockRequestAiSetupPlan.mockResolvedValue(plan({ confidence: 'low', changes: [bareChange] }));
+    mockRequestAiSetupPlan.mockResolvedValue(plan({ confidence: 'low' }));
 
     await initProjectConfigAi({
       yes: true,
@@ -491,7 +525,7 @@ describe('initProjectConfigAi', () => {
     const outsideConfig = path.join(outsideRoot, 'outside-config.js');
     fs.writeFileSync(outsideConfig, 'outside-safe');
     fs.symlinkSync(outsideConfig, path.join(root, 'bundle.drop.config.js'));
-    mockRequestAiSetupPlan.mockResolvedValue(plan({ confidence: 'low', changes: [bareChange] }));
+    mockRequestAiSetupPlan.mockResolvedValue(plan({ confidence: 'low' }));
 
     await expect(initProjectConfigAi({
       yes: true,
@@ -550,7 +584,7 @@ describe('initProjectConfigAi', () => {
 
     await initProjectConfigAi({ yes: true });
 
-    expect(mockValidateSetupChangesBeforeApply).toHaveBeenCalled();
+    expect(mockVerifyNativeSetupPlan).toHaveBeenCalled();
   });
 
   it('requires explicit diff-backed approval before applying a review-only change', async () => {
@@ -570,7 +604,72 @@ describe('initProjectConfigAi', () => {
       projectRoot,
       projectType: 'bare',
       changes: [reviewOnlyChange],
+      verifiedNativePaths: new Set([reviewOnlyChange.file]),
     });
+  });
+
+  it('rechecks the reviewed scene owner immediately before applying setup', async () => {
+    const scene = 'ios/Demo/SceneDelegate.swift';
+    const sceneChange = { ...bareChange, file: scene, decisionType: 'review_only_patch' as const };
+    mockAssertNativeSetupSnapshot.mockImplementationOnce(() => {
+      throw new Error('Native startup sources or target metadata changed');
+    });
+    mockRequestAiSetupPlan.mockResolvedValue(plan({ changes: [sceneChange] }));
+    queuePromptResponse({ send: true });
+    queuePromptResponse({ approve: true });
+    queuePromptResponse({ apply: true });
+
+    await expect(initProjectConfigAi()).rejects.toThrow('Native startup sources or target metadata changed');
+
+    expect(mockAssertNativeSetupSnapshot).toHaveBeenCalledWith(nativeScan);
+    expect(mockApplySetupPatchPlans).not.toHaveBeenCalled();
+  });
+
+  it('restores dependency files when migration changes the scene startup owner', async () => {
+    mockAssertNativeSetupSnapshot.mockReturnValueOnce(undefined).mockImplementationOnce(() => {
+      throw new Error('Native startup sources or target metadata changed');
+    });
+    mockScanProjectForAiSetup.mockReturnValue(scanner('bare', { codePushDetected: true }));
+    mockRequestAiSetupPlan.mockResolvedValue(plan({ changes: [bareChange] }));
+
+    await expect(initProjectConfigAi({ yes: true, migrateCodePush: true })).rejects.toThrow(
+      'Native startup sources or target metadata changed',
+    );
+
+    expect(mockRemoveCodePushWithPackageManager).toHaveBeenCalledWith(projectRoot);
+    expect(mockRestoreDependencyMigration).toHaveBeenCalledWith({
+      projectRoot,
+      backupDir: '/project/.bundledrop-backup/code-push',
+      files: ['package.json', 'yarn.lock'],
+    });
+    expect(mockApplySetupPatchPlans).not.toHaveBeenCalled();
+  });
+
+  it('restores native backups when an applied change loses the reviewed scene owner', async () => {
+    const scene = 'ios/Demo/SceneDelegate.swift';
+    const sceneChange = { ...bareChange, file: scene, decisionType: 'review_only_patch' as const };
+    const backup = { projectRoot, backupDir: '/project/.bundledrop-backup/native', changedFiles: [scene] };
+    mockAssertNativeSetupSnapshot.mockReturnValueOnce(undefined).mockImplementationOnce(() => {
+      throw new Error('The applied files do not match the reviewed bytes');
+    });
+    mockRequestAiSetupPlan.mockResolvedValue(plan({ changes: [sceneChange] }));
+    mockApplySetupPatchPlans.mockReturnValue(backup);
+    queuePromptResponse({ send: true });
+    queuePromptResponse({ approve: true });
+    queuePromptResponse({ apply: true });
+
+    await expect(initProjectConfigAi()).rejects.toThrow(
+      'The applied files do not match the reviewed bytes',
+    );
+
+    expect(mockApplySetupPatchPlans).toHaveBeenCalledWith({
+      projectRoot,
+      projectType: 'bare',
+      changes: [sceneChange],
+      verifiedNativePaths: new Set([scene]),
+    });
+    expect(mockRestoreSetupBackups).toHaveBeenCalledWith(backup);
+    expect(mockValidateAppliedSetupChanges).not.toHaveBeenCalled();
   });
 
   it('leaves the whole transaction unchanged when a review-only change is declined', async () => {
@@ -609,12 +708,9 @@ describe('initProjectConfigAi', () => {
 
     await initProjectConfigAi({ yes: true, dryRun: true });
 
-    expect(mockValidateSetupChangesBeforeApply).toHaveBeenCalledWith({
-      projectType: 'bare',
-      originals: expect.any(Map),
-      changes: [reviewOnlyChange],
-      migrateExpoUpdates: false,
-    });
+    expect(mockVerifyNativeSetupPlan).toHaveBeenCalledWith(
+      nativeScan, expect.objectContaining({ changes: [reviewOnlyChange] }),
+    );
     expect(mockApplySetupPatchPlans).not.toHaveBeenCalled();
   });
 
@@ -695,6 +791,7 @@ describe('initProjectConfigAi', () => {
   });
 
   it('offers one explicit CodePush migration confirmation and applies it transactionally', async () => {
+    const reviewOnlyChange = { ...bareChange, decisionType: 'review_only_patch' as const };
     mockScanProjectForAiSetup.mockReturnValue(scanner('bare', { codePushDetected: true }));
     mockRequestAiSetupPlan.mockResolvedValue(plan({
       actions: [{
@@ -702,10 +799,11 @@ describe('initProjectConfigAi', () => {
         reason: 'Move native startup ownership to Bundle Drop.',
         requiresConfirmation: true,
       }],
-      changes: [bareChange],
+      changes: [reviewOnlyChange],
     }));
     queuePromptResponse({ send: true });
     queuePromptResponse({ migrate: true });
+    queuePromptResponse({ approve: true });
     queuePromptResponse({ apply: true });
 
     await initProjectConfigAi();
@@ -714,9 +812,10 @@ describe('initProjectConfigAi', () => {
     expect(mockApplySetupPatchPlans).toHaveBeenCalledWith({
       projectRoot,
       projectType: 'bare',
-      changes: [bareChange],
+      changes: [reviewOnlyChange],
+      verifiedNativePaths: new Set([reviewOnlyChange.file]),
     });
-    expect(mockRunDoctor).toHaveBeenCalledWith({ projectType: 'bare', cwd: projectRoot });
+    expect(mockRunDoctor).not.toHaveBeenCalled();
   });
 
   it('keeps CodePush intact when interactive migration is declined', async () => {
@@ -729,6 +828,29 @@ describe('initProjectConfigAi', () => {
 
     expect(mockRemoveCodePushWithPackageManager).not.toHaveBeenCalled();
     expect(mockApplySetupPatchPlans).not.toHaveBeenCalled();
+  });
+
+  it('lets a model identify a source-only CodePush migration with explicit approval and no dependency removal', async () => {
+    const reviewOnlyChange = { ...bareChange, decisionType: 'review_only_patch' as const };
+    mockRequestAiSetupPlan.mockResolvedValue(plan({
+      actions: [{
+        type: 'migrate_codepush',
+        reason: 'Remove a remaining native CodePush reference.',
+        requiresConfirmation: true,
+      }],
+      changes: [reviewOnlyChange],
+    }));
+    queuePromptResponse({ send: true });
+    queuePromptResponse({ migrate: true });
+    queuePromptResponse({ approve: true });
+    queuePromptResponse({ apply: true });
+
+    await initProjectConfigAi();
+
+    expect(mockRemoveCodePushWithPackageManager).not.toHaveBeenCalled();
+    expect(mockFindCodePushResiduePaths).toHaveBeenNthCalledWith(1, projectRoot, undefined, new Set([bareChange.file]));
+    expect(mockFindCodePushResiduePaths).toHaveBeenNthCalledWith(2, projectRoot, undefined, new Set());
+    expect(mockApplySetupPatchPlans).toHaveBeenCalledTimes(1);
   });
 
   it('does not let --yes silently authorize CodePush removal', async () => {
@@ -798,9 +920,8 @@ describe('initProjectConfigAi', () => {
   it('restores CodePush package files and native patches when validation fails', async () => {
     mockScanProjectForAiSetup.mockReturnValue(scanner('bare', { codePushDetected: true }));
     mockRequestAiSetupPlan.mockResolvedValue(plan({ changes: [bareChange] }));
-    mockValidateAppliedSetupChanges.mockImplementationOnce(() => {
-      throw new Error('CodePush migration validation failed');
-    });
+    mockAssertNativeSetupSnapshot.mockReturnValueOnce(undefined).mockReturnValueOnce(undefined)
+      .mockImplementationOnce(() => { throw new Error('CodePush migration validation failed'); });
 
     await expect(initProjectConfigAi({ yes: true, migrateCodePush: true })).rejects.toThrow(
       'CodePush migration validation failed',
@@ -823,7 +944,7 @@ describe('initProjectConfigAi', () => {
 
     await initProjectConfigAi({ yes: true, dryRun: true });
 
-    expect(mockValidateSetupChangesBeforeApply).toHaveBeenCalled();
+    expect(mockVerifyNativeSetupPlan).toHaveBeenCalled();
     expect(mockApplySetupPatchPlans).not.toHaveBeenCalled();
     expect(mockPlanBareMetroConfig).toHaveBeenCalledWith(projectRoot);
   });
@@ -902,7 +1023,7 @@ describe('initProjectConfigAi', () => {
     });
   });
 
-  it('treats an unchanged bootstrap and ignore rule as already configured', async () => {
+  it('leaves an unchanged bootstrap and ignore rule out of the plan transaction', async () => {
     const root = createTempProjectDir();
     temporaryRoots.push(root);
     cwdSpy.mockReturnValue(root);
@@ -932,8 +1053,8 @@ describe('initProjectConfigAi', () => {
       runtimeDeliveryBootstrap: { content: '{"schemaVersion":1}\n' },
     });
 
-    expect(mockRequestAiSetupPlan).not.toHaveBeenCalled();
-    expect(mockRunDoctor).toHaveBeenCalledWith({ projectType: 'bare', cwd: root });
+    expect(mockRequestAiSetupPlan).toHaveBeenCalledTimes(1);
+    expect(mockApplyExpoConfigurationChanges).not.toHaveBeenCalled();
   });
 
   it('leaves bare files unchanged when final confirmation is cancelled', async () => {
@@ -946,7 +1067,7 @@ describe('initProjectConfigAi', () => {
     expect(mockApplySetupPatchPlans).not.toHaveBeenCalled();
   });
 
-  it('applies and validates a bare plan, then runs Metro setup and doctor', async () => {
+  it('applies and verifies a bare plan, sets up Metro, and gives Release build instructions', async () => {
     const metroChange = {
       file: 'metro.config.js' as const,
       original: 'module.exports = {};\n',
@@ -968,25 +1089,21 @@ describe('initProjectConfigAi', () => {
       projectRoot,
       projectType: 'bare',
       changes: [bareChange],
+      verifiedNativePaths: new Set([bareChange.file]),
     });
-    expect(mockValidateAppliedSetupChanges).toHaveBeenCalledWith({
-      projectRoot,
-      projectType: 'bare',
-      changes: [bareChange],
-      migrateExpoUpdates: false,
-      originals: expect.any(Map),
-    });
+    expect(mockAssertNativeSetupSnapshot).toHaveBeenCalledWith(nativeScan, [bareChange], false);
     expect(mockApplyExpoConfigurationChanges).toHaveBeenCalledWith({
       projectRoot,
       changes: [metroChange],
     });
-    expect(mockRunDoctor).toHaveBeenCalledWith({ projectType: 'bare', cwd: projectRoot });
+    expect(mockRunDoctor).not.toHaveBeenCalled();
+    expect(consoleLogSpy).toHaveBeenCalledWith(expect.stringContaining('Build and launch the native app'));
     expect(consoleLogSpy).toHaveBeenCalledWith(
       expect.stringContaining('JavaScript entry point: call BundleDrop.init once'),
     );
   });
 
-  it('restores bare backups if post-apply validation fails', async () => {
+  it('restores bare backups if local Metro configuration fails', async () => {
     mockPlanBareMetroConfig.mockReturnValue({
       file: 'metro.config.js',
       original: null,
@@ -994,20 +1111,16 @@ describe('initProjectConfigAi', () => {
       reason: 'Create Metro config',
     });
     mockRequestAiSetupPlan.mockResolvedValue(plan({ changes: [bareChange] }));
-    mockRunDoctor.mockRejectedValue(new Error('doctor failed'));
+    mockApplyExpoConfigurationChanges.mockImplementationOnce(() => { throw new Error('Metro configuration failed'); });
 
-    await expect(initProjectConfigAi({ yes: true })).rejects.toThrow('doctor failed');
+    await expect(initProjectConfigAi({ yes: true })).rejects.toThrow('Metro configuration failed');
 
     expect(mockRestoreSetupBackups).toHaveBeenCalledWith({
       projectRoot,
       backupDir: '/project/.bundledrop-backup/native',
       changedFiles: [{ file: bareChange.file, existed: true }],
     });
-    expect(mockRestoreExpoConfiguration).toHaveBeenCalledWith({
-      projectRoot,
-      backupDir: '/project/.bundledrop-backup/expo',
-      changedFiles: [],
-    });
+    expect(mockRestoreExpoConfiguration).not.toHaveBeenCalled();
   });
 
   it('allows dirty native directories in the default Bundle Drop runtime flow', async () => {

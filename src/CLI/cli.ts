@@ -306,6 +306,13 @@ ${chalk.gray('CI/CD docs →')} ${chalk.underline.gray(DOCS_CI_CD_URL)}
       prebuild?: boolean;
       yes?: boolean;
     }) => {
+      const setupFlags = {
+        dryRun: options.dryRun,
+        migrateCodePush: options.migrateCodePush,
+        migrateExpoUpdates: options.migrateExpoUpdates,
+        prebuild: options.prebuild,
+        yes: options.yes,
+      };
       if (options.token) {
         const { detectProjectType } = require('../expo');
         const projectType = detectProjectType({
@@ -331,7 +338,7 @@ ${chalk.gray('CI/CD docs →')} ${chalk.underline.gray(DOCS_CI_CD_URL)}
 
         await runSetupWithManualFallback({
           options: {
-            ...options,
+            ...setupFlags,
             projectType,
             ...(configResult?.bootstrapContent
               ? { runtimeDeliveryBootstrap: { content: configResult.bootstrapContent } }
@@ -409,7 +416,7 @@ ${chalk.gray('CI/CD docs →')} ${chalk.underline.gray(DOCS_CI_CD_URL)}
 
       await runSetupWithManualFallback({
         options: {
-          ...options,
+          ...setupFlags,
           projectType,
           ...(configResult?.bootstrapContent
             ? { runtimeDeliveryBootstrap: { content: configResult.bootstrapContent } }

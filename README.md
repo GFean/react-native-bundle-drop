@@ -15,7 +15,7 @@
 
 | Requirement | Supported |
 | --- | --- |
-| Expo | SDK 54–57 |
+| Expo | SDK 54–58 |
 | Bare React Native | 0.71+ |
 | Platforms | iOS and Android, including legacy and New Architecture |
 | Node.js | 20.19.4+ for package installation and CLI use |

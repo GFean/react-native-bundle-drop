@@ -1,6 +1,7 @@
 import axios from 'axios';
 import {
   AiSetupPlanRequest,
+  AiSetupPlanRequestV2,
   AiSetupPlanResponse,
 } from './types';
 import { findKnownBundleDropCredential } from './credential-safety';
@@ -34,26 +35,34 @@ const resolveTimeoutMs = () => {
   return Number.isFinite(value) && value > 0 ? value : DEFAULT_AI_INIT_TIMEOUT_MS;
 };
 
-export async function requestAiSetupPlan(params: {
+type SetupPlanRequestOptions = {
   serverUrl: string;
   authToken: string;
-  request: AiSetupPlanRequest;
-}): Promise<AiSetupPlanResponse> {
+  request: AiSetupPlanRequest | AiSetupPlanRequestV2;
+};
+
+export async function requestAiSetupPlan(
+  params: SetupPlanRequestOptions,
+): Promise<AiSetupPlanResponse> {
   try {
     const response = await axios.post<AiSetupPlanResponse>(
-      `${params.serverUrl}/ai/setup-plan`,
+      `${params.serverUrl}/ai/setup-plan${params.request.schemaVersion === 2 ? '/v2' : ''}`,
       params.request,
       {
         headers: {
           Accept: 'application/json',
           Authorization: `Bearer ${params.authToken}`,
         },
+        ...(params.request.schemaVersion === 2 ? { maxRedirects: 0 } : {}),
         timeout: resolveTimeoutMs(),
       },
     );
     return response.data;
   } catch (error: any) {
     const raw = error?.response?.data;
+    if (params.request.schemaVersion === 2 && error?.response?.status === 404 && !raw?.code) {
+      throw new Error('This server does not support this CLI’s native AI setup. Try a compatible Bundle Drop backend or follow manual setup.');
+    }
     if (error?.code === 'ECONNABORTED' || /timeout/i.test(String(error?.message || ''))) {
       throw new Error(
         'AI setup planning timed out. Try again, or increase BUNDLE_DROP_AI_INIT_TIMEOUT_MS.',

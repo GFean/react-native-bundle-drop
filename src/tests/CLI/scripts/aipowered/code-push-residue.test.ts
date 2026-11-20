@@ -109,6 +109,21 @@ describe('CLI/scripts/aipowered/code-push-residue', () => {
     ]);
   });
 
+  it('excludes only the verified edits from the v2 migration residue check', () => {
+    const androidRoot = 'android/app/src/main/java/com/demo';
+    const verifiedAndroid = androidRoot + '/CustomHost.kt';
+    const verifiedIos = 'ios/Demo/CustomResolver.swift';
+    const android = androidRoot + '/MainApplication.kt';
+    const ios = 'ios/Demo/AppDelegate.swift';
+    for (const file of [verifiedAndroid, verifiedIos, android, ios]) {
+      writeFixture(file, 'CodePush.bundleURL()');
+    }
+    expect(findCodePushResiduePaths(projectRoot, undefined, new Set([verifiedAndroid, verifiedIos])))
+      .toEqual([android, ios]);
+    expect(findCodePushResiduePaths(projectRoot, verifiedIos))
+      .toEqual([verifiedAndroid, ios]);
+  });
+
   it('does not traverse excluded vendor symlinks', () => {
     const outsideRoot = createTempProjectDir();
     fs.writeFileSync(path.join(outsideRoot, 'Updater.ts'), 'CodePush.sync();\n');

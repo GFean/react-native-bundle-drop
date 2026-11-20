@@ -16,6 +16,7 @@ type EasBuildMetadata = {
   status?: unknown;
   platform?: unknown;
   project?: { id?: unknown };
+  app?: { id?: unknown };
   artifacts?: {
     buildUrl?: unknown;
     applicationArchiveUrl?: unknown;
@@ -25,6 +26,7 @@ type EasBuildMetadata = {
   appVersion?: unknown;
   appBuildVersion?: unknown;
   runtimeVersion?: unknown;
+  runtime?: { version?: unknown };
   gitCommitHash?: unknown;
 };
 
@@ -42,6 +44,20 @@ const requiredString = (value: unknown, field: string): string => {
     throw new Error(`Official EAS build metadata is missing ${field}.`);
   }
   return value;
+};
+
+const requiredAliasedString = (
+  legacyValue: unknown,
+  currentValue: unknown,
+  legacyField: string,
+  currentField: string,
+): string => {
+  if (legacyValue != null && currentValue != null && legacyValue !== currentValue) {
+    throw new Error(
+      `Official EAS build metadata has conflicting values for ${legacyField} and ${currentField}.`,
+    );
+  }
+  return requiredString(currentValue ?? legacyValue, currentValue == null ? legacyField : currentField);
 };
 
 const readOfficialBuild = (projectRoot: string, buildId: string): EasBuildMetadata => {
@@ -102,11 +118,16 @@ export async function resolveOfficialEasBuild(params: {
   const buildId = requiredString(build.id, 'id');
   const status = requiredString(build.status, 'status');
   const platform = requiredString(build.platform, 'platform').toLowerCase();
-  const projectId = requiredString(build.project?.id, 'project.id');
+  const projectId = requiredAliasedString(build.project?.id, build.app?.id, 'project.id', 'app.id');
   const sdkVersion = requiredString(build.sdkVersion, 'sdkVersion');
   const appVersion = requiredString(build.appVersion, 'appVersion');
   const appBuildVersion = requiredString(build.appBuildVersion, 'appBuildVersion');
-  const runtimeVersion = requiredString(build.runtimeVersion, 'runtimeVersion');
+  const runtimeVersion = requiredAliasedString(
+    build.runtimeVersion,
+    build.runtime?.version,
+    'runtimeVersion',
+    'runtime.version',
+  );
   const gitCommitHash = requiredString(build.gitCommitHash, 'gitCommitHash');
   const fingerprintHash = requiredString(build.fingerprint?.hash, 'fingerprint.hash');
   const artifactUrl = build.artifacts?.applicationArchiveUrl || build.artifacts?.buildUrl;

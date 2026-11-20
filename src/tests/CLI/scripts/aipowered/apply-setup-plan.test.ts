@@ -93,6 +93,24 @@ describe('CLI/scripts/aipowered/apply-setup-plan', () => {
     ).toThrow('outside its allowlist');
   });
 
+  it('writes a non-template native path only when the v2 proof approved it', () => {
+    const file = 'ios/Demo/DownloadResolver.swift';
+    const original = 'class DownloadResolver {}\n';
+    const change = changeFor(file, original, 'class DownloadResolver { func bundleURL() {} }\n');
+    const destination = write(file, original);
+    const params = { projectRoot, projectType: 'bare' as const, changes: [change] };
+    expect(() => applySetupPatchPlans({ ...params, verifiedNativePaths: new Set() }))
+      .toThrow('outside its allowlist');
+    expect(() => applySetupPatchPlans({
+      ...params, projectType: 'expo', verifiedNativePaths: new Set([file]),
+    })).toThrow('outside its allowlist');
+    expect(fs.readFileSync(destination, 'utf8')).toBe(original);
+    const backup = applySetupPatchPlans({ ...params, verifiedNativePaths: new Set([file]) });
+    expect(fs.readFileSync(destination, 'utf8')).toBe(change.updated);
+    restoreSetupBackups(backup);
+    expect(fs.readFileSync(destination, 'utf8')).toBe(original);
+  });
+
   it.each(['../app.json', '/tmp/app.json', 'config\\app.json', 'app.json/../secret']) (
     'rejects unsafe path %s before reading or writing it',
     unsafePath => {

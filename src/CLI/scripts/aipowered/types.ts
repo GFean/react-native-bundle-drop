@@ -21,7 +21,8 @@ export type AiSetupFileKind =
   | 'expo_app_config'
   | 'metro_config'
   | 'android_entrypoint'
-  | 'ios_entrypoint';
+  | 'ios_entrypoint'
+  | 'native_support';
 
 export type AiSetupDetected = {
   rnVersion: string | null;
@@ -73,6 +74,12 @@ export type AiSetupPlanResponse = {
   warnings: string[];
 };
 
+export type AiSetupPlanRequestV2 = Omit<AiSetupPlanRequest, 'schemaVersion' | 'projectType'> & {
+  schemaVersion: 2;
+  projectType: 'bare';
+  nativeEditPaths: string[];
+};
+
 export type AiSetupScannerResult = {
   projectRoot: string;
   serverUrl: string;
@@ -80,4 +87,10 @@ export type AiSetupScannerResult = {
   projectSlug: string;
   authToken: string;
   request: AiSetupPlanRequest;
+};
+
+export type AiSetupScannerResultV2 = Omit<AiSetupScannerResult, 'request'> & {
+  request: AiSetupPlanRequestV2;
+  snapshot: ReadonlyMap<string, string | null>;
+  nativeInventory: readonly string[];
 };

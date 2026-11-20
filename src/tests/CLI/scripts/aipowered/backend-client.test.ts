@@ -103,6 +103,24 @@ describe('CLI/scripts/aipowered/backend-client', () => {
     );
   });
 
+  it('posts native evidence only to the v2 endpoint and does not retry on an unsupported backend', async () => {
+    const request = { schemaVersion: 2 } as const;
+    mockAxiosNodePost.mockRejectedValue({ response: { status: 404, data: 'not found' } });
+
+    await expect(requestAiSetupPlan({
+      serverUrl: 'https://api.example.com',
+      authToken: 'setup-token',
+      request: request as any,
+    })).rejects.toThrow('does not support this CLI');
+
+    expect(mockAxiosNodePost).toHaveBeenCalledTimes(1);
+    expect(mockAxiosNodePost).toHaveBeenCalledWith(
+      'https://api.example.com/ai/setup-plan/v2',
+      request,
+      expect.objectContaining({ maxRedirects: 0 }),
+    );
+  });
+
   it('formats setup timeout and backend failure shapes', async () => {
     mockAxiosNodePost.mockRejectedValueOnce({ code: 'ECONNABORTED' });
     await expect(requestAiSetupPlan({

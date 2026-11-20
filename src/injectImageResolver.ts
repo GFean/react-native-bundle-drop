@@ -39,13 +39,23 @@ type PackagerAsset = {
   type?: string;
 };
 
+type AssetRegistry = {
+  getAssetByID?: (assetId: number) => PackagerAsset | undefined;
+};
+
 function getPackagerAsset(source: any): PackagerAsset | undefined {
   if (typeof source === 'number') {
     try {
-      const registry = require('react-native/Libraries/Image/AssetRegistry') as {
-        getAssetByID?: (assetId: number) => PackagerAsset | undefined;
+      const { AssetRegistry: publicRegistry } = require('react-native') as {
+        AssetRegistry?: AssetRegistry;
       };
-      return registry.getAssetByID?.(source);
+      if (publicRegistry?.getAssetByID) {
+        return publicRegistry.getAssetByID(source);
+      }
+
+      // Keep this import inside the try block so Metro treats it as optional.
+      const legacyRegistry = require('react-native/Libraries/Image/AssetRegistry') as AssetRegistry;
+      return legacyRegistry.getAssetByID?.(source);
     } catch {
       return undefined;
     }

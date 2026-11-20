@@ -20,9 +20,11 @@ export const isSafeRelativePath = (value: string) => {
   return normalized === value && !normalized.split('/').includes('..');
 };
 
-export const isPatchableNativeEntrypoint = (filePath: string) =>
+export const isPatchableNativeEntrypoint = (filePath: string, iosSceneEntrypoint?: string) =>
   /(^|\/)android\/(?:.*\/)?MainApplication\.(kt|java)$/.test(filePath) ||
-  /(^|\/)ios\/(?:.*\/)?AppDelegate\.(swift|m|mm)$/.test(filePath);
+  (iosSceneEntrypoint
+    ? filePath === iosSceneEntrypoint && /^ios\/(?:.*\/)?SceneDelegate\.swift$/.test(filePath)
+    : /(^|\/)ios\/(?:.*\/)?AppDelegate\.(swift|m|mm)$/.test(filePath));
 
 export const isPatchableExpoConfig = (filePath: string) =>
   filePath === 'app.json' ||
@@ -1224,6 +1226,7 @@ export function validateSetupChangesBeforeApply(params: {
   originals: Map<string, string>;
   changes: AiPatchPlan[];
   migrateExpoUpdates?: boolean;
+  iosSceneEntrypoint?: string;
 }) {
   const seen = new Set<string>();
   for (const change of params.changes) {
@@ -1278,7 +1281,7 @@ export function validateSetupChangesBeforeApply(params: {
       continue;
     }
 
-    if (!isPatchableNativeEntrypoint(change.file)) {
+    if (!isPatchableNativeEntrypoint(change.file, params.iosSceneEntrypoint)) {
       throw new Error(`AI bare setup may not modify ${change.file}`);
     }
     if (change.decisionType !== 'review_only_patch') {
@@ -1290,7 +1293,7 @@ export function validateSetupChangesBeforeApply(params: {
       throw new Error(`AI plan Android update does not contain BundleDrop resolver: ${change.file}`);
     }
     if (
-      change.file.includes('AppDelegate.') &&
+      /(^|\/)ios\//.test(change.file) &&
       !hasIosBundleDropIntegration(change.file, change.updated)
     ) {
       throw new Error(`AI plan iOS update does not contain BundleDrop locator: ${change.file}`);
@@ -1315,6 +1318,7 @@ export function validateAppliedSetupChanges(params: {
   changes: AiPatchPlan[];
   migrateExpoUpdates?: boolean;
   originals?: Map<string, string>;
+  iosSceneEntrypoint?: string;
 }) {
   const appliedFiles = new Map(
     params.changes.map(change => {
@@ -1333,6 +1337,8 @@ export function validateAppliedSetupChanges(params: {
         .filter(file => platform === 'android'
           ? file.includes('/android/') || file.startsWith('android/')
           : file.includes('/ios/') || file.startsWith('ios/'));
+      if (platform === 'ios' && params.iosSceneEntrypoint && entrypoints.length === 1 &&
+          entrypoints[0] === params.iosSceneEntrypoint) continue;
       const authorityIssue = findNativeEntrypointAuthorityIssue(
         params.projectRoot,
         platform,
@@ -1345,6 +1351,7 @@ export function validateAppliedSetupChanges(params: {
   }
   validateSetupChangesBeforeApply({
     projectType: params.projectType,
+    iosSceneEntrypoint: params.iosSceneEntrypoint,
     originals,
     migrateExpoUpdates: params.migrateExpoUpdates,
     changes: params.changes.map(change => ({

@@ -169,9 +169,10 @@ export const restoreProjectFile = (
   projectRoot: string,
   backupRoot: string,
   relativePath: string,
+  backupPath = relativePath,
 ) => {
-  const backup = inspectProjectFile(backupRoot, relativePath);
-  if (!backup.exists) throw new Error(`Missing transaction backup: ${relativePath}`);
+  const backup = inspectProjectFile(backupRoot, backupPath);
+  if (!backup.exists) throw new Error(`Missing transaction backup: ${backupPath}`);
   inspectProjectFile(projectRoot, relativePath);
   writeProjectFileAtomically(
     projectRoot,
