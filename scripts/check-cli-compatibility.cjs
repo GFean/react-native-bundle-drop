@@ -3,6 +3,7 @@
 // checkout's node_modules. Run after an explicit build, or supply a tarball.
 const assert = require('node:assert/strict');
 const fs = require('node:fs');
+const { createRequire } = require('node:module');
 const os = require('node:os');
 const path = require('node:path');
 const { spawnSync } = require('node:child_process');
@@ -114,6 +115,38 @@ try {
   setRuntime('ios');
   const iosReport = JSON.parse(run([cli, 'fingerprint', '--platform', 'ios', '--json'], fixture));
   assert.equal(iosReport.runtimeVersion, goldens.cases.bareIos.runtimeVersion);
+
+  // RN 0.88.1 ships cli.js as a package binary and hides the deep import.
+  write('node_modules/react-native/package.json', JSON.stringify({
+    name: 'react-native', version: '0.88.1', bin: { 'react-native': 'cli.js' },
+    exports: { './package.json': './package.json' },
+  }));
+  const projectRequire = createRequire(path.join(fixture, 'package.json'));
+  assert.throws(() => projectRequire.resolve('react-native/cli.js'), { code: 'ERR_PACKAGE_PATH_NOT_EXPORTED' });
+  const withoutReactNativeVersion = report =>
+    report.sources.filter(source => !source.reasons.includes('package:react-native'));
+  const modernRuntimeVersions = new Map();
+  for (const [platform, legacyReport] of [['android', androidReport], ['ios', iosReport]]) {
+    setRuntime(platform);
+    const args = [cli, 'fingerprint', '--platform', platform, '--json'];
+    const report = JSON.parse(run(args, fixture));
+    assert.equal(report.status, 'stable');
+    assert.match(report.runtimeVersion, /^bdfp1-[a-f0-9]{64}$/);
+    assert.ok(report.sources.some(source => source.id === 'react-native@0.88.1'));
+    assert.deepEqual(withoutReactNativeVersion(report), withoutReactNativeVersion(legacyReport));
+    assert.equal(JSON.parse(run(args, fixture)).runtimeVersion, report.runtimeVersion);
+    modernRuntimeVersions.set(platform, report.runtimeVersion);
+  }
+
+  const installedReactNative = path.join(fixture, 'node_modules/react-native');
+  const linkedReactNative = path.join(temporary, 'linked-react-native');
+  fs.renameSync(installedReactNative, linkedReactNative);
+  fs.symlinkSync(linkedReactNative, installedReactNative, process.platform === 'win32' ? 'junction' : 'dir');
+  const linkedReport = JSON.parse(run([cli, 'fingerprint', '--platform', 'ios', '--json'], fixture, 0, {
+    NODE_OPTIONS: '--preserve-symlinks',
+  }));
+  assert.equal(linkedReport.runtimeVersion, modernRuntimeVersions.get('ios'));
+
   setRuntime('android', 2);
   assert.match(run([cli, 'fingerprint', '--platform', 'android', '--json'], fixture, 1), /Unsupported fingerprint scheme/);
   console.log('Fresh packed CLI scheme1 goldens, experimental-report comparison and unsupported-scheme refusal passed.');
