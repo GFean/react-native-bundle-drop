@@ -25,7 +25,7 @@ import {
   LEGACY_RUNTIME_DELIVERY_BOOTSTRAP_PATH,
   RUNTIME_DELIVERY_BOOTSTRAP_PATH,
 } from '../../runtime-delivery/bootstrapConfig';
-import { findNativeEntrypointAuthorityIssue } from './native-entrypoint-authority';
+import { findBareIosSceneEntrypoint, findNativeEntrypointAuthorityIssue } from './native-entrypoint-authority';
 import {
   findSingleMetroConfig,
   hasAuthoritativeMetroWrapper,
@@ -499,20 +499,32 @@ const checkBareRuntimeIdentity = (
   }
 };
 
-const checkBareStartupIntegration = (
+const checkBareStartupIntegration = async (
   projectRoot: string,
   platform: MobilePlatform,
-): DoctorCheck => {
+): Promise<DoctorCheck> => {
   const nativeRoot = path.join(projectRoot, platform);
   const entrypointNames = platform === 'android'
     ? ['MainApplication.kt', 'MainApplication.java']
     : ['AppDelegate.swift', 'AppDelegate.mm', 'AppDelegate.m'];
   const entrypoints = entrypointNames.flatMap(name => findFiles(nativeRoot, name));
-  const relativeEntrypoints = entrypoints.map(filePath =>
-    path.relative(projectRoot, filePath).split(path.sep).join('/')
-  );
   let authorityIssue: string | null = null;
   try {
+    const scene = platform === 'ios' ? await findBareIosSceneEntrypoint(projectRoot) : null;
+    if (scene) {
+      const file = inspectProjectFile(projectRoot, scene);
+      const integrated = hasBareIosStartupIntegration(scene, file.content);
+      return {
+        name: 'ios OTA startup ownership',
+        status: integrated ? 'pass' : 'error',
+        message: integrated
+          ? 'The iOS scene delegate asks Bundle Drop for the cold-start bundle.'
+          : 'The iOS scene delegate does not hand cold-start bundle resolution to Bundle Drop.',
+      };
+    }
+    const relativeEntrypoints = entrypoints.map(filePath =>
+      path.relative(projectRoot, filePath).split(path.sep).join('/')
+    );
     authorityIssue = findNativeEntrypointAuthorityIssue(
       projectRoot,
       platform,
@@ -616,10 +628,10 @@ const checkBareNativeAutolinking = (
   };
 };
 
-function inspectBareProject(
+async function inspectBareProject(
   projectRoot: string,
   platforms: MobilePlatform[],
-): DoctorCheck[] {
+): Promise<DoctorCheck[]> {
   const configPath = path.join(projectRoot, 'bundle.drop.config.js');
   const metro = inspectMetroConfig(projectRoot);
   const hasBareMetroWrapper = !metro.issue &&
@@ -644,7 +656,7 @@ function inspectBareProject(
   ];
   for (const platform of platforms) {
     checks.push(checkBareRuntimeIdentity(projectRoot, platform));
-    checks.push(checkBareStartupIntegration(projectRoot, platform));
+    checks.push(await checkBareStartupIntegration(projectRoot, platform));
     checks.push(checkBareNativeAutolinking(projectRoot, platform));
   }
   return checks;
@@ -663,7 +675,7 @@ export async function inspectProject(options: DoctorOptions = {}): Promise<{
   const platforms = options.platform ? [options.platform] : ['ios', 'android'] as MobilePlatform[];
   const checks = projectType === 'expo'
     ? await inspectExpoProject(projectRoot, platforms)
-    : inspectBareProject(projectRoot, platforms);
+    : await inspectBareProject(projectRoot, platforms);
   return { projectRoot, projectType, checks };
 }
 

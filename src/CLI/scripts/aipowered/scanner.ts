@@ -354,6 +354,7 @@ const collectSetupFiles = (
   projectRoot: string,
   projectType: AiSetupProjectType,
   dynamicExpoConfigFile: string | null,
+  iosSceneEntrypoint?: string,
 ): AiSetupPlanFile[] => {
   const relativePaths: string[] = [
     'package.json',
@@ -376,12 +377,13 @@ const collectSetupFiles = (
         ).map(filePath => toPosix(path.relative(projectRoot, filePath))),
       );
     }
-    relativePaths.push(
-      ...findFilesByName(
+    if (iosSceneEntrypoint) relativePaths.push(iosSceneEntrypoint);
+    else {
+      relativePaths.push(...findFilesByName(
         path.join(projectRoot, 'ios'),
         new Set(['AppDelegate.swift', 'AppDelegate.mm', 'AppDelegate.m']),
-      ).map(filePath => toPosix(path.relative(projectRoot, filePath))),
-    );
+      ).map(filePath => toPosix(path.relative(projectRoot, filePath))));
+    }
   }
 
   const files: AiSetupPlanFile[] = [];
@@ -523,6 +525,7 @@ export function scanProjectForAiSetup(
     projectSlug: string;
     authToken: string;
   },
+  iosSceneEntrypoint?: string,
 ): AiSetupScannerResult {
   const projectRoot = findProjectRoot(startDir);
   const configPath = path.join(projectRoot, 'bundle.drop.config.js');
@@ -568,9 +571,10 @@ export function scanProjectForAiSetup(
         'No context was shared and no files were changed.',
     );
   }
-  const files = collectSetupFiles(projectRoot, projectType, dynamicExpoConfigFile);
+  const files = collectSetupFiles(projectRoot, projectType, dynamicExpoConfigFile, iosSceneEntrypoint);
   if (projectType === 'bare') {
     for (const platform of ['android', 'ios'] as const) {
+      if (platform === 'ios' && iosSceneEntrypoint) continue;
       const kind = platform === 'android' ? 'android_entrypoint' : 'ios_entrypoint';
       const entrypoints = files.filter(file => file.kind === kind).map(file => file.path);
       if (entrypoints.length > 1) continue;

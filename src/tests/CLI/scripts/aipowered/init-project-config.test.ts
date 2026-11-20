@@ -13,6 +13,7 @@ const mockEvaluateExpoConfig = jest.fn();
 const mockScanProjectForAiSetup = jest.fn();
 const mockRequestAiSetupPlan = jest.fn();
 const mockFindCodePushResiduePaths = jest.fn();
+const mockFindBareIosSceneEntrypoint = jest.fn();
 const mockValidateSetupChangesBeforeApply = jest.fn();
 const mockValidateAppliedSetupChanges = jest.fn();
 const mockApplySetupPatchPlans = jest.fn();
@@ -64,6 +65,9 @@ jest.mock('../../../../CLI/scripts/aipowered/backend-client', () => ({
 }));
 jest.mock('../../../../CLI/scripts/aipowered/code-push-residue', () => ({
   findCodePushResiduePaths: (...args: unknown[]) => mockFindCodePushResiduePaths(...args),
+}));
+jest.mock('../../../../CLI/scripts/native-entrypoint-authority', () => ({
+  findBareIosSceneEntrypoint: (...args: unknown[]) => mockFindBareIosSceneEntrypoint(...args),
 }));
 jest.mock('../../../../CLI/scripts/aipowered/validate-plan', () => ({
   validateSetupChangesBeforeApply: (...args: unknown[]) =>
@@ -194,6 +198,7 @@ describe('initProjectConfigAi', () => {
     mockScanProjectForAiSetup.mockReturnValue(scanner('bare'));
     mockRequestAiSetupPlan.mockResolvedValue(plan());
     mockFindCodePushResiduePaths.mockReturnValue([]);
+    mockFindBareIosSceneEntrypoint.mockResolvedValue(null);
     mockApplySetupPatchPlans.mockReturnValue({
       projectRoot,
       backupDir: '/project/.bundledrop-backup/native',
@@ -571,6 +576,65 @@ describe('initProjectConfigAi', () => {
       projectType: 'bare',
       changes: [reviewOnlyChange],
     });
+  });
+
+  it('rechecks the reviewed scene owner immediately before applying setup', async () => {
+    const scene = 'ios/Demo/SceneDelegate.swift';
+    const sceneChange = { ...bareChange, file: scene, decisionType: 'review_only_patch' as const };
+    mockFindBareIosSceneEntrypoint.mockResolvedValueOnce(scene);
+    mockRequestAiSetupPlan.mockResolvedValue(plan({ changes: [sceneChange] }));
+    queuePromptResponse({ send: true });
+    queuePromptResponse({ approve: true });
+    queuePromptResponse({ apply: true });
+
+    await expect(initProjectConfigAi()).rejects.toThrow('iOS scene startup owner changed since the setup scan');
+
+    expect(mockScanProjectForAiSetup).toHaveBeenCalledWith('bare', projectRoot, undefined, scene);
+    expect(mockApplySetupPatchPlans).not.toHaveBeenCalled();
+  });
+
+  it('restores dependency files when migration changes the scene startup owner', async () => {
+    const scene = 'ios/Demo/SceneDelegate.swift';
+    mockFindBareIosSceneEntrypoint.mockResolvedValueOnce(scene).mockResolvedValueOnce(scene);
+    mockScanProjectForAiSetup.mockReturnValue(scanner('bare', { codePushDetected: true }));
+    mockRequestAiSetupPlan.mockResolvedValue(plan({ changes: [bareChange] }));
+
+    await expect(initProjectConfigAi({ yes: true, migrateCodePush: true })).rejects.toThrow(
+      'iOS scene startup owner changed during migration',
+    );
+
+    expect(mockRemoveCodePushWithPackageManager).toHaveBeenCalledWith(projectRoot);
+    expect(mockRestoreDependencyMigration).toHaveBeenCalledWith({
+      projectRoot,
+      backupDir: '/project/.bundledrop-backup/code-push',
+      files: ['package.json', 'yarn.lock'],
+    });
+    expect(mockApplySetupPatchPlans).not.toHaveBeenCalled();
+  });
+
+  it('restores native backups when an applied change loses the reviewed scene owner', async () => {
+    const scene = 'ios/Demo/SceneDelegate.swift';
+    const sceneChange = { ...bareChange, file: scene, decisionType: 'review_only_patch' as const };
+    const backup = { projectRoot, backupDir: '/project/.bundledrop-backup/native', changedFiles: [scene] };
+    mockFindBareIosSceneEntrypoint.mockResolvedValueOnce(scene).mockResolvedValueOnce(scene);
+    mockRequestAiSetupPlan.mockResolvedValue(plan({ changes: [sceneChange] }));
+    mockApplySetupPatchPlans.mockReturnValue(backup);
+    queuePromptResponse({ send: true });
+    queuePromptResponse({ approve: true });
+    queuePromptResponse({ apply: true });
+
+    await expect(initProjectConfigAi()).rejects.toThrow(
+      'Applied changes no longer match the reviewed iOS scene startup owner',
+    );
+
+    expect(mockApplySetupPatchPlans).toHaveBeenCalledWith({
+      projectRoot,
+      projectType: 'bare',
+      changes: [sceneChange],
+      iosSceneEntrypoint: scene,
+    });
+    expect(mockRestoreSetupBackups).toHaveBeenCalledWith(backup);
+    expect(mockValidateAppliedSetupChanges).not.toHaveBeenCalled();
   });
 
   it('leaves the whole transaction unchanged when a review-only change is declined', async () => {

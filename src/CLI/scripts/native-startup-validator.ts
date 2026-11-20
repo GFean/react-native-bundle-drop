@@ -967,7 +967,44 @@ const appDelegateSourceUrlPreservesBundleAuthority = (
     );
 };
 
-const swiftStartupMethod = (nativeCode: string) => {
+const swiftSceneStartupMethod = (nativeCode: string) => {
+  const scene = findNamedType(nativeCode, 'SceneDelegate');
+  if (!scene ||
+      !/:\s*RCTDefaultReactNativeFactoryDelegate\s*,\s*UIWindowSceneDelegate\s*\{$/.test(scene.declaration)) {
+    return null;
+  }
+  const methods = findDeclaredMethods(nativeCode, SWIFT_BUNDLE_URL_METHOD);
+  const bundleMethod = methods[0];
+  if (
+    methods.length !== 1 ||
+    !/\boverride\s+func\s+bundleURL\b/.test(bundleMethod.declaration) ||
+    findContainingType(nativeCode, bundleMethod.declarationStart)?.declarationStart !== scene.declarationStart ||
+    findDeclaredMethods(nativeCode, SWIFT_SOURCE_URL_METHOD).length
+  ) {
+    return null;
+  }
+
+  const sceneConnectMethod =
+    /(?:^|\n)\s*func\s+scene\s*\(\s*_\s+scene\s*:\s*UIScene\s*,\s*willConnectTo\s+session\s*:\s*UISceneSession\s*,\s*options\s+connectionOptions\s*:\s*UIScene\.ConnectionOptions\s*\)\s*(\{)/g;
+  const launchMethods = methodsOwnedBy(nativeCode, sceneConnectMethod, 'SceneDelegate');
+  if (launchMethods.length !== 1) return null;
+  const release = releaseSource(launchMethods[0].body).trim();
+  const stockLaunch = new RegExp([
+    /^guard\s+let\s+windowScene\s*=\s*scene\s+as\?\s*UIWindowScene\s+else\s*\{\s*return\s*\}/,
+    /dependencyProvider\s*=\s*RCTAppDependencyProvider\s*\(\s*\)/,
+    /reactNativeFactory\s*=\s*RCTReactNativeFactory\s*\(\s*delegate\s*:\s*self\s*\)/,
+    /window\s*=\s*UIWindow\s*\(\s*windowScene\s*:\s*windowScene\s*\)/,
+    /reactNativeFactory\s*\?\.\s*startReactNative\s*\(\s*withModuleName\s*:\s*,/,
+    /in\s*:\s*window\s*,\s*connectionOptions\s*:\s*connectionOptions\s*\)$/,
+  ].map(pattern => pattern.source).join('\\s*'));
+  return stockLaunch.test(release) ? bundleMethod : null;
+};
+
+export const hasBareIosSceneStartup = (code: string) =>
+  Boolean(swiftSceneStartupMethod(stripCommentsAndStrings(code)));
+
+const swiftStartupMethod = (nativeCode: string, filePath: string) => {
+  if (filePath.endsWith('/SceneDelegate.swift')) return swiftSceneStartupMethod(nativeCode);
   const methods = findDeclaredMethods(nativeCode, SWIFT_BUNDLE_URL_METHOD);
   if (methods.length !== 1) return null;
   const method = methods[0];
@@ -994,6 +1031,13 @@ const swiftStartupMethod = (nativeCode: string) => {
     factoryDelegateSourceUrlFeedsBundleUrl(nativeCode, factoryDelegates[0])
     ? method
     : null;
+};
+
+const withoutSceneResolverEdit = (code: string, method: DeclaredMethod) => {
+  const openingBrace = method.declarationStart + method.declaration.lastIndexOf('{');
+  const closingBrace = findBalancedBlockEnd(stripCommentsAndStrings(code), openingBrace);
+  return (code.slice(0, openingBrace + 1) + code.slice(closingBrace))
+    .replace(/^[ \t]*import[ \t]+BundleDrop[ \t]*\r?\n/gm, '');
 };
 
 const objcStartupMethods = (nativeCode: string) => {
@@ -1025,7 +1069,7 @@ export const hasBareIosStartupIntegration = (
   if (hasNativeCodePushResidue(code)) return false;
   const nativeCode = stripCommentsAndStrings(code);
   if (filePath.endsWith('.swift')) {
-    const startupMethod = swiftStartupMethod(nativeCode);
+    const startupMethod = swiftStartupMethod(nativeCode, filePath);
     return Boolean(
       startupMethod &&
       resolverFeedsReturnedValue(
@@ -1208,11 +1252,15 @@ export const findMissingBareNativeStartupStructure = (
   }
 
   if (filePath.endsWith('.swift')) {
-    const originalMethod = swiftStartupMethod(originalCode);
+    const originalMethod = swiftStartupMethod(originalCode, filePath);
     if (!originalMethod) return substantiveMissing;
-    const updatedMethod = swiftStartupMethod(updatedCode);
+    const updatedMethod = swiftStartupMethod(updatedCode, filePath);
     if (!updatedMethod) return [...substantiveMissing, 'bundleURL'];
     const missing = [...substantiveMissing];
+    if (
+      filePath.endsWith('/SceneDelegate.swift') &&
+      withoutSceneResolverEdit(original, originalMethod) !== withoutSceneResolverEdit(updated, updatedMethod)
+    ) missing.push('SceneDelegate code outside bundleURL');
     if (!preservesSubstantiveNativeTokens(
       originalMethod.body,
       updatedMethod.body,

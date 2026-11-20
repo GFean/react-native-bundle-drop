@@ -9,6 +9,7 @@ import { detectProjectType, evaluateExpoConfig } from '../../../expo';
 import type { ProjectType } from '../../../expo';
 import { planBareMetroConfig } from '../bare-metro-config';
 import { inspectProject, runDoctor } from '../doctor';
+import { findBareIosSceneEntrypoint } from '../native-entrypoint-authority';
 import {
   applyExpoConfigurationChanges,
   hasDynamicExpoConfig,
@@ -348,8 +349,8 @@ const existingSetupPassesDoctor = async (
   }
 };
 
-const assertNoCodePushMigrationResidue = (projectRoot: string) => {
-  const residuePaths = findCodePushResiduePaths(projectRoot);
+const assertNoCodePushMigrationResidue = (projectRoot: string, iosSceneEntrypoint?: string) => {
+  const residuePaths = findCodePushResiduePaths(projectRoot, iosSceneEntrypoint);
   if (!residuePaths.length) return;
 
   const displayedPaths = residuePaths.slice(0, 20).map(filePath => `  - ${filePath}`);
@@ -367,7 +368,12 @@ const assertNoCodePushMigrationResidue = (projectRoot: string) => {
 export async function initProjectConfigAi(options: InitProjectOptions = {}): Promise<void> {
   const projectRoot = findProjectRoot(process.cwd());
   const projectType = detectProjectType({ projectRoot, explicitType: options.projectType });
-  const scan = scanProjectForAiSetup(projectType, projectRoot, options.virtualConfig);
+  const iosSceneEntrypoint = projectType === 'bare'
+    ? (await findBareIosSceneEntrypoint(projectRoot)) ?? undefined
+    : undefined;
+  const scan = iosSceneEntrypoint
+    ? scanProjectForAiSetup(projectType, projectRoot, options.virtualConfig, iosSceneEntrypoint)
+    : scanProjectForAiSetup(projectType, projectRoot, options.virtualConfig);
   const bootstrapChange = planRuntimeDeliveryBootstrap(
     projectRoot,
     options.runtimeDeliveryBootstrap,
@@ -473,7 +479,7 @@ export async function initProjectConfigAi(options: InitProjectOptions = {}): Pro
     projectType === 'bare' &&
     scan.request.detected.codePushDetected &&
     Boolean(options.migrateCodePush);
-  if (shouldMigrateCodePush) assertNoCodePushMigrationResidue(projectRoot);
+  if (shouldMigrateCodePush) assertNoCodePushMigrationResidue(projectRoot, iosSceneEntrypoint);
 
   for (const action of plan.actions.filter(action =>
     action.requiresConfirmation &&
@@ -510,6 +516,7 @@ export async function initProjectConfigAi(options: InitProjectOptions = {}): Pro
     originals,
     changes: aiChanges,
     migrateExpoUpdates: Boolean(options.migrateExpoUpdates),
+    iosSceneEntrypoint,
   });
 
   if (projectType === 'bare') {
@@ -585,16 +592,26 @@ export async function initProjectConfigAi(options: InitProjectOptions = {}): Pro
     let result: ReturnType<typeof applySetupPatchPlans> | undefined;
     let metroResult: ReturnType<typeof applyExpoConfigurationChanges> | undefined;
     try {
+      if (((await findBareIosSceneEntrypoint(projectRoot)) ?? undefined) !== iosSceneEntrypoint) {
+        throw new Error('iOS scene startup owner changed since the setup scan. Rerun setup before applying changes.');
+      }
       if (shouldMigrateCodePush) {
         dependencyBackup = removeCodePushWithPackageManager(projectRoot);
+        if (((await findBareIosSceneEntrypoint(projectRoot)) ?? undefined) !== iosSceneEntrypoint) {
+          throw new Error('iOS scene startup owner changed during migration. Rerun setup before applying changes.');
+        }
       }
-      result = applySetupPatchPlans({ projectRoot, projectType, changes: aiChanges });
+      result = applySetupPatchPlans({ projectRoot, projectType, changes: aiChanges, iosSceneEntrypoint });
+      if (iosSceneEntrypoint && await findBareIosSceneEntrypoint(projectRoot) !== iosSceneEntrypoint) {
+        throw new Error('Applied changes no longer match the reviewed iOS scene startup owner.');
+      }
       validateAppliedSetupChanges({
         projectRoot,
         projectType,
         changes: aiChanges,
         migrateExpoUpdates: false,
         originals,
+        iosSceneEntrypoint,
       });
       if (localChanges.length) {
         metroResult = applyExpoConfigurationChanges({
