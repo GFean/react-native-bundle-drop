@@ -9,7 +9,6 @@ import { detectProjectType, evaluateExpoConfig } from '../../../expo';
 import type { ProjectType } from '../../../expo';
 import { planBareMetroConfig } from '../bare-metro-config';
 import { inspectProject, runDoctor } from '../doctor';
-import { findBareIosSceneEntrypoint } from '../native-entrypoint-authority';
 import {
   applyExpoConfigurationChanges,
   hasDynamicExpoConfig,
@@ -35,12 +34,17 @@ import {
   findProjectRoot,
   isBundleDropHostedAiPlanningServer,
   scanProjectForAiSetup,
+  scanProjectForAiSetupV2,
 } from './scanner';
 import type { AiPatchPlan, AiSetupScannerResult } from './types';
 import {
   validateAppliedSetupChanges,
   validateSetupChangesBeforeApply,
 } from './validate-plan';
+import {
+  assertNativeSetupSnapshot,
+  verifyNativeSetupPlan,
+} from './setup-v2';
 import { startLoadingStatus } from '../../utils/ui';
 import {
   createSafeBackupDirectory,
@@ -279,6 +283,7 @@ const assertBundleDropPluginPresent = (projectRoot: string) => {
 };
 
 const isSummarizedSetupContext = (file: { kind: string; path: string }) =>
+  file.kind === 'native_support' ||
   file.kind === 'package_manifest' ||
   file.kind === 'bundle_drop_config' ||
   file.kind === 'metro_config' ||
@@ -299,6 +304,7 @@ async function requestContextConsent(
   files: Array<{ path: string; kind: string; content: string }>,
   serverUrl: string,
   yes?: boolean,
+  nativeEditCandidates?: ReadonlySet<string>,
 ) {
   console.log(chalk.gray(`AI setup destination: ${describeAiDestination(serverUrl)}`));
   const contextSize = files.reduce(
@@ -309,7 +315,9 @@ async function requestContextConsent(
   console.log(chalk.gray('Files proposed for AI setup planning:'));
   files.forEach(file => {
     const disclosure = isSummarizedSetupContext(file) ? 'summary only' : 'full content';
-    console.log(chalk.gray(`  - ${file.path} (${file.kind}, ${disclosure})`));
+    const role = file.kind === 'native_support' ? ', read-only build metadata'
+      : nativeEditCandidates?.has(file.path) ? ', potential native edit' : '';
+    console.log(chalk.gray(`  - ${file.path} (${file.kind}, ${disclosure}${role})`));
   });
   if (yes) return true;
   const answer = await prompts({
@@ -349,8 +357,8 @@ const existingSetupPassesDoctor = async (
   }
 };
 
-const assertNoCodePushMigrationResidue = (projectRoot: string, iosSceneEntrypoint?: string) => {
-  const residuePaths = findCodePushResiduePaths(projectRoot, iosSceneEntrypoint);
+const assertNoCodePushMigrationResidue = (projectRoot: string, verifiedNativePaths: ReadonlySet<string>) => {
+  const residuePaths = findCodePushResiduePaths(projectRoot, undefined, verifiedNativePaths);
   if (!residuePaths.length) return;
 
   const displayedPaths = residuePaths.slice(0, 20).map(filePath => `  - ${filePath}`);
@@ -368,12 +376,10 @@ const assertNoCodePushMigrationResidue = (projectRoot: string, iosSceneEntrypoin
 export async function initProjectConfigAi(options: InitProjectOptions = {}): Promise<void> {
   const projectRoot = findProjectRoot(process.cwd());
   const projectType = detectProjectType({ projectRoot, explicitType: options.projectType });
-  const iosSceneEntrypoint = projectType === 'bare'
-    ? (await findBareIosSceneEntrypoint(projectRoot)) ?? undefined
+  const nativeScan = projectType === 'bare'
+    ? await scanProjectForAiSetupV2(projectRoot, options.virtualConfig)
     : undefined;
-  const scan = iosSceneEntrypoint
-    ? scanProjectForAiSetup(projectType, projectRoot, options.virtualConfig, iosSceneEntrypoint)
-    : scanProjectForAiSetup(projectType, projectRoot, options.virtualConfig);
+  const scan = nativeScan ?? scanProjectForAiSetup(projectType, projectRoot, options.virtualConfig);
   const bootstrapChange = planRuntimeDeliveryBootstrap(
     projectRoot,
     options.runtimeDeliveryBootstrap,
@@ -384,6 +390,7 @@ export async function initProjectConfigAi(options: InitProjectOptions = {}): Pro
   );
   assertSetupOwnershipCompatible(projectType, scan.request.detected.expoUpdatesStatus);
   if (
+    !nativeScan &&
     !bootstrapChange &&
     !bootstrapGitignoreChange &&
     await existingSetupPassesDoctor(projectRoot, projectType, scan.request.detected)
@@ -394,7 +401,12 @@ export async function initProjectConfigAi(options: InitProjectOptions = {}): Pro
     return;
   }
   console.log(chalk.cyan(`🧠 Bundle Drop AI setup (${projectType})`));
-  if (!(await requestContextConsent(scan.request.files, scan.serverUrl, options.yes))) {
+  if (!(await requestContextConsent(
+    scan.request.files,
+    scan.serverUrl,
+    options.yes,
+    nativeScan && new Set(nativeScan.request.nativeEditPaths),
+  ))) {
     console.log(chalk.gray('No context sent. No files changed.'));
     return;
   }
@@ -411,6 +423,7 @@ export async function initProjectConfigAi(options: InitProjectOptions = {}): Pro
     loading.stop();
   }
   assertSafeProviderPlan(plan);
+  const verifiedNativePaths = nativeScan ? verifyNativeSetupPlan(nativeScan, plan) : undefined;
   console.log(chalk.cyan('\nSetup summary:'));
   console.log(escapeTerminalControls(plan.summary));
   plan.warnings.forEach(warning =>
@@ -458,12 +471,16 @@ export async function initProjectConfigAi(options: InitProjectOptions = {}): Pro
       );
     }
   }
-  if (projectType === 'bare' && scan.request.detected.codePushDetected) {
+  const migrateCodePush = nativeScan && (scan.request.detected.codePushDetected ||
+    plan.actions.some(action => action.type === 'migrate_codepush'));
+  if (migrateCodePush) {
     if (!options.migrateCodePush && !options.yes) {
       const migrationAnswer = await prompts({
         type: 'confirm',
         name: 'migrate',
-        message: 'Remove react-native-code-push and migrate native startup ownership to Bundle Drop?',
+        message: scan.request.detected.codePushDetected
+          ? 'Remove react-native-code-push and migrate native startup ownership to Bundle Drop?'
+          : 'Replace the remaining native CodePush startup references with Bundle Drop?',
         initial: false,
       });
       options.migrateCodePush = Boolean((migrationAnswer as { migrate?: boolean }).migrate);
@@ -475,11 +492,10 @@ export async function initProjectConfigAi(options: InitProjectOptions = {}): Pro
       );
     }
   }
-  const shouldMigrateCodePush =
-    projectType === 'bare' &&
-    scan.request.detected.codePushDetected &&
-    Boolean(options.migrateCodePush);
-  if (shouldMigrateCodePush) assertNoCodePushMigrationResidue(projectRoot, iosSceneEntrypoint);
+  const shouldRemoveCodePush = migrateCodePush && scan.request.detected.codePushDetected;
+  if (migrateCodePush && verifiedNativePaths) {
+    assertNoCodePushMigrationResidue(projectRoot, verifiedNativePaths);
+  }
 
   for (const action of plan.actions.filter(action =>
     action.requiresConfirmation &&
@@ -511,15 +527,16 @@ export async function initProjectConfigAi(options: InitProjectOptions = {}): Pro
     return;
   }
   const aiChanges = plan.changes.filter(shouldApplyAiChange);
-  validateSetupChangesBeforeApply({
-    projectType,
-    originals,
-    changes: aiChanges,
-    migrateExpoUpdates: Boolean(options.migrateExpoUpdates),
-    iosSceneEntrypoint,
-  });
+  if (!nativeScan) {
+    validateSetupChangesBeforeApply({
+      projectType,
+      originals,
+      changes: aiChanges,
+      migrateExpoUpdates: Boolean(options.migrateExpoUpdates),
+    });
+  }
 
-  if (projectType === 'bare') {
+  if (nativeScan && verifiedNativePaths) {
     const metroChange = planBareMetroConfig(projectRoot);
     const bundleConfigFile = inspectPlanningFile(projectRoot, 'bundle.drop.config.js');
     const bundleConfigExists = bundleConfigFile.exists;
@@ -546,10 +563,9 @@ export async function initProjectConfigAi(options: InitProjectOptions = {}): Pro
     ].filter(
       (change): change is NonNullable<typeof change> => Boolean(change),
     );
-    if (!aiChanges.length && !localChanges.length && !shouldMigrateCodePush) {
-      console.log(chalk.gray('No bare native changes are required.'));
+    if (!aiChanges.length && !localChanges.length && !migrateCodePush) {
+      console.log(chalk.gray('The setup planner proposed no changes.'));
       if (!options.dryRun) {
-        await runDoctor({ projectType: 'bare', cwd: projectRoot });
         logRuntimeInitializationNextStep();
       }
       return;
@@ -573,7 +589,7 @@ export async function initProjectConfigAi(options: InitProjectOptions = {}): Pro
       originals: bareOriginals,
       changes: previewChanges,
     })));
-    if (shouldMigrateCodePush) {
+    if (shouldRemoveCodePush) {
       const command = codePushRemovalCommand(detectPackageManager(projectRoot));
       console.log(chalk.yellow(`Dependency migration command: ${command.join(' ')}`));
     }
@@ -592,34 +608,20 @@ export async function initProjectConfigAi(options: InitProjectOptions = {}): Pro
     let result: ReturnType<typeof applySetupPatchPlans> | undefined;
     let metroResult: ReturnType<typeof applyExpoConfigurationChanges> | undefined;
     try {
-      if (((await findBareIosSceneEntrypoint(projectRoot)) ?? undefined) !== iosSceneEntrypoint) {
-        throw new Error('iOS scene startup owner changed since the setup scan. Rerun setup before applying changes.');
-      }
-      if (shouldMigrateCodePush) {
+      assertNativeSetupSnapshot(nativeScan);
+      if (shouldRemoveCodePush) {
         dependencyBackup = removeCodePushWithPackageManager(projectRoot);
-        if (((await findBareIosSceneEntrypoint(projectRoot)) ?? undefined) !== iosSceneEntrypoint) {
-          throw new Error('iOS scene startup owner changed during migration. Rerun setup before applying changes.');
-        }
+        assertNativeSetupSnapshot(nativeScan, [], true);
       }
-      result = applySetupPatchPlans({ projectRoot, projectType, changes: aiChanges, iosSceneEntrypoint });
-      if (iosSceneEntrypoint && await findBareIosSceneEntrypoint(projectRoot) !== iosSceneEntrypoint) {
-        throw new Error('Applied changes no longer match the reviewed iOS scene startup owner.');
-      }
-      validateAppliedSetupChanges({
-        projectRoot,
-        projectType,
-        changes: aiChanges,
-        migrateExpoUpdates: false,
-        originals,
-        iosSceneEntrypoint,
-      });
+      result = applySetupPatchPlans({ projectRoot, projectType, changes: aiChanges, verifiedNativePaths });
+      assertNativeSetupSnapshot(nativeScan, aiChanges, Boolean(dependencyBackup));
+      if (migrateCodePush) assertNoCodePushMigrationResidue(projectRoot, new Set());
       if (localChanges.length) {
         metroResult = applyExpoConfigurationChanges({
           projectRoot,
           changes: localChanges,
         });
       }
-      await runDoctor({ projectType: 'bare', cwd: projectRoot });
     } catch (error) {
       if (metroResult) restoreExpoConfiguration(metroResult);
       if (result) restoreSetupBackups(result);
@@ -633,6 +635,7 @@ export async function initProjectConfigAi(options: InitProjectOptions = {}): Pro
     }
     if (!result) throw new Error('Bare setup transaction completed without a backup result.');
     console.log(chalk.green(`✅ Bare React Native setup complete. Backups: ${result.backupDir}`));
+    console.log(chalk.cyan('Build and launch the native app to verify the Release bundle startup.'));
     logRuntimeInitializationNextStep();
     return;
   }

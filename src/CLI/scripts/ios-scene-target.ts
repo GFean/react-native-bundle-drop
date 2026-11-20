@@ -83,14 +83,15 @@ const hasLiteralSceneSettings = (config: Record<string, unknown>) =>
       (/^(?:INFOPLIST_PREPROCESS|GENERATE_INFOPLIST_FILE)(?:\[|$)/.test(key) && value !== 'NO'));
 
 /** Resolve the literal source paths that the app target actually compiles. */
-const delegateSources = (
+const targetSourcePaths = (
   objects: Record<string, unknown>,
   rootGroup: string,
   sourceFileIds: Set<string>,
+  projectDirectory: string,
 ) => {
   const results: string[] = [];
   const visited = new Set<string>();
-  const pending = [{ id: rootGroup, directory: 'ios' }];
+  const pending = [{ id: rootGroup, directory: projectDirectory }];
 
   while (pending.length) {
     const { id, directory } = pending.pop()!;
@@ -99,19 +100,45 @@ const delegateSources = (
     const item = dict(objects[id]);
     const group = item.isa === 'PBXGroup';
     if (!group && (item.isa !== 'PBXFileReference' || !sourceFileIds.has(id))) continue;
-    const base = item.sourceTree === 'SOURCE_ROOT' ? 'ios'
+    const base = item.sourceTree === 'SOURCE_ROOT' ? projectDirectory
       : item.sourceTree === '<group>' ? directory : null;
     const name = item.path === undefined && group ? '' : xcodeRelativePath(item.path);
     if (base === null || name === null) continue;
     const relativePath = path.posix.join(base, name);
     if (group) {
       for (const childId of ids(item.children)) pending.push({ id: childId, directory: relativePath });
-    } else if (/\/(?:AppDelegate|SceneDelegate)\.swift$/.test(relativePath)) {
+    } else {
       results.push(relativePath);
     }
   }
   return results;
 };
+
+const targetSourceFileIds = (target: Record<string, unknown>, get: ReturnType<typeof readXcodeProject>['get']) => {
+  const sourcePhases = ids(target.buildPhases).map(get).filter(item => item.isa === 'PBXSourcesBuildPhase');
+  return new Set(sourcePhases.flatMap(phase =>
+    ids(phase.files).map(get).flatMap(item =>
+      item.isa === 'PBXBuildFile' && typeof item.fileRef === 'string' ? [item.fileRef] : []),
+  ));
+};
+
+/** Project only Xcode app target membership and literal Info.plist paths. */
+export function readXcodeApplicationTargets(value: unknown, projectDirectory: string) {
+  const { objects, get, root, applications } = readXcodeProject(value);
+  return applications.slice(0, 8).map(target => {
+    const sourcePaths = targetSourcePaths(
+      objects, String(root.mainGroup), targetSourceFileIds(target, get), projectDirectory,
+    );
+    const infoPlistPaths = ids(get(target.buildConfigurationList).buildConfigurations).map(get).flatMap(config => {
+      const setting = dict(config.buildSettings).INFOPLIST_FILE;
+      const infoPlistPath = xcodeRelativePath(typeof setting === 'string'
+        ? setting.replace(/^\$(?:\((?:SRCROOT|PROJECT_DIR)\)|\{(?:SRCROOT|PROJECT_DIR)\})\//, '')
+        : setting);
+      return infoPlistPath?.endsWith('.plist') ? [path.posix.join(projectDirectory, infoPlistPath)] : [];
+    });
+    return { sourcePaths, infoPlistPaths };
+  });
+}
 
 export async function readIosSceneTarget(projectRoot: string): Promise<{
   appDelegate: string;
@@ -180,12 +207,7 @@ export async function readIosSceneTarget(projectRoot: string): Promise<{
     throw new Error('The application scene configuration does not uniquely register SceneDelegate.');
   }
 
-  const sourcePhases = ids(target.buildPhases).map(get).filter(item => item.isa === 'PBXSourcesBuildPhase');
-  const sources = new Set(sourcePhases.flatMap(phase =>
-    ids(phase.files).map(get).flatMap(item =>
-      item.isa === 'PBXBuildFile' && typeof item.fileRef === 'string' ? [item.fileRef] : []),
-  ));
-  const delegates = delegateSources(objects, String(root.mainGroup), sources);
+  const delegates = targetSourcePaths(objects, String(root.mainGroup), targetSourceFileIds(target, get), 'ios');
   return {
     appDelegate: requireOne(delegates.filter(file => file.endsWith('/AppDelegate.swift')),
       'The iOS app target must compile exactly one AppDelegate.swift.'),

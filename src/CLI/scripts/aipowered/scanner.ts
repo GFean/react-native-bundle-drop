@@ -10,16 +10,18 @@ import {
 } from '../native-setup-contract';
 import { inspectProjectDirectory, inspectProjectFile } from '../safe-file-transaction';
 import { findNativeEntrypointAuthorityIssue } from '../native-entrypoint-authority';
+import { collectNativeSetupContext } from './native-setup-context';
 import {
   AiSetupPlanFile,
   AiSetupProjectType,
   AiSetupScannerResult,
+  AiSetupScannerResultV2,
 } from './types';
 import { hasUnsafeTerminalControl } from './terminal-safety';
 import { findKnownBundleDropCredential } from './credential-safety';
 
 const MAX_UP = 12;
-const MAX_FILE_BYTES = 80 * 1024;
+export const MAX_SETUP_FILE_BYTES = 80 * 1024;
 const MAX_SUMMARIZED_SOURCE_BYTES = 1024 * 1024;
 const MAX_TOTAL_BYTES = 128 * 1024;
 const MAX_NATIVE_SCAN_ENTRIES = 5000;
@@ -318,30 +320,39 @@ export const authoritativeDynamicExpoConfigFile = (
   return relativePath;
 };
 
-const readSetupFile = (projectRoot: string, relativePath: string): AiSetupPlanFile | null => {
+const readSetupFile = (
+  projectRoot: string,
+  relativePath: string,
+  nativeKind?: AiSetupPlanFile['kind'],
+  snapshot?: Map<string, string | null>,
+): AiSetupPlanFile | null => {
   let inspected;
   try {
     inspected = inspectProjectFile(projectRoot, relativePath);
   } catch {
     throw setupContextLimitError(relativePath, 'the path is not a regular project file');
   }
-  if (!inspected.exists) return null;
+  if (!inspected.exists) {
+    if (nativeKind) throw setupContextLimitError(relativePath, 'it changed during discovery');
+    return null;
+  }
   const sizeBytes = Buffer.byteLength(inspected.content, 'utf8');
-  const summarized = isSummarizedSetupFile(relativePath);
-  if (sizeBytes > (summarized ? MAX_SUMMARIZED_SOURCE_BYTES : MAX_FILE_BYTES)) {
-    if (isRequiredPatchableSetupFile(relativePath)) {
-      throw setupContextLimitError(relativePath, `it exceeds the ${MAX_FILE_BYTES}-byte per-file limit`);
+  const summarized = !nativeKind && isSummarizedSetupFile(relativePath);
+  if (sizeBytes > (summarized ? MAX_SUMMARIZED_SOURCE_BYTES : MAX_SETUP_FILE_BYTES)) {
+    if (nativeKind || isRequiredPatchableSetupFile(relativePath)) {
+      throw setupContextLimitError(relativePath, `it exceeds the ${MAX_SETUP_FILE_BYTES}-byte per-file limit`);
     }
     return null;
   }
   const rawContent = inspected.content;
-  const kind = setupFileKind(relativePath);
+  const kind = nativeKind || setupFileKind(relativePath);
   if (!summarized) {
     assertSafeAiSetupContent(relativePath, rawContent);
   }
   const content = summarized
     ? summarizeContextContent(relativePath, rawContent, sizeBytes)
     : rawContent;
+  snapshot?.set(relativePath, sha256(rawContent));
   return {
     kind,
     path: relativePath,
@@ -350,12 +361,18 @@ const readSetupFile = (projectRoot: string, relativePath: string): AiSetupPlanFi
   };
 };
 
+type NativeSetupScanContext = Awaited<ReturnType<typeof collectNativeSetupContext>> & {
+  snapshot: Map<string, string | null>;
+};
+
 const collectSetupFiles = (
   projectRoot: string,
   projectType: AiSetupProjectType,
   dynamicExpoConfigFile: string | null,
   iosSceneEntrypoint?: string,
+  nativeContext?: NativeSetupScanContext,
 ): AiSetupPlanFile[] => {
+  const snapshot = nativeContext?.snapshot;
   const relativePaths: string[] = [
     'package.json',
     ...SETUP_CONFIG_FILES.filter(relativePath =>
@@ -368,7 +385,7 @@ const collectSetupFiles = (
   if (projectType === 'expo' && dynamicExpoConfigFile) {
     relativePaths.push(dynamicExpoConfigFile);
   }
-  if (projectType === 'bare') {
+  if (projectType === 'bare' && !snapshot) {
     for (const srcDir of ['java', 'kotlin']) {
       relativePaths.push(
         ...findFilesByName(
@@ -389,7 +406,7 @@ const collectSetupFiles = (
   const files: AiSetupPlanFile[] = [];
   let totalBytes = 0;
   for (const relativePath of [...new Set(relativePaths)]) {
-    const file = readSetupFile(projectRoot, relativePath);
+    const file = readSetupFile(projectRoot, relativePath, undefined, snapshot);
     if (!file) continue;
     const bytes = Buffer.byteLength(file.content, 'utf8');
     if (totalBytes + bytes > MAX_TOTAL_BYTES) {
@@ -399,10 +416,29 @@ const collectSetupFiles = (
           `including it would exceed the ${MAX_TOTAL_BYTES}-byte total context limit`,
         );
       }
+      snapshot?.delete(relativePath);
       continue;
     }
     totalBytes += bytes;
     files.push(file);
+  }
+  if (nativeContext) {
+    for (const source of nativeContext.sources) {
+      const file = readSetupFile(projectRoot, source.path, source.kind, snapshot);
+      if (!file) throw setupContextLimitError(source.path, 'it changed during discovery');
+      totalBytes += Buffer.byteLength(file.content, 'utf8');
+      if (totalBytes > MAX_TOTAL_BYTES) {
+        throw setupContextLimitError(file.path, 'the native setup context exceeds the size limit');
+      }
+      files.push(file);
+    }
+    for (const { path, content } of nativeContext.support) {
+      const bytes = Buffer.byteLength(content, 'utf8');
+      if (totalBytes + bytes > MAX_TOTAL_BYTES) continue;
+      assertSafeAiSetupContent(path, content);
+      files.push({ kind: 'native_support', path, content, sha256: sha256(content) });
+      totalBytes += bytes;
+    }
   }
   return files;
 };
@@ -433,9 +469,10 @@ const detectSetupSignals = (
   projectRoot: string,
   projectType: AiSetupProjectType,
   files: AiSetupPlanFile[],
+  nativePlanningV2: boolean,
 ) => {
   const { pkg, dependencies } = readPackageSignals(projectRoot);
-  const content = files.map(file => file.content).join('\n');
+  const content = nativePlanningV2 ? '' : files.map(file => file.content).join('\n');
   const expoVersion = dependencies.expo || null;
   const hasBundleDropDependency = Boolean(
     dependencies['@gfean/react-native-bundle-drop'] || dependencies['react-native-bundle-drop'],
@@ -453,9 +490,11 @@ const detectSetupSignals = (
   );
   const androidEntrypoints = nativeEntrypoints.filter(file => file.kind === 'android_entrypoint');
   const iosEntrypoints = nativeEntrypoints.filter(file => file.kind === 'ios_entrypoint');
-  const hasAndroidDirectory = inspectProjectDirectory(projectRoot, 'android');
-  const hasIosDirectory = inspectProjectDirectory(projectRoot, 'ios');
-  const hasBareNativeIntegration =
+  const hasAndroidDirectory = nativePlanningV2
+    ? androidEntrypoints.length > 0 : inspectProjectDirectory(projectRoot, 'android');
+  const hasIosDirectory = nativePlanningV2
+    ? iosEntrypoints.length > 0 : inspectProjectDirectory(projectRoot, 'ios');
+  const hasBareNativeIntegration = !nativePlanningV2 && (
     (hasAndroidDirectory || hasIosDirectory) &&
     (!hasAndroidDirectory || androidEntrypoints.length === 1) &&
     (!hasIosDirectory || iosEntrypoints.length === 1) &&
@@ -463,7 +502,8 @@ const detectSetupSignals = (
       file.kind === 'android_entrypoint'
         ? hasBareAndroidStartupIntegration(file.content)
         : hasBareIosStartupIntegration(file.path, file.content),
-    );
+    )
+  );
   const hasBundleDropIntegration = projectType === 'expo'
     ? hasBundleDropExpoPlugin
     : hasBareNativeIntegration;
@@ -473,6 +513,7 @@ const detectSetupSignals = (
     : /(?:["']jsEngine["']|\bjsEngine)\s*:\s*["']hermes["']/.test(content)
       ? 'hermes' as const
       : 'unknown' as const;
+  const declaresCodePush = Boolean(dependencies['react-native-code-push']);
   const signals = [
     projectType === 'expo' ? 'expoProject' : 'bareProject',
     hasIosDirectory ? 'iosDirectory' : '',
@@ -480,7 +521,7 @@ const detectSetupSignals = (
     expoUpdatesOwnership.packageIsInstalled || expoUpdatesOwnership.packageIsDeclared
       ? 'expoUpdatesDependency'
       : '',
-    dependencies['react-native-code-push'] ? 'codePushDependency' : '',
+    declaresCodePush ? 'codePushDependency' : '',
     pkg.main === 'expo-router/entry' || dependencies['expo-router'] ? 'expoRouter' : '',
     hasBundleDropExpoPlugin ? 'expoBundleDropPlugin' : '',
   ].filter(Boolean);
@@ -492,7 +533,9 @@ const detectSetupSignals = (
       ? resolveInstalledPackageVersion(projectRoot, 'expo') || expoVersion
       : null,
     bundleDropStatus:
-      hasBundleDropDependency && hasBundleDropConfig && hasBundleDropIntegration
+      nativePlanningV2 && !hasBundleDropDependency && !hasBundleDropConfig
+        ? 'absent' as const
+        : hasBundleDropDependency && hasBundleDropConfig && hasBundleDropIntegration
         ? 'configured' as const
         : 'partial' as const,
     hasNativeDirectories: hasIosDirectory || hasAndroidDirectory,
@@ -500,7 +543,7 @@ const detectSetupSignals = (
     jsEngine: configuredEngine,
     expoUpdatesStatus: expoUpdatesOwnership.state,
     codePushDetected: Boolean(
-      dependencies['react-native-code-push'] || /\bCodePush\b|codepush\.gradle/.test(content),
+      declaresCodePush || /\bCodePush\b|codepush\.gradle/.test(content),
     ),
     signals,
   };
@@ -515,19 +558,15 @@ const detectSetupSignals = (
   return detected;
 };
 
-export function scanProjectForAiSetup(
-  projectType: AiSetupProjectType,
-  startDir = process.cwd(),
-  virtualConfig?: {
-    content: string;
-    serverUrl: string;
-    orgSlug: string;
-    projectSlug: string;
-    authToken: string;
-  },
-  iosSceneEntrypoint?: string,
-): AiSetupScannerResult {
-  const projectRoot = findProjectRoot(startDir);
+type VirtualSetupConfig = {
+  content: string;
+  serverUrl: string;
+  orgSlug: string;
+  projectSlug: string;
+  authToken: string;
+};
+
+function readAiSetupConnection(projectRoot: string, virtualConfig?: VirtualSetupConfig) {
   const configPath = path.join(projectRoot, 'bundle.drop.config.js');
   const configFile = inspectProjectFile(projectRoot, 'bundle.drop.config.js');
   if (!configFile.exists && !virtualConfig) {
@@ -548,7 +587,18 @@ export function scanProjectForAiSetup(
   if (!isTrustedAiPlanningServer(serverUrl)) {
     throw new Error(`Refusing to send project files to untrusted AI planning server: ${serverUrl}.`);
   }
+  return { serverUrl, orgSlug, projectSlug, authToken: virtualConfig?.authToken || readAuthToken() };
+}
 
+function buildSetupScan(
+  projectType: AiSetupProjectType,
+  projectRoot: string,
+  virtualConfig?: VirtualSetupConfig,
+  iosSceneEntrypoint?: string,
+  nativeContext?: NativeSetupScanContext,
+): AiSetupScannerResult {
+  const snapshot = nativeContext?.snapshot;
+  const { serverUrl, orgSlug, projectSlug, authToken } = readAiSetupConnection(projectRoot, virtualConfig);
   if (projectType === 'expo') {
     for (const relativePath of ['package.json', 'app.json', ...SETUP_CONFIG_FILES.filter(
       file => file.startsWith('app.config.'),
@@ -571,8 +621,8 @@ export function scanProjectForAiSetup(
         'No context was shared and no files were changed.',
     );
   }
-  const files = collectSetupFiles(projectRoot, projectType, dynamicExpoConfigFile, iosSceneEntrypoint);
-  if (projectType === 'bare') {
+  const files = collectSetupFiles(projectRoot, projectType, dynamicExpoConfigFile, iosSceneEntrypoint, nativeContext);
+  if (projectType === 'bare' && !snapshot) {
     for (const platform of ['android', 'ios'] as const) {
       if (platform === 'ios' && iosSceneEntrypoint) continue;
       const kind = platform === 'android' ? 'android_entrypoint' : 'ios_entrypoint';
@@ -593,6 +643,7 @@ export function scanProjectForAiSetup(
     }
   }
   if (virtualConfig && !files.some(file => file.kind === 'bundle_drop_config')) {
+    snapshot?.set('bundle.drop.config.js', null);
     const summarizedConfig = summarizeContextContent(
       'bundle.drop.config.js',
       virtualConfig.content,
@@ -610,14 +661,46 @@ export function scanProjectForAiSetup(
     serverUrl,
     orgSlug,
     projectSlug,
-    authToken: virtualConfig?.authToken || readAuthToken(),
+    authToken,
     request: {
       schemaVersion: 1,
       orgSlug,
       projectSlug,
       projectType,
-      detected: detectSetupSignals(projectRoot, projectType, files),
+      detected: detectSetupSignals(projectRoot, projectType, files, Boolean(snapshot)),
       files,
+    },
+  };
+}
+
+export function scanProjectForAiSetup(
+  projectType: AiSetupProjectType,
+  startDir = process.cwd(),
+  virtualConfig?: VirtualSetupConfig,
+  iosSceneEntrypoint?: string,
+): AiSetupScannerResult {
+  return buildSetupScan(projectType, findProjectRoot(startDir), virtualConfig, iosSceneEntrypoint);
+}
+
+export async function scanProjectForAiSetupV2(
+  projectRoot: string,
+  virtualConfig?: VirtualSetupConfig,
+): Promise<AiSetupScannerResultV2> {
+  const nativeContext = await collectNativeSetupContext(projectRoot);
+  const snapshot = new Map<string, string | null>(nativeContext.metadataSnapshot);
+  const scan = buildSetupScan('bare', projectRoot, virtualConfig, undefined, { ...nativeContext, snapshot });
+  const nativeEditPaths = scan.request.files
+    .filter(file => file.kind === 'android_entrypoint' || file.kind === 'ios_entrypoint')
+    .map(file => file.path);
+  return {
+    ...scan,
+    snapshot,
+    nativeInventory: nativeContext.inventory,
+    request: {
+      ...scan.request,
+      schemaVersion: 2,
+      projectType: 'bare',
+      nativeEditPaths,
     },
   };
 }

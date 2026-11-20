@@ -64,11 +64,20 @@ export type DependencyMigrationBackup = {
   backupDir: string;
   files: string[];
   possibleCreatedFiles: string[];
+  packageManifestBackup?: string;
 };
+
+const dependencyBackupPath = (file: string, backup: DependencyMigrationBackup) =>
+  file === 'package.json' ? backup.packageManifestBackup ?? file : file;
 
 export function restoreDependencyMigration(backup: DependencyMigrationBackup) {
   for (const file of backup.files) {
-    restoreProjectFile(backup.projectRoot, backup.backupDir, file);
+    restoreProjectFile(
+      backup.projectRoot,
+      backup.backupDir,
+      file,
+      dependencyBackupPath(file, backup),
+    );
   }
   for (const file of backup.possibleCreatedFiles) {
     if (!backup.files.includes(file)) {
@@ -81,8 +90,9 @@ const removeDependencyWithPackageManager = (params: {
   projectRoot: string;
   dependency: string;
   backupName: string;
+  packageManifestBackup?: string;
 }): DependencyMigrationBackup => {
-  const { projectRoot, dependency, backupName } = params;
+  const { projectRoot, dependency, backupName, packageManifestBackup } = params;
   const manager = detectPackageManager(projectRoot);
   const command = dependencyRemovalCommand(manager, dependency);
   const files = ['package.json', ...LOCKFILES[manager]].filter(file =>
@@ -93,11 +103,12 @@ const removeDependencyWithPackageManager = (params: {
     backupDir: createSafeBackupDirectory(projectRoot, backupName),
     files,
     possibleCreatedFiles: LOCKFILES[manager],
+    packageManifestBackup,
   };
   for (const file of files) {
     const target = inspectProjectFile(projectRoot, file);
     if (!target.exists) throw new Error(`Package file disappeared before migration: ${file}`);
-    writeBackupFile(backup.backupDir, file, target.content, target.mode);
+    writeBackupFile(backup.backupDir, dependencyBackupPath(file, backup), target.content, target.mode);
   }
 
   const result = spawnSync(command[0], command.slice(1), {
@@ -149,5 +160,7 @@ export function removeCodePushWithPackageManager(projectRoot: string): Dependenc
     projectRoot,
     dependency: 'react-native-code-push',
     backupName: 'code-push',
+    // Older Metro versions discover package.json inside backup directories.
+    packageManifestBackup: 'package.json.bak',
   });
 }

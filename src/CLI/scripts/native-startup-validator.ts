@@ -593,6 +593,34 @@ const splitTopLevelArguments = (body: string) => {
   return parts;
 };
 
+const hasInlineReactHostResolver = (nativeCode: string) => {
+  const [reactHost] = authoritativeReactHostBlocks(nativeCode);
+  if (!reactHost) return false;
+  const body = nativeCode.slice(reactHost.bodyStart, reactHost.bodyEnd);
+  return hasAuthoritativeLazyHostCall(body, argumentsBody => {
+    const paths = splitTopLevelArguments(argumentsBody).filter(argument =>
+      /^jsBundleFilePath\s*=/.test(argument),
+    );
+    if (paths.length !== 1) return false;
+    const debugGuard = /^jsBundleFilePath\s*=\s*if\s*\(\s*BuildConfig\.DEBUG\s*\)\s*(?:\{\s*null\s*\}|null\b)\s*else\b\s*/;
+    const release = paths[0].replace(debugGuard, '');
+    if (release === paths[0]) return false;
+    const expression = release.startsWith('{') && release.endsWith('}')
+      ? release.slice(1, -1).trim()
+      : release;
+    const [call] = findCallSites(expression, 'BundleDropModule.resolveJSBundleFile');
+    if (
+      !call ||
+      !['', 'com.bundledrop.'].includes(expression.slice(0, call.start)) ||
+      expression.slice(call.end).trim()
+    ) return false;
+
+    const [context, fallback, ...rest] = splitTopLevelArguments(call.argumentsBody);
+    return !rest.length && fallback === 'null' &&
+      /^(?:applicationContext|this(?:@MainApplication)?|getApplicationContext\(\s*\))$/.test(context);
+  });
+};
+
 const hasValidAndroidModuleResolverCall = (
   nativeCode: string,
   startup: NonNullable<ReturnType<typeof androidStartupMethod>>,
@@ -830,7 +858,10 @@ const resolverFeedsReturnedValue = (
   return hasValueFlow && returnIndices.every(index => controlledReturns.has(index));
 };
 
-export const hasBareAndroidStartupIntegration = (code: string) => {
+export const hasBareAndroidStartupIntegration = (
+  code: string,
+  { checkInlineReactHost = false }: { checkInlineReactHost?: boolean } = {},
+) => {
   if (hasNativeCodePushResidue(code)) return false;
   const nativeCode = stripCommentsAndStrings(code);
   const mainApplication = findNamedType(nativeCode, 'MainApplication');
@@ -859,6 +890,9 @@ export const hasBareAndroidStartupIntegration = (code: string) => {
     return true;
   }
   if (!hasExactAndroidModuleReference(nativeCode)) return false;
+  if (checkInlineReactHost && mainApplication && hasInlineReactHostResolver(nativeCode)) {
+    return hasAndroidLifecycleIntegrity(nativeCode, mainApplication);
+  }
 
   if (
     !startup ||

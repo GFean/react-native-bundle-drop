@@ -536,7 +536,7 @@ const checkBareStartupIntegration = async (
   const hasIntegration = entrypoints.length === 1 && entrypoints.every(filePath => {
     const content = fs.readFileSync(filePath, 'utf8');
     return platform === 'android'
-      ? hasBareAndroidStartupIntegration(content)
+      ? hasBareAndroidStartupIntegration(content, { checkInlineReactHost: true })
       : hasBareIosStartupIntegration(filePath, content);
   }) && !authorityIssue;
   return {

@@ -38,6 +38,7 @@ export function applySetupPatchPlans(params: {
   projectType: AiSetupProjectType;
   changes: AiPatchPlan[];
   iosSceneEntrypoint?: string;
+  verifiedNativePaths?: ReadonlySet<string>;
 }): SetupApplyResult {
   const result: SetupApplyResult = {
     projectRoot: params.projectRoot,
@@ -48,7 +49,9 @@ export function applySetupPatchPlans(params: {
   try {
     for (const change of params.changes) {
       if (!isSafeRelativePath(change.file) ||
-          !isAllowedSetupFile(params.projectType, change.file, params.iosSceneEntrypoint)) {
+          !(params.verifiedNativePaths
+            ? params.projectType === 'bare' && params.verifiedNativePaths.has(change.file)
+            : isAllowedSetupFile(params.projectType, change.file, params.iosSceneEntrypoint))) {
         throw new Error(`Refusing to write AI setup plan outside its allowlist: ${change.file}`);
       }
       const target = inspectProjectFile(params.projectRoot, change.file);
