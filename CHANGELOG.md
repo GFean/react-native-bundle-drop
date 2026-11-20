@@ -5,6 +5,13 @@ All notable changes to this package are documented here.
 This project uses [Conventional Commits](https://www.conventionalcommits.org/) and
 [release-please](https://github.com/googleapis/release-please) to prepare releases.
 
+## [0.13.1](https://github.com/GFean/react-native-bundle-drop/compare/v0.13.0...v0.13.1) (2026-11-20)
+
+
+### Bug Fixes
+
+* **fingerprint:** support React Native 0.88.1 CLI exports ([#72](https://github.com/GFean/react-native-bundle-drop/issues/72)) ([fadb8e8](https://github.com/GFean/react-native-bundle-drop/commit/fadb8e80e1c404eb566175c8b054c700445bea74))
+
 ## [0.13.0](https://github.com/GFean/react-native-bundle-drop/compare/v0.12.1...v0.13.0) (2026-11-20)
 
 
