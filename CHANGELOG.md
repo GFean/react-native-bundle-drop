@@ -5,6 +5,13 @@ All notable changes to this package are documented here.
 This project uses [Conventional Commits](https://www.conventionalcommits.org/) and
 [release-please](https://github.com/googleapis/release-please) to prepare releases.
 
+## [0.13.0](https://github.com/GFean/react-native-bundle-drop/compare/v0.12.1...v0.13.0) (2026-11-20)
+
+
+### Features
+
+* **cli:** expand AI setup and support Expo 58 and React Native 0.88 ([#70](https://github.com/GFean/react-native-bundle-drop/issues/70)) ([80b83ae](https://github.com/GFean/react-native-bundle-drop/commit/80b83ae4a67d5b95a2f4162b7c182fe599a255dc))
+
 ## [0.12.1](https://github.com/GFean/react-native-bundle-drop/compare/v0.12.0...v0.12.1) (2026-11-19)
 
 
