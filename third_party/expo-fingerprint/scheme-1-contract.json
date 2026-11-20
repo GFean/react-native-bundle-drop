@@ -73,7 +73,7 @@
     "third_party/expo-fingerprint/src/utils/Path.ts": "43deb836013f9a6925273cc94ce1aea5d51317366cb5f431e8e0d2cffe629856",
     "third_party/expo-fingerprint/src/utils/Predicates.ts": "dcc4f4eee48d663761c33cd340db7651a2b70793a8549a28e9218f9027c40597",
     "third_party/expo-fingerprint/src/utils/Profile.ts": "6eb0c5b828ff90e4cfc84fb7c6b22b2a759d4eade8eb8081572bdede989764ea",
-    "third_party/expo-fingerprint/src/utils/Spawn.ts": "2f388022d2ae7198e1690a014b16420c68a57c14cade384d534680a805f16ac2",
+    "third_party/expo-fingerprint/src/utils/Spawn.ts": "c9a590c328d15852e342532aa4fa7e94acb398dcc73b00c153b47429de8f80ae",
     "third_party/expo-fingerprint/src/utils/SpawnIPC.ts": "cc87cac6b65564316b3805dfad539efe22896590aa4dfd1d0842b1179ded8eff",
     "third_party/expo-fingerprint/src/utils/__mocks__/SpawnIPC.ts": "79e768efbd010a2befa08e7e26fe59ed5d9189fe7354827da35ac0ce674721c6",
     "tsconfig.build.json": "4b39555531173130eceeb51f84b6411316814296b4f90d60ae42c78c19a0514b",
@@ -125,7 +125,7 @@
     "third_party/expo-fingerprint/build/utils/Path.js": "1f8929777154f6e5269c402ac5fd874456086b3a07c0bf1749294aab88e96955",
     "third_party/expo-fingerprint/build/utils/Predicates.js": "f1e0a1d5617d9da68db380a073332d4cb9b7a24bbbbc6f9e5cb62dda4a496e47",
     "third_party/expo-fingerprint/build/utils/Profile.js": "7662c876f3849203ec7995aa84e27ab0cab8dc5e4cb5d408b4d55bb2904166bb",
-    "third_party/expo-fingerprint/build/utils/Spawn.js": "2fd859bf5e540f37eaf738151ca8d9749e37e821576682cc37d202d667981e3d",
+    "third_party/expo-fingerprint/build/utils/Spawn.js": "032393d3190449f585a01c7bd256be4687b30dac21f26f3da1032c15662bf8e4",
     "third_party/expo-fingerprint/build/utils/SpawnIPC.js": "c7825ef57e9dd47b19beaa527bcd860abc79d8ddc29bccb3c2938416366b7cef"
   },
   "baselineRevision": "0.11.0"
