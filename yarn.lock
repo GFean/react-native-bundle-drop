@@ -653,7 +653,7 @@ __metadata:
     "@types/react": ^18.2.66
     "@types/react-native": ^0.73.0
     adm-zip: 0.6.1
-    axios: 1.21.0
+    axios: 1.21.1
     chalk: 4.1.2
     commander: 14.0.3
     debug: 4.4.3
@@ -664,18 +664,18 @@ __metadata:
     figures: 3.2.0
     form-data: 4.0.6
     fs-extra: 11.4.1
-    glob: 14.0.3
+    glob: 14.0.6
     ignore: 5.3.2
     jest: ^29.7.0
-    minimatch: 11.0.3
-    plist: 5.0.0
+    minimatch: 11.0.9
+    plist: 5.1.2
     prompts: 2.4.2
     react: ^18.3.1
     react-native: ">=0.71.0"
     react-test-renderer: ^18.3.1
     resolve-from: 5.0.0
     rimraf: ^6.1.4
-    semver: 7.7.4
+    semver: 7.8.6
     ts-jest: ^29.4.15
     ts-node: ^10.9.2
     typescript: ^5.9.3
@@ -704,6 +704,13 @@ __metadata:
   version: 1.0.3
   resolution: "@isaacs/nonrecursive-glob-match@npm:1.0.3"
   checksum: 99491d5f383d273d67899112533235eb82a1bc2662901d107cca6fec98161dfbc8cc781ab3632f8e9023821892a9a4bcc4d5a38c06e26d201c764e6f5c0d7656
+  languageName: node
+  linkType: hard
+
+"@isaacs/nonrecursive-glob-match@npm:^1.1.0":
+  version: 1.1.0
+  resolution: "@isaacs/nonrecursive-glob-match@npm:1.1.0"
+  checksum: 6985982c2d84de5af54369b77f973a1829e5e2313749b4438445f5b23bd054d2e84763a32eccc41fd71a1b28327d489df9f5c49d0a35cce853494913d993ae18
   languageName: node
   linkType: hard
 
@@ -1675,15 +1682,15 @@ __metadata:
   languageName: node
   linkType: hard
 
-"axios@npm:1.21.0":
-  version: 1.21.0
-  resolution: "axios@npm:1.21.0"
+"axios@npm:1.21.1":
+  version: 1.21.1
+  resolution: "axios@npm:1.21.1"
   dependencies:
-    follow-redirects: ^1.16.0
+    follow-redirects: ^1.16.2
     form-data: ^4.0.6
     https-proxy-agent: ^5.0.1
     proxy-from-env: ^2.1.0
-  checksum: d9858b39b6e382ac44967621ba9da1910e5f8dfb84c1866b16376f772eb18fa2544f70e1e6573fb90936192d2227277c3d5013db8df6c7002c940743f5f5bf64
+  checksum: c2e05c1dcf5c10945ca5ebe20550539dbec1a526843851f9a9a52b7a0b8bd1dbcfdcd5c3d016d62c3c73b408ece7d9ee1595bc8f3480b1738661e9b9460c1cd7
   languageName: node
   linkType: hard
 
@@ -2586,13 +2593,13 @@ __metadata:
   languageName: node
   linkType: hard
 
-"follow-redirects@npm:^1.16.0":
-  version: 1.16.2
-  resolution: "follow-redirects@npm:1.16.2"
+"follow-redirects@npm:^1.16.2":
+  version: 1.16.3
+  resolution: "follow-redirects@npm:1.16.3"
   peerDependenciesMeta:
     debug:
       optional: true
-  checksum: 08f5c20c94945cd35d1b135b560cce7eb597c5f7b758f196467ac75b99ab7c28cb4fe28030467ed5ba386499a48030d804d47f559d32f103ad11336ed5402086
+  checksum: 5500c44e473b8eb8f85ce43703f6fa93ffe63a2943dfca479ead0f08c6ad756b75696e5b8a654446b01feb0e63dd0c4f0192a8e2049c43e523567e7a1835aff3
   languageName: node
   linkType: hard
 
@@ -2716,7 +2723,18 @@ __metadata:
   languageName: node
   linkType: hard
 
-"glob@npm:14.0.3, glob@npm:^14.0.3":
+"glob@npm:14.0.6":
+  version: 14.0.6
+  resolution: "glob@npm:14.0.6"
+  dependencies:
+    minimatch: ^11.0.5
+    minipass: ^7.1.3
+    path-scurry: ^3.0.0
+  checksum: 455163cd38c758ff11479fd8c920df5cf979f8aea12cfd60510e05cc6fbe66b2515ccd2732d8a6d575dee215ad031040f70744fa0b570641c0bc0d20f9b10325
+  languageName: node
+  linkType: hard
+
+"glob@npm:^14.0.3":
   version: 14.0.3
   resolution: "glob@npm:14.0.3"
   dependencies:
@@ -4272,7 +4290,17 @@ __metadata:
   languageName: node
   linkType: hard
 
-"minimatch@npm:11.0.3, minimatch@npm:^11.0.2":
+"minimatch@npm:11.0.9, minimatch@npm:^11.0.5":
+  version: 11.0.9
+  resolution: "minimatch@npm:11.0.9"
+  dependencies:
+    "@isaacs/nonrecursive-glob-match": ^1.1.0
+    brace-expansion: ^5.0.12
+  checksum: 740254a7cd0ae37f4fb736d58f980791656d82a39528ac82ee0033d16e5df801c62b96b6d0a74aadc8a635fadfac6ff257779e6f36d0207fe9da0bc3c7f8521f
+  languageName: node
+  linkType: hard
+
+"minimatch@npm:^11.0.2":
   version: 11.0.3
   resolution: "minimatch@npm:11.0.3"
   dependencies:
@@ -4646,13 +4674,13 @@ __metadata:
   languageName: node
   linkType: hard
 
-"plist@npm:5.0.0":
-  version: 5.0.0
-  resolution: "plist@npm:5.0.0"
+"plist@npm:5.1.2":
+  version: 5.1.2
+  resolution: "plist@npm:5.1.2"
   dependencies:
     "@xmldom/xmldom": ^0.9.10
     xmlbuilder: ^15.1.1
-  checksum: e495209e27b5eb9bd56910d34c6446677f75f7779ec867faf239449dd340a055a761c9214af39be852bbfcdc9323bce3c306ba909fcd18fff96e39a33633e069
+  checksum: 8c647cb3935254c147baab5a217fe39bd2229566aab269184a823482a321b1ef38cca2e95b2ce8358b276cd66b7f6f4546dad9a228a7f429f58c2ee3d39ba086
   languageName: node
   linkType: hard
 
@@ -4985,12 +5013,12 @@ __metadata:
   languageName: node
   linkType: hard
 
-"semver@npm:7.7.4, semver@npm:^7.5.3, semver@npm:^7.5.4":
-  version: 7.7.4
-  resolution: "semver@npm:7.7.4"
+"semver@npm:7.8.6":
+  version: 7.8.6
+  resolution: "semver@npm:7.8.6"
   bin:
     semver: bin/semver.js
-  checksum: 9b4a6a58e98b9723fafcafa393c9d4e8edefaa60b8dfbe39e30892a3604cf1f45f52df9cfb1ae1a22b44c8b3d57fec8a9bb7b3e1645431587cb272399ede152e
+  checksum: de2584488f915435406d8e4bafda2c2b80ad42493f5ca355f30867264e3a81dc501bd59a173f304f8f40d6fb9be48b95c2de483b945a4ef3544806e28955f03b
   languageName: node
   linkType: hard
 
@@ -5009,6 +5037,15 @@ __metadata:
   bin:
     semver: bin/semver.js
   checksum: f013a3ee4607857bcd3503b6ac1d80165f7f8ea94f5d55e2d3e33df82fce487aa3313b987abf9b39e0793c83c9fc67b76c36c067625141a9f6f704ae0ea18db2
+  languageName: node
+  linkType: hard
+
+"semver@npm:^7.5.3, semver@npm:^7.5.4":
+  version: 7.7.4
+  resolution: "semver@npm:7.7.4"
+  bin:
+    semver: bin/semver.js
+  checksum: 9b4a6a58e98b9723fafcafa393c9d4e8edefaa60b8dfbe39e30892a3604cf1f45f52df9cfb1ae1a22b44c8b3d57fec8a9bb7b3e1645431587cb272399ede152e
   languageName: node
   linkType: hard
 
