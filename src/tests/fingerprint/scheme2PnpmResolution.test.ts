@@ -116,6 +116,17 @@ describe('Scheme 2 pnpm installed provenance', () => {
     expect(collect(installed)).not.toEqual(original);
   });
 
+  it('checks hoisted install state when the configured virtual store is absent', () => {
+    const installed = putPackage(`node_modules/${name}`);
+    write('node_modules/.modules.yaml', JSON.stringify({ packageManager: 'pnpm@11.24.0', virtualStoreDir: 'missing-store' }));
+    writeLock('node_modules/.pnpm/lock.yaml', first, [firstKey]);
+    writeLock('pnpm-lock.yaml', second, [secondKey]);
+
+    expect(collect(installed)).toEqual(expect.arrayContaining([
+      expect.objectContaining({ id: `dependency:${name}/android/Native.kt` }),
+    ]));
+  });
+
   it('hashes installed bytes when the escaped virtual store name matches multiple pins', () => {
     const firstPath = first.replace(/first\.tgz/g, 'split/first.tgz');
     const secondPath = second.replace(/second\.tgz/g, 'split+first.tgz');

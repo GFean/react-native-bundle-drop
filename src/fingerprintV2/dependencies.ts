@@ -172,11 +172,11 @@ function readPnpmLock(root: string, text: string): PnpmLock {
   const configuredStore = typeof layout?.virtualStoreDir === 'string' && layout.virtualStoreDir || '.pnpm';
   const store = path.resolve(modulesDirectory, configuredStore);
   const storeDirectory = fs.existsSync(store) ? fs.realpathSync(store) : undefined;
-  const installedLocks = storeDirectory ? pnpmStateDirectories(modulesDirectory, storeDirectory, layout?.packageManager)
+  const installedLocks = pnpmStateDirectories(modulesDirectory, storeDirectory ?? store, layout?.packageManager)
     .flatMap(directory => {
       const installed = readText(path.join(directory, 'lock.yaml'));
       return installed ? [pnpmPackages(installed)] : [];
-    }) : [];
+    });
   const configuredLength = Number(layout?.virtualStoreDirMaxLength);
   return {
     ...pnpmPackages(text),
