@@ -12,7 +12,7 @@ import { resolveExpoUploadIdentity } from '../CLI/scripts/expo/build-receipt';
 import { buildCanonicalArtifact } from './canonicalArtifact';
 import { runBundleScript } from './bundle';
 import { readBundleDropRuntimeSelection } from '../expo/runtimeVersion';
-import type { RuntimeCompatibilityMetadata } from './runtimeCompatibilityMetadata';
+import { selectedRuntimeCompatibility } from './runtimeCompatibilityMetadata';
 import { expoBuildNumber } from './nativeBuildNumber';
 
 const getExpoArtifactRoot = (projectRoot: string) =>
@@ -67,6 +67,11 @@ export async function exportProjectArtifact(options: ExportProjectArtifactOption
     );
   }
 
+  const runtimeCompatibility = selectedRuntimeCompatibility(
+    readBundleDropRuntimeSelection(projectRoot, options.platform),
+    buildIdentity.runtimeVersion,
+  );
+
   const distDir = getExpoArtifactRoot(projectRoot);
   const outputDir = path.join(distDir, `expo-artifacts-${options.platform}`);
   const expoOutput = path.join(distDir, `expo-export-${options.platform}`);
@@ -85,13 +90,6 @@ export async function exportProjectArtifact(options: ExportProjectArtifactOption
   fs.copyFileSync(exported.bundlePath, bundlePath);
   fs.copyFileSync(exported.sourceMapPath, sourceMapPath);
 
-  const selection = readBundleDropRuntimeSelection(projectRoot, options.platform);
-  const runtimeCompatibility: RuntimeCompatibilityMetadata = selection.source === 'fingerprint'
-    ? {
-        compatibilitySource: 'fingerprint',
-        fingerprint: { schemeVersion: 1, hash: buildIdentity.runtimeVersion, manualBoundary: selection.boundary },
-      }
-    : { compatibilitySource: 'manual' };
   const artifact = buildCanonicalArtifact({
     platform: options.platform,
     appVersion: buildIdentity.appVersion,

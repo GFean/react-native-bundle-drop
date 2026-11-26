@@ -138,9 +138,9 @@ describe('scripts/bundle', () => {
 
   it('packages the independently calculated fingerprint in a bare OTA manifest', () => {
     fs.writeFileSync(path.join(tempProjectDir, 'bundle.drop.config.js'), 'module.exports = { runtimeVersion: { compatibilitySource: "fingerprint" }, hermesBytecode: false };');
-    mockResolveRuntime.mockReturnValue({ source: 'bundle-drop', runtimeVersion: 'bdfp1-test' });
+    mockResolveRuntime.mockReturnValue({ source: 'bundle-drop', runtimeVersion: 'bdfp2-test' });
     const result = runBundleScript({ platform: 'android', cwd: tempProjectDir });
-    expect(JSON.parse(fs.readFileSync(result.manifestPath, 'utf8')).runtimeVersion).toBe('bdfp1-test');
+    expect(JSON.parse(fs.readFileSync(result.manifestPath, 'utf8')).runtimeVersion).toBe('bdfp2-test');
   });
   it('finds the native project root from nested directories', () => {
     const nestedDir = path.join(tempProjectDir, 'android', 'app', 'src');

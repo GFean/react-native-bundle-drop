@@ -2,8 +2,8 @@ import path from 'path';
 
 import { ExpoIntegrationError } from './errors';
 import type { MobilePlatform } from './types';
-import { selectRuntimeVersion } from '../fingerprint/config';
-import { calculateFingerprintSync } from '../fingerprint/client';
+import { selectRuntimeCompatibility } from '../runtime-fingerprint/selection';
+import { calculateRuntimeFingerprint } from '../runtime-fingerprint/calculate';
 
 export type BundleDropRuntimeVersionAuthority =
   | {
@@ -39,7 +39,7 @@ const loadBundleDropConfig = (projectRoot: string): Record<string, any> => {
  * `runtimeVersion: { source: 'expo' }` opt-in.
  */
 export function readBundleDropRuntimeSelection(projectRoot: string, platform: MobilePlatform) {
-  return selectRuntimeVersion(loadBundleDropConfig(projectRoot).runtimeVersion, platform);
+  return selectRuntimeCompatibility(loadBundleDropConfig(projectRoot).runtimeVersion, platform);
 }
 
 export function resolveBundleDropRuntimeVersionAuthority(
@@ -53,7 +53,7 @@ export function resolveBundleDropRuntimeVersionAuthority(
   return {
     source: 'bundle-drop',
     runtimeVersion: selection.source === 'fingerprint'
-      ? calculateFingerprintSync(projectRoot, platform).runtimeVersion
+      ? calculateRuntimeFingerprint(projectRoot, platform).runtimeVersion
       : selection.runtimeVersion,
   };
 }

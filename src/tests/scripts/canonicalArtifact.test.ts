@@ -131,8 +131,8 @@ describe('buildCanonicalArtifact', () => {
   });
 
   it('hashes explicit fingerprint display metadata without changing the runtime lane', () => {
-    const runtimeVersion = `bdfp1-${'a'.repeat(64)}`;
-    const fingerprint = { schemeVersion: 1 as const, hash: runtimeVersion, manualBoundary: '4.0.27' };
+    const runtimeVersion = `bdfp2-${'a'.repeat(64)}`;
+    const fingerprint = { schemeVersion: 2 as const, hash: runtimeVersion, manualBoundary: '4.0.27' };
     const artifact = buildCanonicalArtifact({
       platform: 'ios', appVersion: '1.2.3', runtimeVersion,
       runtimeCompatibility: { compatibilitySource: 'fingerprint', fingerprint },

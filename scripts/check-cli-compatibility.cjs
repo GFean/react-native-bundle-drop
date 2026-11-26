@@ -52,17 +52,10 @@ try {
   const redirects = require(require.resolve('follow-redirects/package.json', { paths: [axiosRoot] }));
   const semver = require(require.resolve('semver', { paths: [installed] }));
   assert(semver.gte(redirects.version, '1.16.2'), 'Fresh packed consumer must resolve the patched redirect transport');
-  const installedGlob = require(require.resolve('glob/package.json', { paths: [installed] }));
-  const matcherPath = require.resolve('minimatch', { paths: [installed] });
-  const { Minimatch } = require(matcherPath);
-  assert.equal(installedGlob.version, '14.0.3');
-  assert.equal(require(require.resolve('minimatch/package.json', { paths: [installed] })).version, '11.0.3');
-  assert(new Minimatch('**/a/b/c/**/d/**', { dot: true }).match('a/b/c/d/file.kt'));
-  assert(!new Minimatch('native/*(x)', { dot: true }).match('native/'));
   const help = run([cli, '--help'], fixture, 0, { FORCE_COLOR: '0' });
   for (const group of ['Setup', 'Analysis', 'Releases', 'Account']) assert.ok(help.includes(group), group);
   assert.ok(!/\u001b\[/.test(help), 'FORCE_COLOR=0 must suppress ANSI colors');
-  for (const command of ['init', 'sync', 'doctor', 'sight', 'upload', 'eas-receipt', 'login', 'logout', 'whoami']) {
+  for (const command of ['init', 'sync', 'doctor', 'sight', 'fingerprint', 'upload', 'eas-receipt', 'login', 'logout', 'whoami']) {
     assert.ok(run([cli, command, '--help'], fixture).includes('Usage:'), command);
   }
   assert.ok(run([cli, 'help', 'sight'], fixture).includes('--compare'));
@@ -87,8 +80,6 @@ try {
     const reject = `require(process.argv[1]).readXmlPlist(process.argv[2]).then(()=>{process.exitCode=1},()=>{});`;
     run(['-e', reject, reader, xmlFile], fixture);
   }
-  // The installed package must preserve scheme1 even with a fresh npm dependency graph.
-  const goldens = require(path.join(root, 'src/tests/fingerprint/scheme-1-golden.json'));
   const write = (relative, contents) => {
     const file = path.join(fixture, relative);
     fs.mkdirSync(path.dirname(file), { recursive: true });
@@ -98,23 +89,38 @@ try {
   write('node_modules/react-native/package.json', '{"name":"react-native","version":"0.78.3"}');
   write('node_modules/react-native/cli.js', 'console.log(JSON.stringify({root:process.cwd(),dependencies:{}}));');
   write('android/app/build.gradle', 'android {\n defaultConfig {\n versionCode 1\n targetSdk 35\n }\n}\n');
-  write('android/app/src/main/Native.kt', 'fun feature() = false\n');
-  const setRuntime = (platform, schemeVersion = 1) => write('bundle.drop.config.js', `module.exports = ${JSON.stringify({
+  const nativeInputs = {
+    android: {
+      file: 'android/app/src/main/Native.kt',
+      contents: 'fun feature() = false\n',
+      edit: ['false', 'true'],
+    },
+    ios: {
+      file: 'ios/Fixture.xcodeproj/project.pbxproj',
+      contents: '{ objects = { ID = { buildSettings = { CURRENT_PROJECT_VERSION = 1; ENABLE_NATIVE_PROBE = NO; }; }; }; }',
+      edit: ['PROBE = NO', 'PROBE = YES'],
+    },
+  };
+  for (const { file, contents } of Object.values(nativeInputs)) write(file, contents);
+  write('legacy-fingerprint.json', JSON.stringify({
+    status: 'stable', schemeVersion: 1, runtimeVersion: `bdfp1-${'1'.repeat(64)}`,
+    sources: [{ type: 'dir', id: 'android', hash: '2'.repeat(64) }],
+  }));
+  const setRuntime = (platform, schemeVersion) => write('bundle.drop.config.js', `module.exports = ${JSON.stringify({
     projectType: 'bare', runtimeVersion: { compatibilitySource: 'fingerprint',
       fingerprint: { schemeVersion, nativeProjectMode: { [platform]: 'native' } } },
   })};`);
-  setRuntime('android');
-  const androidReport = JSON.parse(run([cli, 'fingerprint', '--platform', 'android', '--json'], fixture));
-  assert.equal(androidReport.status, 'stable');
-  assert.equal(androidReport.nativeHash, goldens.cases.bareAndroid.nativeHash);
-  assert.equal(androidReport.runtimeVersion, goldens.cases.bareAndroid.runtimeVersion);
-  write('previous-experimental-report.json', JSON.stringify({ ...androidReport, status: 'experimental' }));
-  const compared = JSON.parse(run([cli, 'fingerprint', '--platform', 'android', '--compare', 'previous-experimental-report.json', '--json'], fixture));
-  assert.deepEqual(compared.changes, []);
-  write('ios/Fixture.xcodeproj/project.pbxproj', '{ objects = { ID = { buildSettings = { CURRENT_PROJECT_VERSION = 1; ENABLE_NATIVE_PROBE = NO; }; }; }; }');
-  setRuntime('ios');
-  const iosReport = JSON.parse(run([cli, 'fingerprint', '--platform', 'ios', '--json'], fixture));
-  assert.equal(iosReport.runtimeVersion, goldens.cases.bareIos.runtimeVersion);
+  const fingerprintArgs = platform => [cli, 'fingerprint', '--platform', platform, '--json'];
+  const platforms = ['android', 'ios'];
+  const originalReports = new Map();
+  for (const platform of platforms) {
+    setRuntime(platform);
+    const report = JSON.parse(run(fingerprintArgs(platform), fixture));
+    assert.equal(report.status, 'stable');
+    assert.equal(report.schemeVersion, 2);
+    assert.match(report.runtimeVersion, /^bdfp2-[a-f0-9]{64}$/);
+    originalReports.set(platform, report);
+  }
 
   // RN 0.88.1 ships cli.js as a package binary and hides the deep import.
   write('node_modules/react-native/package.json', JSON.stringify({
@@ -125,31 +131,62 @@ try {
   assert.throws(() => projectRequire.resolve('react-native/cli.js'), { code: 'ERR_PACKAGE_PATH_NOT_EXPORTED' });
   const withoutReactNativeVersion = report =>
     report.sources.filter(source => !source.reasons.includes('package:react-native'));
-  const modernRuntimeVersions = new Map();
-  for (const [platform, legacyReport] of [['android', androidReport], ['ios', iosReport]]) {
+  const nativeWriter = path.join(installed, 'lib/CLI/scripts/native/write-runtime-identity.js');
+  for (const platform of platforms) {
     setRuntime(platform);
-    const args = [cli, 'fingerprint', '--platform', platform, '--json'];
-    const report = JSON.parse(run(args, fixture));
-    assert.equal(report.status, 'stable');
-    assert.match(report.runtimeVersion, /^bdfp1-[a-f0-9]{64}$/);
-    assert.ok(report.sources.some(source => source.id === 'react-native@0.88.1'));
-    assert.deepEqual(withoutReactNativeVersion(report), withoutReactNativeVersion(legacyReport));
+    const args = fingerprintArgs(platform);
+    const report = JSON.parse(run([...args, '--output', 'scheme-two-report.json'], fixture));
+    assert.equal(report.schemeVersion, 2);
+    assert.match(report.runtimeVersion, /^bdfp2-[a-f0-9]{64}$/);
+    assert.ok(report.sources.some(source => source.reasons.includes('package:react-native')));
+    assert.notEqual(report.runtimeVersion, originalReports.get(platform).runtimeVersion);
+    assert.deepEqual(withoutReactNativeVersion(report), withoutReactNativeVersion(originalReports.get(platform)));
+    assert.deepEqual(JSON.parse(run([...args, '--compare', 'scheme-two-report.json'], fixture)).changes, []);
+    if (platform === 'android') {
+      const comparison = JSON.parse(run([...args, '--compare', 'legacy-fingerprint.json'], fixture));
+      assert.equal(comparison.runtimeVersion, report.runtimeVersion);
+      assert.ok(comparison.changes.some(change => change.id === 'dir:android' && change.after === null));
+    }
+    const writeIdentityArgs = [nativeWriter, '--project-root', fixture, '--platform', platform];
+    const nativeIdentity = JSON.parse(run(writeIdentityArgs, fixture));
+    assert.equal(nativeIdentity.runtimeVersion, report.runtimeVersion);
+    setRuntime(platform, 2);
+    write('App.js', `export default ${JSON.stringify(platform)};`);
     assert.equal(JSON.parse(run(args, fixture)).runtimeVersion, report.runtimeVersion);
-    modernRuntimeVersions.set(platform, report.runtimeVersion);
+
+    const { file, contents, edit } = nativeInputs[platform];
+    write(file, contents.replace(...edit));
+    const edited = JSON.parse(run([...args, '--compare', 'scheme-two-report.json'], fixture));
+    assert.notEqual(edited.runtimeVersion, report.runtimeVersion);
+    assert.deepEqual(edited.changes.map(change => change.id), [`file:${file}`]);
+    assert.equal(JSON.parse(run(writeIdentityArgs, fixture)).runtimeVersion, edited.runtimeVersion);
+    write(file, contents);
+
+    setRuntime(platform, 1);
+    for (const command of [args, writeIdentityArgs]) {
+      const refusal = run(command, fixture, 1);
+      assert.match(refusal, /Scheme 1 is retired/);
+      assert.match(refusal, /0\.13\.1/);
+      assert.match(refusal, /rebuild for Scheme 2/);
+    }
   }
 
   const installedReactNative = path.join(fixture, 'node_modules/react-native');
   const linkedReactNative = path.join(temporary, 'linked-react-native');
   fs.renameSync(installedReactNative, linkedReactNative);
   fs.symlinkSync(linkedReactNative, installedReactNative, process.platform === 'win32' ? 'junction' : 'dir');
-  const linkedReport = JSON.parse(run([cli, 'fingerprint', '--platform', 'ios', '--json'], fixture, 0, {
+  setRuntime('ios');
+  const linkedReport = JSON.parse(run(fingerprintArgs('ios'), fixture));
+  assert.ok(linkedReport.sources.some(source => source.reasons.includes('localNativeDependency')));
+  const preserveSymlinksReport = JSON.parse(run(fingerprintArgs('ios'), fixture, 0, {
     NODE_OPTIONS: '--preserve-symlinks',
   }));
-  assert.equal(linkedReport.runtimeVersion, modernRuntimeVersions.get('ios'));
+  assert.deepEqual(preserveSymlinksReport, linkedReport);
 
-  setRuntime('android', 2);
+  setRuntime('android', 3);
   assert.match(run([cli, 'fingerprint', '--platform', 'android', '--json'], fixture, 1), /Unsupported fingerprint scheme/);
-  console.log('Fresh packed CLI scheme1 goldens, experimental-report comparison and unsupported-scheme refusal passed.');
+  console.log('Fresh packed CLI Scheme 2 diagnostics and native identity writer agree on both platforms.');
+  console.log('Fresh packed CLI rejects retired and unknown fingerprint schemes.');
   console.log(`Packed CLI compatibility passed: ${process.platform}, Node ${process.version}, package ${version}`);
 } finally {
   fs.rmSync(temporary, { recursive: true, force: true });

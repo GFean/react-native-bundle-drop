@@ -52,12 +52,11 @@
     "codeql:local:fast": "node scripts/run-codeql-local.cjs fast",
     "codeql:local:full": "node scripts/run-codeql-local.cjs full",
     "codeql:local:compare": "node scripts/run-codeql-local.cjs compare",
-    "verify:quick": "yarn typecheck && yarn build && yarn fingerprint:check && yarn coverage:gate && yarn test:expo:plugin && yarn package:check",
+    "verify:quick": "yarn typecheck && yarn build && yarn coverage:gate && yarn test:expo:plugin && yarn package:check",
     "verify:native": "yarn test:android && yarn test:ios",
     "verify:release": "yarn verify:quick && yarn verify:native && yarn audit:production",
     "prepack": "npm run build",
-    "prepublishOnly": "npm run verify:release",
-    "fingerprint:check": "node scripts/check-fingerprint-contract.cjs"
+    "prepublishOnly": "npm run verify:release"
   },
   "devDependencies": {
     "@types/adm-zip": "^0.6.0",
@@ -118,7 +117,6 @@
     "expo/bundle-drop-expo-gradle-plugin/src/main/**",
     "expo/ios/Sources/**",
     "README.md",
-    "third_party/expo-fingerprint/scheme-1-contract.json",
     "docs/native-fingerprint.md"
   ],
   "keywords": [
@@ -164,7 +162,7 @@
   },
   "dependencies": {
     "adm-zip": "0.6.1",
-    "axios": "1.21.0",
+    "axios": "1.21.1",
     "chalk": "4.1.2",
     "commander": "14.0.3",
     "debug": "4.4.3",
@@ -172,13 +170,13 @@
     "figures": "3.2.0",
     "form-data": "4.0.6",
     "fs-extra": "11.4.1",
-    "glob": "14.0.3",
+    "glob": "14.0.6",
     "ignore": "5.3.2",
-    "minimatch": "11.0.3",
-    "plist": "5.0.0",
+    "minimatch": "11.0.9",
+    "plist": "5.1.2",
     "prompts": "2.4.2",
     "resolve-from": "5.0.0",
-    "semver": "7.7.4"
+    "semver": "7.8.6"
   },
   "publishConfig": {
     "access": "public"

@@ -1,12 +1,16 @@
-import type { FingerprintOptions } from './types';
+import type { FingerprintOptions } from '../fingerprint/types';
+
+export const RETIRED_SCHEME_ONE_MESSAGE =
+  'Fingerprint Scheme 1 is retired in this SDK. Use the published Bundle Drop 0.13.1 with the original lockfile ' +
+  'to serve existing Scheme 1 binaries, or remove schemeVersion: 1 and rebuild for Scheme 2.';
 
 type RuntimeSelection =
   | { source: 'manual'; runtimeVersion: string }
   | { source: 'expo' }
-  | { source: 'fingerprint'; boundary: string | null; options: FingerprintOptions };
+  | { source: 'fingerprint'; boundary: string | null; options: FingerprintOptions & { schemeVersion: 2 } };
 
 /** Validate selectors once, independently of Expo/project detection. */
-export function selectRuntimeVersion(value: unknown, platform: 'ios' | 'android'): RuntimeSelection {
+export function selectRuntimeCompatibility(value: unknown, platform: 'ios' | 'android'): RuntimeSelection {
   if (!value || typeof value !== 'object' || Array.isArray(value)) {
     throw new Error(`bundle.drop.config.js must define runtimeVersion.${platform}.`);
   }
@@ -36,9 +40,9 @@ export function selectRuntimeVersion(value: unknown, platform: 'ios' | 'android'
     if (Object.keys(options).some(key => !['schemeVersion', 'nativeProjectMode', 'extraSources'].includes(key))) {
       throw new Error('Unsupported runtimeVersion.fingerprint option.');
     }
-    if (typed.schemeVersion !== undefined && typed.schemeVersion !== 1) {
-      throw new Error('Unsupported fingerprint scheme. Only scheme 1 is available.');
-    }
+    const { schemeVersion = 2 } = options as Record<string, unknown>;
+    if (schemeVersion === 1) throw new Error(RETIRED_SCHEME_ONE_MESSAGE);
+    if (schemeVersion !== 2) throw new Error('Unsupported fingerprint scheme. Use scheme 2.');
     if (typed.nativeProjectMode !== undefined) {
       if (!typed.nativeProjectMode || typeof typed.nativeProjectMode !== 'object' || Array.isArray(typed.nativeProjectMode)) {
         throw new Error('fingerprint.nativeProjectMode must be a platform map.');
@@ -50,7 +54,11 @@ export function selectRuntimeVersion(value: unknown, platform: 'ios' | 'android'
     if (typed.extraSources !== undefined && !Array.isArray(typed.extraSources)) {
       throw new Error('fingerprint.extraSources must be an array.');
     }
-    return { source: 'fingerprint', boundary: (config[platform] as string | undefined)?.trim() ?? null, options: typed };
+    return {
+      source: 'fingerprint',
+      boundary: (config[platform] as string | undefined)?.trim() ?? null,
+      options: { ...typed, schemeVersion },
+    };
   }
   if (config.fingerprint !== undefined) throw new Error('Fingerprint options require compatibilitySource: fingerprint.');
   const literal = config[platform];

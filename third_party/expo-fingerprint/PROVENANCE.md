@@ -1,17 +1,14 @@
-# Pinned Expo fingerprint adaptation — scheme 1
+# Expo fingerprint discovery adaptation
 
 - Upstream: https://github.com/expo/expo/tree/d7a68affbace544d36250aa6bdb06e34bda9e8ea/packages/%40expo/fingerprint
 - Package: `@expo/fingerprint` 0.21.5, MIT.
 - `upstream-files.json` records original file SHA-256 values before adaptation.
 - `src/` is maintained source; `scripts/build-fingerprint.cjs` produces packaged `build/` files.
 
-This is Bundle Drop scheme 1, not an Expo-compatible hash. Its complete calculation
-contract is frozen in `scheme-1-contract.json`. Version 0.11.0 revises the
-pre-release baseline for patched matching dependencies. Earlier Beta calculators
-are not interchangeable; existing Beta apps must be rebuilt with matching build
-and upload tooling. Subsequent calculation changes require a new scheme with
-retained scheme 1 behavior.
-See `docs/native-fingerprint.md` for supported inputs and validation limitations.
+Bundle Drop uses this adaptation to discover inputs for its own Scheme 2 runtime
+identity. See `docs/native-fingerprint.md` for supported inputs and migration
+guidance. The retired Scheme 1 calculator and its contract are preserved in the
+`v0.13.1` release tag.
 
 Adaptations:
 - Node subprocess/environment adapters replace direct Expo utility dependencies.
@@ -25,15 +22,13 @@ Adaptations:
   captures a project copy that an in-project CLI has already preloaded, producing
   different inputs for the same project. Evaluated config and actual plugin
   sources remain hashed; no native package source is removed by this correction.
-- Generic calculation dependencies are exact versions in `package.json` with the
-  complete resolution in `yarn.lock`. The revised pre-release baseline uses
-  minimatch 11.0.3 and glob 14.0.3 for GHSA-g3hv-75wg-m249 and
-  GHSA-3g3m-2fjr-6pw4. This intentionally adopts their updated matching semantics,
-  including multi-globstar and empty trailing extglob behavior.
+- Dependency declarations are in `package.json` with resolutions in `yarn.lock`.
+  Compatibility tests cover the installed package and matching behavior relevant
+  to Bundle Drop.
 
-Input selection, build-number normalization, exclusions, and effective identity
-construction live in the first-party `src/fingerprint/` modules and must be
-versioned together with this adaptation and its supporting dependencies.
+Input selection and effective identity construction live in the first-party
+`src/fingerprintV2/` modules. Shared build-number normalization lives in
+`src/fingerprint/`.
 
 Inherited limitations remain: this slice does not resolve Gradle artifacts,
 scan installed Pods/SwiftPM sources, interpret arbitrary build scripts, or

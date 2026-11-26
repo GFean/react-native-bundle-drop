@@ -122,20 +122,31 @@ describe('exportProjectArtifact', () => {
     expect(mockBuildCanonicalArtifact).not.toHaveBeenCalled();
   });
 
-  it('passes explicit fingerprint mode and the readable boundary to canonical metadata', async () => {
+  it('passes Scheme 2 and the readable boundary to canonical metadata', async () => {
     const root = fixture({ dependencies: { expo: '57.0.0' } });
     fs.writeFileSync(path.join(root, 'bundle.drop.config.js'), `module.exports = {
       runtimeVersion: { compatibilitySource: 'fingerprint', ios: '4.0.27', fingerprint: { nativeProjectMode: { ios: 'cng' } } }
     };`);
-    const runtimeVersion = `bdfp1-${'a'.repeat(64)}`;
+    const runtimeVersion = `bdfp2-${'a'.repeat(64)}`;
     await exportProjectArtifact({
       projectRoot: root, platform: 'ios', appVersion: '2.0.0', generateSourceMap: true,
       buildIdentity: { ...iosIdentity, runtimeVersion },
     });
     expect(mockBuildCanonicalArtifact).toHaveBeenCalledWith(expect.objectContaining({
       runtimeVersion,
-      runtimeCompatibility: { compatibilitySource: 'fingerprint', fingerprint: { schemeVersion: 1, hash: runtimeVersion, manualBoundary: '4.0.27' } },
+      runtimeCompatibility: { compatibilitySource: 'fingerprint', fingerprint: { schemeVersion: 2, hash: runtimeVersion, manualBoundary: '4.0.27' } },
     }));
+  });
+
+  it('rejects a retired fingerprint identity before starting an Expo export', async () => {
+    const root = fixture({ dependencies: { expo: '57.0.0' } });
+    fs.writeFileSync(path.join(root, 'bundle.drop.config.js'),
+      "module.exports = { runtimeVersion: { compatibilitySource: 'fingerprint' } };");
+    await expect(exportProjectArtifact({
+      projectRoot: root, platform: 'ios', appVersion: '2.0.0', generateSourceMap: true,
+      buildIdentity: { ...iosIdentity, runtimeVersion: `bdfp1-${'a'.repeat(64)}` },
+    })).rejects.toThrow(/Scheme 1 is retired.*0\.13\.1/);
+    expect(mockExportExpoProject).not.toHaveBeenCalled();
   });
 
   it('normalizes Expo export:embed output through the canonical artifact builder', async () => {
