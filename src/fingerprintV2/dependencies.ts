@@ -1,4 +1,5 @@
 import fs from 'node:fs';
+import { createHash } from 'node:crypto';
 import { createRequire } from 'node:module';
 import path from 'node:path';
 import { canonicalJson, compareText, digest, posix, projectFileSources, type Source } from './files';
@@ -14,7 +15,13 @@ type PackageJson = {
   pnpm?: { patchedDependencies?: Record<string, string> };
 };
 type NpmPackage = { name?: string; version?: string; resolved?: string; integrity?: string; link?: boolean };
-type LockEntry = { name: string; version?: string; location?: string; integrity?: string };
+type PnpmEntry = { key: string; name: string; version?: string; location: string; integrity?: string };
+type PnpmPackages = { entries: PnpmEntry[]; snapshots: string[] };
+type PnpmLock = PnpmPackages & {
+  storeDirectory?: string;
+  maxLocatorLength: number;
+  installed?: PnpmPackages;
+};
 type YarnEntry = { descriptors: string[]; version: string; location?: string; integrity?: string };
 type YarnLock = {
   entries: YarnEntry[];
@@ -25,7 +32,7 @@ type Lock = {
   root: string;
   npm?: Record<string, NpmPackage>;
   yarn?: YarnLock;
-  entries: LockEntry[];
+  pnpm?: PnpmLock;
   patchFiles: string[];
 };
 type Dependency = { name: string; packageJson: string };
@@ -108,7 +115,7 @@ function findYamlSection(text: string, name: string): string | undefined {
     .find(section => section.startsWith(`${name}:\n`));
 }
 
-function pnpmEntries(text: string): LockEntry[] {
+function pnpmEntries(text: string): PnpmEntry[] {
   const packages = findYamlSection(text, 'packages');
   if (!packages) return [];
   return packages.split(/\n(?= {2}\S)/).slice(1).flatMap(block => {
@@ -132,8 +139,108 @@ function pnpmEntries(text: string): LockEntry[] {
       // An exact Git object pins a file:// checkout irrespective of its host path.
       location = repository.startsWith('file:') ? `git:file#${commit}` : `${key} ${repository}#${commit}`;
     }
-    return [{ name, version, location, integrity: lookup('integrity') }];
+    return [{ key, name, version, location, integrity: lookup('integrity') }];
   });
+}
+
+function pnpmPackages(text: string): PnpmPackages {
+  const snapshots = (findYamlSection(text, 'snapshots') ?? '').split('\n').flatMap(line => {
+    const key = line.match(/^ {2}(\S.*):(?:\s+\{\})?\s*$/)?.[1];
+    return key ? [unquote(key).replace(/^\//, '')] : [];
+  });
+  return { entries: pnpmEntries(text), snapshots };
+}
+
+function pnpmStateDirectories(modulesDirectory: string, storeDirectory: string, packageManager: unknown): string[] {
+  const internalDirectory = path.join(modulesDirectory, '.pnpm');
+  const version = typeof packageManager === 'string' ? /^pnpm@(\d+)\.(\d+)\.(\d+)$/.exec(packageManager) : null;
+  if (!version) return [...new Set([storeDirectory, internalDirectory])];
+  const [major, minor, patch] = version.slice(1).map(Number);
+  // pnpm 10.12.1 moved its current lock into the internal .pnpm directory.
+  const usesInternalDirectory = major > 10 || (major === 10 && (minor > 12 || (minor === 12 && patch >= 1)));
+  return [usesInternalDirectory ? internalDirectory : storeDirectory];
+}
+
+function readPnpmLock(root: string, text: string): PnpmLock {
+  const modulesDirectory = path.join(root, 'node_modules');
+  const modules = readText(path.join(modulesDirectory, '.modules.yaml')) ?? '';
+  const layout = modules.trimStart().startsWith('{') ? JSON.parse(modules) : {
+    virtualStoreDir: unquote(modules.match(/^virtualStoreDir:[ \t]*(.+?)\s*$/m)?.[1] ?? ''),
+    virtualStoreDirMaxLength: unquote(modules.match(/^virtualStoreDirMaxLength:[ \t]*(.+?)\s*$/m)?.[1] ?? ''),
+    packageManager: unquote(modules.match(/^packageManager:[ \t]*(.+?)\s*$/m)?.[1] ?? ''),
+  };
+  const configuredStore = typeof layout?.virtualStoreDir === 'string' && layout.virtualStoreDir || '.pnpm';
+  const store = path.resolve(modulesDirectory, configuredStore);
+  const storeDirectory = fs.existsSync(store) ? fs.realpathSync(store) : undefined;
+  const installedLocks = storeDirectory ? pnpmStateDirectories(modulesDirectory, storeDirectory, layout?.packageManager)
+    .flatMap(directory => {
+      const installed = readText(path.join(directory, 'lock.yaml'));
+      return installed ? [pnpmPackages(installed)] : [];
+    }) : [];
+  const configuredLength = Number(layout?.virtualStoreDirMaxLength);
+  return {
+    ...pnpmPackages(text),
+    storeDirectory,
+    maxLocatorLength: Number.isSafeInteger(configuredLength) && configuredLength > 0 ? configuredLength : 120,
+    installed: installedLocks.length ? {
+      entries: installedLocks.flatMap(lock => lock.entries),
+      snapshots: installedLocks.flatMap(lock => lock.snapshots),
+    } : undefined,
+  };
+}
+
+// pnpm <=9 used lowercase base32 MD5 for virtual store names. This reproduces
+// a directory label only. Fingerprint digests always use SHA-256.
+function legacyPnpmLocatorHash(filename: string): string {
+  const bytes = createHash('md5').update(filename).digest();
+  const bits = [...bytes].map(byte => byte.toString(2).padStart(8, '0')).join('');
+  const alphabet = 'abcdefghijklmnopqrstuvwxyz234567';
+  return bits.padEnd(130, '0').match(/.{5}/g)!.map(group => alphabet[parseInt(group, 2)]).join('');
+}
+
+function matchesPnpmStoreLocator(key: string, locator: string, maxLength: number): boolean {
+  // Compare whole names using pnpm's two on-disk encodings. Never infer a
+  // package from a shared prefix or include the physical store path in a hash.
+  const base = key.replace(/^file:/, 'file+').replace(/[\\/:*?"<>|]/g, '+').replace(/\)$/, '').replace(/\)\(|\(|\)/g, '_');
+  const modern = base.replace(/#/g, '+');
+  if (locator === modern || locator === base) return true;
+  if (/_[a-f0-9]{32}$/.test(locator) &&
+      locator === `${modern.slice(0, Math.max(0, maxLength - 33))}_${digest(modern).slice(0, 32)}`) return true;
+  return /_[a-z2-7]{26}$/.test(locator) &&
+    locator === `${base.slice(0, Math.max(0, maxLength - 27))}_${legacyPnpmLocatorHash(base)}`;
+}
+
+function pnpmSourceIdentity(entry: PnpmEntry): string {
+  // v6 could repeat the same resolution with a peer suffix in the package key.
+  const versionKey = `${entry.name}@${entry.version}`;
+  const location = entry.location === entry.key && entry.version && entry.key.startsWith(`${versionKey}(`)
+    && !entry.key.startsWith(`${versionKey}(patch_hash=`)
+    ? versionKey
+    : entry.location;
+  return canonicalJson({ location, integrity: entry.integrity });
+}
+
+function selectedPnpmEntries(
+  pnpm: PnpmLock, installedPath: string, name: string, version: string,
+): PnpmEntry[] | undefined {
+  const matchingVersion = (entry: PnpmEntry) => entry.name === name &&
+    (entry.version === undefined || entry.version === version);
+  const wanted = pnpm.entries.filter(matchingVersion);
+  const current = pnpm.installed ?? pnpm;
+  const installed = current.entries.filter(matchingVersion);
+  const identities = new Set([...wanted, ...installed].map(pnpmSourceIdentity));
+  if (wanted.length && identities.size === 1) return wanted;
+  if (!identities.size) return [];
+
+  const relative = pnpm.storeDirectory && path.relative(pnpm.storeDirectory, installedPath);
+  const [locator, ...packagePath] = relative ? posix(relative).split('/') : [];
+  if (!locator || locator === '..' || packagePath.join('/') !== `node_modules/${name}`) return undefined;
+  const matches = installed.filter(entry => {
+    const snapshots = current.snapshots.filter(key => key === entry.key || key.startsWith(`${entry.key}(`));
+    return [entry.key, ...snapshots].some(key => matchesPnpmStoreLocator(key, locator, pnpm.maxLocatorLength));
+  });
+  if (!matches.length || new Set(matches.map(pnpmSourceIdentity)).size !== 1) return undefined;
+  return matches.slice(0, 1);
 }
 
 function yamlPatchFiles(text: string): string[] {
@@ -169,7 +276,7 @@ export function loadDependencyLock(projectRoot: string): Lock {
           root,
           npm: manager === 'npm' ? (JSON.parse(contents) as { packages?: Record<string, NpmPackage> }).packages : undefined,
           yarn: manager === 'yarn' ? readYarnLock(root, contents) : undefined,
-          entries: manager === 'pnpm' ? pnpmEntries(contents) : [],
+          pnpm: manager === 'pnpm' ? readPnpmLock(root, contents) : undefined,
           patchFiles: [
             ...Object.values(pkg?.pnpm?.patchedDependencies ?? {}),
             ...yamlPatchFiles(readText(path.join(root, 'pnpm-workspace.yaml')) ?? ''),
@@ -182,7 +289,7 @@ export function loadDependencyLock(projectRoot: string): Lock {
     if (fs.existsSync(path.join(root, '.git')) || path.dirname(root) === root) break;
     root = path.dirname(root);
   }
-  return { root: projectRoot, entries: [], patchFiles: Object.values(manifest(projectRoot)?.pnpm?.patchedDependencies ?? {}) };
+  return { root: projectRoot, patchFiles: Object.values(manifest(projectRoot)?.pnpm?.patchedDependencies ?? {}) };
 }
 
 function localLocator(value: string | undefined): boolean {
@@ -334,9 +441,8 @@ export function dependencySources(
   const yarnEntry = lock.yarn && isNodeModulesPath(installedPath)
     ? selectedYarnEntry(lock.yarn, lock.root, projectRoot, directory, installedPath, installed.version)
     : undefined;
-  const matching = lock.entries.filter(entry =>
-    entry.name === installed.name && (entry.version === undefined || entry.version === installed.version));
-  const resolutions = yarnEntry ? [yarnEntry] : matching;
+  const pnpmEntries = lock.pnpm && selectedPnpmEntries(lock.pnpm, installedPath, installed.name, installed.version);
+  const resolutions = yarnEntry ? [yarnEntry] : pnpmEntries ?? [];
   const local = !isNodeModulesPath(directory) || !isNodeModulesPath(installedPath)
     || localLocator(declared) || npmEntry?.link || localLocator(npmEntry?.resolved)
     || resolutions.some(entry => localLocator(entry.location));
@@ -346,7 +452,8 @@ export function dependencySources(
   ])].sort(compareText);
   const pinKnown = provenance.some(entry => /"integrity":"[^"]+"|#[a-f0-9]{7,}|commit=[a-f0-9]{7,}/i.test(entry));
   const unresolvedYarn = lock.yarn !== undefined && yarnEntry === undefined;
-  const contentHashRequired = local || unresolvedYarn
+  const unresolvedPnpm = lock.pnpm !== undefined && pnpmEntries === undefined;
+  const contentHashRequired = local || unresolvedYarn || unresolvedPnpm
     || ((nonRegistryLocator(declared) || nonRegistryLocator(yarnEntry?.location)) && !pinKnown);
   const id = dependency.name;
   const metadata = {
@@ -357,13 +464,13 @@ export function dependencySources(
   };
   const outputs: Source[] = [{ type: 'package', id, hash: digest(canonicalJson(metadata)), reasons }];
   if (contentHashRequired) {
-    const reason = !local && lock.yarn ? 'installedNativeDependency' : 'localNativeDependency';
+    const reason = !local && (lock.yarn || unresolvedPnpm) ? 'installedNativeDependency' : 'localNativeDependency';
     outputs.push(...projectFileSources({
       root: directory,
       directory: '',
       idPrefix: `dependency:${id}/`,
       reason,
-      honorGitignore: !lock.yarn || !!local,
+      honorGitignore: (!lock.yarn && !unresolvedPnpm) || !!local,
       skip: (relative, isDirectory) => relative === 'yalc.sig' || relative === 'package.json'
         || (installed.name === '@gfean/react-native-bundle-drop' && relative.split('/')[0] === 'dist')
         || skip(relative, isDirectory),
