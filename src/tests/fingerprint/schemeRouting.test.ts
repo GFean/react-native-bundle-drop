@@ -5,7 +5,7 @@ import { calculateRuntimeFingerprint } from '../../runtime-fingerprint/calculate
 jest.mock('child_process', () => ({ spawnSync: jest.fn() }));
 
 describe('runtime fingerprint client', () => {
-  it('uses the same bounded worker with the selected runtime configuration', () => {
+  it('starts the bounded worker in the selected project directory', () => {
     const report = { schemeVersion: 2, runtimeVersion: 'bdfp2-next' };
     jest.mocked(childProcess.spawnSync).mockReturnValue({ status: 0, stdout: JSON.stringify(report) } as any);
     const original = process.env.NODE_ENV;
@@ -14,8 +14,8 @@ describe('runtime fingerprint client', () => {
         process.env.NODE_ENV = mode;
         expect(calculateRuntimeFingerprint('fixture', 'android')).toEqual(report);
         expect(childProcess.spawnSync).toHaveBeenLastCalledWith(process.execPath, [
-          expect.stringMatching(/runtime-fingerprint[/\\]worker\.js$/), path.resolve('fixture'), 'android',
-        ], expect.objectContaining({ shell: false, env: expect.objectContaining({ NODE_ENV: mode }) }));
+          expect.stringMatching(/runtime-fingerprint[/\\]worker\.js$/), 'android',
+        ], expect.objectContaining({ cwd: path.resolve('fixture'), shell: false, env: expect.objectContaining({ NODE_ENV: mode }) }));
       }
     } finally {
       if (original === undefined) delete process.env.NODE_ENV;

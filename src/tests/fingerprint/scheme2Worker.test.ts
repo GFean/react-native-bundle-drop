@@ -6,13 +6,13 @@ jest.mock('../../expo/runtimeVersion');
 jest.mock('../../fingerprintV2/collect');
 
 describe('Scheme 2 fingerprint worker', () => {
-  it.each([[], ['/app', 'unknown']])('validates arguments %j', async (...args) => {
+  it.each([[], ['unknown'], ['/app', 'ios'], ['ios', '/app']])('validates arguments %j', async (...args) => {
     await expect(runRuntimeFingerprintWorker(args)).rejects.toThrow('Usage: fingerprint worker');
   });
 
   it('requires fingerprint authority in the worker', async () => {
     jest.mocked(readBundleDropRuntimeSelection).mockReturnValue({ source: 'manual', runtimeVersion: '1.0' });
-    await expect(runRuntimeFingerprintWorker(['/app', 'android'])).rejects.toThrow('requires compatibilitySource: fingerprint');
+    await expect(runRuntimeFingerprintWorker(['android'])).rejects.toThrow('requires compatibilitySource: fingerprint');
   });
 
   it('passes the validated inputs to the collector and emits its report', async () => {
@@ -24,8 +24,9 @@ describe('Scheme 2 fingerprint worker', () => {
     jest.mocked(collectNativeFingerprintV2).mockResolvedValue(report);
     const write = jest.spyOn(process.stdout, 'write').mockImplementation(() => true);
     try {
-      await runRuntimeFingerprintWorker(['/app', 'android']);
-      expect(collectNativeFingerprintV2).toHaveBeenCalledWith('/app', 'android', {
+      await runRuntimeFingerprintWorker(['android']);
+      expect(readBundleDropRuntimeSelection).toHaveBeenCalledWith(process.cwd(), 'android');
+      expect(collectNativeFingerprintV2).toHaveBeenCalledWith(process.cwd(), 'android', {
         nativeProjectMode, extraSources: undefined,
       }, 'release');
       expect(write).toHaveBeenCalledWith(JSON.stringify(report) + '\n');

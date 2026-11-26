@@ -148,7 +148,7 @@ try {
       assert.ok(comparison.changes.some(change => change.id === 'dir:android' && change.after === null));
     }
     const writeIdentityArgs = [nativeWriter, '--project-root', fixture, '--platform', platform];
-    const nativeIdentity = JSON.parse(run(writeIdentityArgs, fixture));
+    const nativeIdentity = JSON.parse(run(writeIdentityArgs, temporary));
     assert.equal(nativeIdentity.runtimeVersion, report.runtimeVersion);
     setRuntime(platform, 2);
     write('App.js', `export default ${JSON.stringify(platform)};`);

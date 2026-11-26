@@ -1,10 +1,12 @@
 import { readBundleDropRuntimeSelection } from '../expo/runtimeVersion';
 import { collectNativeFingerprintV2 } from '../fingerprintV2/collect';
 
-export async function runRuntimeFingerprintWorker([projectRoot, platform]: string[]): Promise<void> {
-  if (!projectRoot || (platform !== 'android' && platform !== 'ios')) {
-    throw new Error('Usage: fingerprint worker <project-root> ios|android');
+export async function runRuntimeFingerprintWorker([platform, ...extraArgs]: string[]): Promise<void> {
+  if (extraArgs.length || (platform !== 'android' && platform !== 'ios')) {
+    throw new Error('Usage: fingerprint worker ios|android (from the project directory)');
   }
+  // The caller sets the working directory when starting the worker.
+  const projectRoot = process.cwd();
   const selection = readBundleDropRuntimeSelection(projectRoot, platform);
   if (selection.source !== 'fingerprint') {
     throw new Error('Fingerprint collection requires compatibilitySource: fingerprint.');

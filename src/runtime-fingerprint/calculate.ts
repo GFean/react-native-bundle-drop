@@ -8,8 +8,9 @@ export function calculateRuntimeFingerprint(
   projectRoot: string,
   platform: 'ios' | 'android',
 ): RuntimeFingerprint {
-  const args = [path.join(__dirname, 'worker.js'), path.resolve(projectRoot), platform];
+  const args = [path.join(__dirname, 'worker.js'), platform];
   const result = spawnSync(process.execPath, args, {
+    cwd: path.resolve(projectRoot),
     encoding: 'utf8',
     shell: false,
     timeout: 120_000,
