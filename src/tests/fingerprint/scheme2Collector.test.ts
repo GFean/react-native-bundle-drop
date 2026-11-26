@@ -318,6 +318,52 @@ patchedDependencies:
     expect(await collect('ios', app)).toEqual(cng);
   }, 25_000);
 
+  it.each(['android', 'ios'] as const)('preserves pnpm %s provenance and patches with CRLF', async platform => {
+    write('package.json', '{"name":"test-app","packageManager":"pnpm@10.0.0","dependencies":{"native-controls":"1.2.3"}}');
+    const lockfile = `lockfileVersion: '9.0'
+
+patchedDependencies:
+  native-controls@1.2.3:
+    path: native-patches/controls.patch
+
+packages:
+  native-controls@1.2.3:
+    resolution: {integrity: sha512-first, tarball: https://example.org/controls.tgz}
+`;
+    const workspace = `patchedDependencies:
+  other-native@1.0.0: native-patches/workspace.patch
+`;
+    write('pnpm-lock.yaml', lockfile);
+    write('pnpm-workspace.yaml', workspace);
+    write('native-patches/controls.patch', 'controls patch');
+    write('native-patches/workspace.patch', 'workspace patch');
+    const lf = await collect(platform);
+    expect(lf.sources.map(source => source.id)).toEqual(expect.arrayContaining([
+      'native-controls', 'patch:native-patches/controls.patch', 'patch:native-patches/workspace.patch',
+    ]));
+
+    const crlfLockfile = lockfile.replace(/\n/g, '\r\n');
+    const crlfWorkspace = workspace.replace(/\n/g, '\r\n');
+    write('pnpm-workspace.yaml', crlfWorkspace);
+    expect(await collect(platform)).toEqual(lf);
+    write('pnpm-workspace.yaml', workspace);
+    write('pnpm-lock.yaml', crlfLockfile);
+    expect(await collect(platform)).toEqual(lf);
+    write('pnpm-workspace.yaml', crlfWorkspace);
+    expect(await collect(platform)).toEqual(lf);
+
+    write('pnpm-lock.yaml', crlfLockfile.replace('sha512-first', 'sha512-changed'));
+    expect((await collect(platform)).runtimeVersion).not.toBe(lf.runtimeVersion);
+    write('pnpm-lock.yaml', crlfLockfile.replace('example.org/controls.tgz', 'mirror.example.org/controls.tgz'));
+    expect((await collect(platform)).runtimeVersion).not.toBe(lf.runtimeVersion);
+    write('pnpm-lock.yaml', crlfLockfile);
+    write('native-patches/controls.patch', 'changed controls patch');
+    expect((await collect(platform)).runtimeVersion).not.toBe(lf.runtimeVersion);
+    write('native-patches/controls.patch', 'controls patch');
+    write('native-patches/workspace.patch', 'changed workspace patch');
+    expect((await collect(platform)).runtimeVersion).not.toBe(lf.runtimeVersion);
+  }, 25_000);
+
   it('includes transitive pnpm Git resolutions and slash-prefixed lockfile v6 keys', async () => {
     write('package.json', '{"name":"test-app","packageManager":"pnpm@10.0.0"}');
     const gitLock = (commit: string, repository = 'https://example.org/native-controls.git') => write('pnpm-lock.yaml', `

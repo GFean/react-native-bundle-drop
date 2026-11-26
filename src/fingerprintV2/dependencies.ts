@@ -103,9 +103,13 @@ function readYarnLock(root: string, text: string): YarnLock {
   return { entries, installedLocators };
 }
 
+function findYamlSection(text: string, name: string): string | undefined {
+  return text.replace(/\r\n/g, '\n').split(/\n(?=\S)/)
+    .find(section => section.startsWith(`${name}:\n`));
+}
+
 function pnpmEntries(text: string): LockEntry[] {
-  const sections = text.split(/\n(?=\S)/);
-  const packages = sections.find(section => section.startsWith('packages:\n'));
+  const packages = findYamlSection(text, 'packages');
   if (!packages) return [];
   return packages.split(/\n(?= {2}\S)/).slice(1).flatMap(block => {
     const newline = block.indexOf('\n');
@@ -133,7 +137,7 @@ function pnpmEntries(text: string): LockEntry[] {
 }
 
 function yamlPatchFiles(text: string): string[] {
-  const section = text.split(/\n(?=\S)/).find(block => block.startsWith('patchedDependencies:\n'));
+  const section = findYamlSection(text, 'patchedDependencies');
   return section?.split('\n').slice(1).flatMap(line => {
     const value = line.match(/^ {2}(?:'[^']+'|"[^"]+"|[^\s:][^:]*):\s+(.+)$/)?.[1]
       ?? line.match(/^ {4}path:\s+(.+)$/)?.[1];
