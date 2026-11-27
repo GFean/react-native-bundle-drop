@@ -1,6 +1,6 @@
 {
   "name": "@gfean/react-native-bundle-drop",
-  "version": "0.13.1",
+  "version": "0.14.0",
   "nativeVersion": "0.6.4",
   "description": "Over-the-air (OTA) updates for Expo and bare React Native with staged rollouts, smaller patch downloads, and rollback.",
   "main": "lib/index.js",

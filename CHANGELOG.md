@@ -5,6 +5,17 @@ All notable changes to this package are documented here.
 This project uses [Conventional Commits](https://www.conventionalcommits.org/) and
 [release-please](https://github.com/googleapis/release-please) to prepare releases.
 
+## [0.14.0](https://github.com/GFean/react-native-bundle-drop/compare/v0.13.1...v0.14.0) (2026-11-27)
+
+
+### ⚠ BREAKING CHANGES
+
+* **fingerprint:** Scheme 1 fingerprint generation is retired in the new SDK. Keep using the published 0.13.1 CLI with the original app configuration, lockfile, and native inputs for existing Scheme 1 binaries. Rebuild and distribute a matching native binary to adopt Scheme 2.
+
+### Features
+
+* **fingerprint:** default to Scheme 2 and retire Scheme 1 ([#76](https://github.com/GFean/react-native-bundle-drop/issues/76)) ([6e05d5b](https://github.com/GFean/react-native-bundle-drop/commit/6e05d5bb232568305b74c48be26034a51c88586b))
+
 ## [0.13.1](https://github.com/GFean/react-native-bundle-drop/compare/v0.13.0...v0.13.1) (2026-11-20)
 
 
