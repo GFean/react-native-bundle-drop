@@ -1,10 +1,8 @@
 # Native fingerprinting (Beta)
 
-Native fingerprinting derives a `bdfp1-` runtime identity from native
-compatibility inputs instead of requiring a manually maintained runtime string.
-Manual runtime literals remain the default; fingerprinting is an explicit opt-in.
-It is currently Beta and intended to become the default in a future release.
-Existing projects keep their selected compatibility mode.
+Native fingerprinting derives a Scheme 2 `bdfp2-` runtime identity from native
+compatibility inputs. Set `compatibilitySource: 'fingerprint'` to opt in. Projects
+using manual runtime literals keep their configured compatibility mode.
 
 ## Enable it in a new native binary
 
@@ -16,16 +14,14 @@ runtimeVersion: {
 },
 ```
 
-The SDK detects the native workflow automatically. Keep configuration, installed
-native dependencies and declared build context consistent between native builds
-and OTA uploads.
+Fingerprinting defaults to Scheme 2 and also accepts an explicit `schemeVersion: 2`.
+The SDK detects the native workflow
+automatically. Keep configuration, installed native dependencies and declared
+build context consistent between native builds and OTA uploads. The scheme
+appears in diagnostic reports and artifact metadata.
 
-You do not need to set `schemeVersion` in application configuration. Omitting it
-permanently selects scheme 1; SDK upgrades never silently migrate that calculation.
-The version remains in diagnostic reports and artifact metadata for reproducibility.
-
-Rebuild and ship the native app after first enabling fingerprinting. Changing an
-OTA configuration alone cannot give an older binary a native fingerprint.
+Rebuild and ship the native app after first enabling fingerprinting. Devices
+receive OTAs for the runtime embedded in their installed binary.
 
 - A compatible JavaScript/assets change keeps the runtime identity and may use OTA.
 - A detected native change produces another identity automatically. An old binary
@@ -52,6 +48,20 @@ receipt or silently fall back to manual runtime mode. The embedded native identi
 remains authoritative after an OTA replaces JavaScript. Fingerprinting does not
 change update policies, manual apply control, revocation rules or native recovery.
 
+## Migrate from Scheme 1
+
+Earlier SDK releases derived `bdfp1-` runtimes by default. Scheme 1 is retired in
+this SDK. Remove an explicit `schemeVersion: 1` setting or change it to `2`, then
+rebuild and ship the native app. Use the same SDK and lockfile for the new build
+and its OTA uploads. Verify that your backend accepts Scheme 2 metadata.
+
+To keep shipping OTAs for an installed Scheme 1 binary during the transition,
+use the published `0.13.1` SDK and the original app configuration, dependency
+lockfile, and native inputs. Ensure its dependency lock resolves
+`follow-redirects` to `1.16.2` or later. Confirm that the calculated `bdfp1-`
+runtime matches the binary before uploading. The original calculator contract
+and golden vectors are available at the [`v0.13.1` tag](https://github.com/GFean/react-native-bundle-drop/tree/v0.13.1).
+
 ## Inspect the calculation
 
 ```sh
@@ -59,8 +69,9 @@ bundle-drop fingerprint --platform android --output report.json
 bundle-drop fingerprint --platform android --compare report.json --json
 ```
 
-Reports contain source IDs/digests and `status: "stable"`. Earlier experimental
-reports remain usable for source comparison. Report status, reasons, debug fields
+Reports contain source IDs/digests and `status: "stable"`. Earlier reports remain
+usable for source comparison, including Scheme 1 reports. The command calculates
+the current Scheme 2 runtime and displays changes in source digests. Report status, reasons, debug fields
 and this release's descriptive text are not extra runtime-domain fields.
 Source IDs and diagnostics may expose project paths; review reports before sharing.
 Explicit environment values are represented by digests rather than plaintext.
@@ -71,7 +82,7 @@ New artifacts explicitly include `compatibilitySource: 'manual'` or
 `'fingerprint'` in their metadata. Missing configuration selectors remain manual;
 legacy bundles with no mode metadata are displayed as manual without inferring
 the mode from a runtime string. Explicit Expo-owned runtime resolution continues
-to supply an opaque runtime and is not labeled Bundle Drop scheme-1 fingerprinting.
+to supply an opaque runtime under its own policy.
 
 Fingerprint metadata retains the full derived identity, internal scheme version
 and optional manual boundary. The dashboard shows that boundary in Runtime, or
@@ -82,9 +93,9 @@ remain literal. Scheme versions are diagnostic metadata, not a dashboard column.
 The authoritative `runtimeVersion` remains the complete existing identity in
 manifests, uploads, native checks and patch lanes. Display metadata never changes
 compatibility or permits cross-runtime patches. It is included in the canonical
-file manifest and changes artifact hashes as ordinary metadata bytes do; it does
-not change the frozen native fingerprint calculation. The backend must support
-these metadata fields before the dashboard can display them for new uploads.
+file manifest and changes artifact hashes as ordinary metadata bytes do. Display
+metadata is independent of the native fingerprint calculation. The backend must
+support these metadata fields before the dashboard can display them for new uploads.
 
 Optional `buildNumber` metadata records Android `versionCode` or iOS
 `CFBundleVersion`, displayed as `1.0.0 (122132)`. Expo uses the resolved build
@@ -97,80 +108,42 @@ override must equal its resolved identity. This field describes export context;
 it is not proof that every compatible device has that build number, and never
 narrows runtime or patch matching. Old bundles remain version-only.
 
-## Frozen calculation contract
+## Scheme 2 inputs and stability
 
-Version 0.11.0 revises the pre-release scheme 1 baseline to use patched minimatch
-11.0.3 and glob 14.0.3. Some ignore-pattern matches differ from earlier Beta
-previews. Rebuild existing Beta apps and generate their updates with the same
-SDK version and dependency lock. Earlier preview calculators and this release
-are not interchangeable, even though both use the `bdfp1-` prefix.
+Scheme 2 hashes the selected platform's autolinked dependency identities and
+their resolved source information from supported npm, Yarn, and pnpm locks.
+For Yarn, Scheme 2 uses the installed package locator when the installer records it.
+When the lock and install state cannot distinguish same-version native sources,
+Scheme 2 hashes the installed package files.
+Declare third-party native edits as package manager patches or patch-package files.
+App-owned native source, local native packages, app codegen specs, and authored
+native configuration are also inputs. React Native versions and Bundle Drop
+native revisions contribute to the runtime identity.
 
-The complete executable baseline is
-`third_party/expo-fingerprint/scheme-1-contract.json`. It pins the first-party
-collector, selector, process adapters, normalization, complete maintained Expo
-adaptation and supporting helpers, generated package files, build configuration,
-production dependency declarations and repository dependency lock. The original
-Expo implementation is `@expo/fingerprint` 0.21.5 at commit
-`d7a68affbace544d36250aa6bdb06e34bda9e8ea`; its notices/provenance ship with the SDK.
+For native iOS, Scheme 2 hashes the checked-in `Podfile.lock`. For the default
+React Native prebuilt recipes that put checkout paths in CocoaPods' generated
+podspecs, it uses the installed recipe and its inputs in place of those
+generated checksums. The locked graph, versions, source declarations and other
+checksums still contribute to the fingerprint. Declare custom generators,
+environment-specific native settings and local artifact overrides with
+`extraSources` when they affect compatibility.
 
-Scheme 1 uses physical checkout roots, SHA-256, strict collection, one selected
-platform, file-based native-module/config-plugin sources and the fixed options in
-`src/fingerprint/collect.ts`. Source ordering/deduplication and individual source
-hashing follow the pinned adaptation. Required applicable discovery fails closed.
-The source native hash is wrapped as follows, with this exact property order:
+In native workflow, use checked-in ignore rules for generated output. Use
+`extraSources` for ignored files whose contents affect native compatibility,
+including files already tracked in Git. Fingerprint source selection reads
+checked-in ignore rules in both Git checkouts and source archives.
+In Expo CNG, express changes through evaluated Expo config and config plugins or
+declare the inputs explicitly. Supply custom flavor, Xcode configuration, or
+environment-dependent code generation inputs wherever you calculate the
+fingerprint. Native generators can run during the native build while OTA export
+uses the same declared inputs from a clean checkout. Keep `.fingerprintignore`
+and checked-in ignore rules identical between build and upload checkouts.
 
-```js
-'bdfp1-' + sha256Utf8(JSON.stringify({
-  domain: 'bundle-drop-native-fingerprint',
-  schemeVersion: 1,
-  platform, // 'ios' or 'android'
-  manualBoundary, // trimmed explicit string or null
-  nativeHash,
-}))
-```
-
-An omitted `schemeVersion` permanently selects scheme 1. Unsupported schemes fail
-closed. A future change to input selection, normalization, options, ordering,
-hashing, environment handling, helper behavior or dependencies that changes
-identities for unchanged supported inputs requires a new scheme and retained
-scheme-1 support. Do not rewrite old vectors to bless calculation drift. Byte-only
-maintenance must demonstrate unchanged behavior before updating a reviewed pin.
-There is no automatic baseline-update command.
-
-`yarn fingerprint:check` checks both source and packaged helper inventories/hashes
-and the dependency lock; it is included in `verify:quick`/`verify:release`.
-Tarball inspection independently checks the shipped helper hashes and dependency
-declarations. `src/tests/fingerprint/scheme-1-golden.json` retains the original
-Android vector and Android/iOS mutation/boundary vectors.
-Consumer projects must retain their own dependency lock and matching toolchain;
-this release baseline does not make every consumer's transitive dependency
-resolution or arbitrary external tool identical. Existing application locks
-must also refresh Axios's `follow-redirects` resolution to 1.16.2 or newer for
-GHSA-8r9p-f939-6h3c, GHSA-q3jh-wrc6-jgq8 and GHSA-mrwp-f3q8-3g9p.
-A library's root Yarn resolutions do not override every consumer's existing lock.
-The transport patch leaves all scheme-1 calculation helper bytes/goldens unchanged.
-
-## Inputs and stability
-
-Inherited Expo discovery includes native directories, autolinked packages, package
-scripts, evaluated Expo config and config-plugin files. In CNG mode generated
-native directories are excluded; express native changes through config/plugins
-or explicit sources. `.fingerprintignore` remains effective. Reducing coverage
-through ignores is the application's responsibility; keep ignore rules identical
-between build and upload checkouts.
-
-Bundle Drop adds explicit selection/boundaries, native embedding and authority,
-extra inputs, domain hashing and generated-output exclusions. It excludes generated
-Bundle Drop identities/artifacts, runtime-delivery metadata, local SDK paths,
-debug keystores, output metadata and Android/Kotlin compiler session directories.
-The exact exclusions are pinned, including inherited Expo defaults.
-
-Android build-number normalization supports only recognized integer literal
-`versionCode 1` / `versionCode = 1` statements in known `defaultConfig` and
-`productFlavors` scopes. Bare iOS normalization supports numeric literal
-`CURRENT_PROJECT_VERSION` in Xcode `buildSettings` dictionaries. Computed values,
-ambiguous syntax, conditional keys, comments and other fields retain their bytes.
-No arbitrary Gradle, Xcode script or plist interpretation is attempted.
+Android build-number normalization recognizes integer literal `versionCode`
+statements in known `defaultConfig` and `productFlavors` scopes. Bare iOS
+normalization recognizes numeric literal `CURRENT_PROJECT_VERSION` settings in
+the Xcode project. Computed values, ambiguous syntax, and other native settings
+retain their bytes.
 
 ## Build context and explicit inputs
 
@@ -195,15 +168,12 @@ sources are supported; optional absence is itself a hashed input.
 
 ## Coverage and limitations
 
-- React Native core is inherited package-name/version identity. An in-place core
-  patch needs an explicit input; it is not universally detected automatically.
-- Other autolinked packages can contribute whole package trees. Tooling/JS-only
-  package changes may therefore conservatively create incompatibility.
-- Resolved Gradle artifact digests, installed CocoaPods/SwiftPM contents, arbitrary
-  compiler settings and disposable CNG projections are not added by scheme 1.
-- Dependencies that modify their own native files during builds require the same
-  persistent patch in both checkouts. The upload collector does not run Gradle
-  or repair dependencies. The masked-view 0.3.2 manifest rewrite was one such case.
+- Registry packages normally use dependency identity and declared
+  patches. Make modifications in reproducible inputs and specify custom native
+  compatibility inputs under `extraSources`.
+- Declare native inputs beyond the default scope explicitly, including relevant
+  Gradle artifact digests, installed CocoaPods or SwiftPM contents, and arbitrary
+  compiler settings. For CNG, use Expo config and plugins for native changes.
 - Environment-dependent configuration must be reproducible. The worker uses
   development only when `NODE_ENV` is explicitly `development`, otherwise production.
 - Native-module addition changes the identity within this documented coverage.

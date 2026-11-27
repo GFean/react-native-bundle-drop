@@ -6,8 +6,8 @@ const os = require('os');
 const path = require('path');
 
 const projectRoot = process.cwd();
-require('./check-fingerprint-contract.cjs').checkFingerprintContract(projectRoot);
 const { checkCliIsolation } = require('./check-cli-isolation.cjs');
+const { checkFingerprintPackageFiles } = require('./check-fingerprint-package-files.cjs');
 checkCliIsolation(projectRoot, [
   'lib/index.js', 'lib/bootstrap.js', 'lib/index.d.ts', 'lib/metro.js', 'lib/metro.d.ts', 'app.plugin.js',
   'src/index.tsx', 'src/bootstrap.ts', 'src/metro.ts',
@@ -51,6 +51,7 @@ try {
 
 const packedEntries = packResult.files || [];
 const packedFiles = new Map(packedEntries.map(file => [file.path, file]));
+checkFingerprintPackageFiles(packedFiles.keys());
 
 const blockedPathPatterns = [
   /(^|\/)\.DS_Store$/,
@@ -86,7 +87,6 @@ if (blockedFiles.length > 0) {
 }
 
 const requiredFiles = [
-  'third_party/expo-fingerprint/scheme-1-contract.json',
   'docs/native-fingerprint.md',
   'README.md',
   'app.plugin.js',
@@ -127,12 +127,6 @@ const requiredFiles = [
   'lib/CLI/scripts/expo/write-build-receipt.js',
   'lib/CLI/scripts/expo/write-eas-build-receipt.js',
   'lib/CLI/scripts/native/write-runtime-identity.js',
-  'lib/CLI/scripts/fingerprint-cli.js',
-  'lib/fingerprint/worker.js',
-  'third_party/expo-fingerprint/build/Fingerprint.js',
-  'third_party/expo-fingerprint/LICENSE',
-  'third_party/expo-fingerprint/NOTICE',
-  'third_party/expo-fingerprint/PROVENANCE.md',
   'third_party/xdelta/NOTICE',
   'third_party/xdelta/PROVENANCE.md',
   'third_party/xdelta/xdelta3/LICENSE',
@@ -182,7 +176,6 @@ const expectedScripts = new Set([
   'test',
   'typecheck',
   'test:cli:compat',
-  'fingerprint:check',
   'test:coverage',
   'coverage:check',
   'coverage:gate',

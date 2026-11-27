@@ -60,12 +60,11 @@ Do not lower coverage thresholds or weaken a failing validation gate. If a focus
 change exposes an unrelated defect, report it separately instead of expanding the
 pull request.
 
-Native fingerprint scheme 1 has a frozen calculation contract and goldens; see
-[the contract and limitations](docs/native-fingerprint.md). Run
-`yarn fingerprint:check` after building. Never update scheme 1 vectors to accept
-changed identities for unchanged inputs; introduce a new scheme while retaining
-scheme 1 behavior. Dependency maintenance must demonstrate unchanged calculation
-behavior before a reviewed contract pin is updated.
+Scheme 2 is the current native fingerprint calculation. For changes to its
+collector or dependencies, compare the full runtime and source digests for
+identical app inputs on Android and iOS. Run `yarn verify:release` and
+`yarn test:cli:compat` to verify the SDK and the installed package. Document any
+intentional runtime changes and the steps users need to migrate. [Fingerprint inputs and migration](docs/native-fingerprint.md)
 
 By contributing, you agree that your contribution is licensed under this
 repository's ISC license. The project does not require a separate contributor

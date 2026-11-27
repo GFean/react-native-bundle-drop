@@ -12,8 +12,10 @@ type MockZipInstance = {
 
 const zipInstances: MockZipInstance[] = [];
 const mockExecSync = jest.fn();
-const mockResolveRuntime = jest.fn();
-jest.mock('../../expo/runtimeVersion', () => ({ resolveBundleDropRuntimeVersionAuthority: (...args: unknown[]) => mockResolveRuntime(...args) }));
+const mockCalculateRuntimeFingerprint = jest.fn();
+jest.mock('../../runtime-fingerprint/calculate', () => ({
+  calculateRuntimeFingerprint: (...args: unknown[]) => mockCalculateRuntimeFingerprint(...args),
+}));
 const spawnCalls: Array<{ executable: string; args: string[]; options: unknown }> = [];
 
 const quotePath = (value: string) => `"${value}"`;
@@ -31,6 +33,7 @@ const legacyCommand = (executable: string, args: string[]) => {
 };
 
 jest.mock('child_process', () => ({
+  ...jest.requireActual('child_process'),
   spawnSync: (executable: string, args: string[], options: unknown) => {
     spawnCalls.push({ executable, args, options });
     const output = mockExecSync(legacyCommand(executable, args), options);
@@ -53,6 +56,7 @@ import {
   findProjectRoot,
   runBundleScript as runBundleScriptImplementation,
 } from '../../scripts/bundle';
+import { resolveNativeRuntimeIdentity } from '../../CLI/scripts/native/write-runtime-identity';
 
 describe('scripts/bundle', () => {
   const originalArgv = [...process.argv];
@@ -84,6 +88,7 @@ describe('scripts/bundle', () => {
     consoleErrorSpy = jest.spyOn(console, 'error').mockImplementation(() => undefined);
     zipInstances.length = 0;
     spawnCalls.length = 0;
+    mockCalculateRuntimeFingerprint.mockReset();
     mockExecSync.mockReset().mockImplementation((command: string) => {
       if (command.includes('react-native bundle')) {
         fs.mkdirSync(path.join(distDir, 'assets', 'drawable-mdpi'), { recursive: true });
@@ -138,9 +143,28 @@ describe('scripts/bundle', () => {
 
   it('packages the independently calculated fingerprint in a bare OTA manifest', () => {
     fs.writeFileSync(path.join(tempProjectDir, 'bundle.drop.config.js'), 'module.exports = { runtimeVersion: { compatibilitySource: "fingerprint" }, hermesBytecode: false };');
-    mockResolveRuntime.mockReturnValue({ source: 'bundle-drop', runtimeVersion: 'bdfp1-test' });
+    mockCalculateRuntimeFingerprint.mockReturnValue({ runtimeVersion: 'bdfp2-test' });
     const result = runBundleScript({ platform: 'android', cwd: tempProjectDir });
-    expect(JSON.parse(fs.readFileSync(result.manifestPath, 'utf8')).runtimeVersion).toBe('bdfp1-test');
+    expect(JSON.parse(fs.readFileSync(result.manifestPath, 'utf8')).runtimeVersion).toBe('bdfp2-test');
+  });
+
+  it.each(['ios', 'android'] as const)('exports the same manual runtime as the %s native identity', platform => {
+    fs.writeFileSync(path.join(tempProjectDir, 'bundle.drop.config.js'), `module.exports = {
+      runtimeVersion: { ios: ' 1.0.0 ', android: ' 2.0.0 ' },
+      hermesBytecode: false,
+    };`);
+
+    const native = resolveNativeRuntimeIdentity(tempProjectDir, platform);
+    const result = runBundleScript({ platform, cwd: tempProjectDir });
+    const manifest = JSON.parse(fs.readFileSync(result.manifestPath, 'utf8'));
+    const metadata = JSON.parse(fs.readFileSync(result.metadataPath, 'utf8'));
+
+    expect(native).toMatchObject({ source: 'bundle-drop', runtimeVersion: platform === 'ios' ? '1.0.0' : '2.0.0' });
+    expect(manifest.runtimeVersion).toBe(result.runtimeVersion);
+    expect(native).toMatchObject({ runtimeVersion: manifest.runtimeVersion });
+    expect(metadata).toMatchObject({ runtimeVersion: manifest.runtimeVersion, compatibilitySource: 'manual' });
+    expect(metadata).not.toHaveProperty('fingerprint');
+    expect(mockCalculateRuntimeFingerprint).not.toHaveBeenCalled();
   });
   it('finds the native project root from nested directories', () => {
     const nestedDir = path.join(tempProjectDir, 'android', 'app', 'src');
@@ -507,11 +531,15 @@ describe('scripts/bundle', () => {
     expect(consoleLogSpy).toHaveBeenCalledWith('ℹ️  Hermes compiler not found — bundling plain JS');
   });
 
-  it('fails when runtimeVersion config is missing for the requested platform', () => {
+  it.each([
+    [{ android: '3.0.0' }, 'must define a non-empty runtimeVersion.ios literal'],
+    [{ ios: '   ' }, 'must define a non-empty runtimeVersion.ios literal'],
+    [{ source: 'expo' }, 'runtimeVersion.source: expo is only supported for Expo projects'],
+  ])('rejects invalid bare iOS runtime configuration %j before bundling', (runtimeVersion, message) => {
     fs.writeFileSync(
       path.join(tempProjectDir, 'bundle.drop.config.js'),
       `module.exports = {
-  runtimeVersion: { android: '3.0.0' },
+  runtimeVersion: ${JSON.stringify(runtimeVersion)},
 };`,
       'utf8',
     );
@@ -525,7 +553,7 @@ describe('scripts/bundle', () => {
         }),
       ).toThrow('process.exit(1)');
       expect(consoleErrorSpy).toHaveBeenCalledWith(
-        expect.stringContaining('❌ Missing runtimeVersion.ios in bundle.drop.config.js'),
+        expect.stringContaining(message),
       );
       expect(mockExecSync).not.toHaveBeenCalled();
     } finally {

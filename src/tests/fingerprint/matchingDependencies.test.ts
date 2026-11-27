@@ -1,7 +1,7 @@
 import { spawnSync } from 'child_process';
 import { Minimatch } from 'minimatch';
 
-describe('scheme-1 matching dependencies', () => {
+describe('fingerprint matching dependencies', () => {
   it('matches multi-globstar paths and treats empty trailing extglobs as empty components', () => {
     expect(new Minimatch('**/a/b/c/**/d/**', { dot: true }).match('a/b/c/d/file.kt')).toBe(true);
     for (const pattern of ['native/*(x)', 'native/?(x)']) {
@@ -15,10 +15,9 @@ describe('scheme-1 matching dependencies', () => {
     const result = spawnSync(process.execPath, ['-e', `
       const assert = require('node:assert/strict');
       const { Minimatch } = require('minimatch');
-      const matcher = new Minimatch('**/../x/'.repeat(32) + 'file.kt', {
+      assert.throws(() => new Minimatch('**/../x/'.repeat(32) + 'file.kt', {
         optimizationLevel: 2, braceExpandMax: 64,
-      });
-      assert(matcher.globParts.length <= 64);
+      }), { name: 'RangeError', message: /too many patterns/ });
     `], { cwd: process.cwd(), timeout: 5000, encoding: 'utf8' });
     expect(result.error).toBeUndefined();
     expect(result.status).toBe(0);

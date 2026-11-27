@@ -14,7 +14,6 @@ import {
   assertExpoUpdatesDoesNotOwnStartup,
   detectProjectType,
   evaluateExpoConfig,
-  resolveBundleDropRuntimeVersionAuthority,
 } from '../../expo';
 import { resolveModuleFrom, type ModuleResolver } from '../../scripts/resolveModule';
 import { assertMatchingServerOrigin, DEFAULT_SERVER_URL, normalizeServerUrl } from '../serverUrl';
@@ -286,8 +285,6 @@ export async function runUpload(
       );
     }
     if (detectedProjectType === 'expo') {
-      resolveBundleDropRuntimeVersionAuthority(projectRoot, 'ios');
-      resolveBundleDropRuntimeVersionAuthority(projectRoot, 'android');
       const { exp } = evaluateExpoConfig(projectRoot);
       assertExpoUpdatesDoesNotOwnStartup(projectRoot, exp);
     }

@@ -6,11 +6,21 @@ describe('runtime compatibility display metadata', () => {
     expect(runtimeCompatibilityMetadata({ ios: runtime }, 'ios', runtime)).toEqual({ compatibilitySource: 'manual' });
     expect(runtimeCompatibilityMetadata({ source: 'expo' }, 'ios', 'expo-runtime')).toEqual({ compatibilitySource: 'manual' });
   });
-  it('emits identical scheme 1 metadata with or without a public scheme option', () => {
+  it('emits Scheme 2 metadata by default or when explicitly selected', () => {
     const config = { compatibilitySource: 'fingerprint', ios: ' 4.0.27 ' };
-    const expected = { compatibilitySource: 'fingerprint', fingerprint: { schemeVersion: 1, hash: runtime, manualBoundary: '4.0.27' } };
-    expect(runtimeCompatibilityMetadata(config, 'ios', runtime)).toEqual(expected);
-    expect(runtimeCompatibilityMetadata({ ...config, fingerprint: { schemeVersion: 1 } }, 'ios', runtime)).toEqual(expected);
-    expect(runtimeCompatibilityMetadata(config, 'android', runtime).fingerprint?.manualBoundary).toBeNull();
+    const defaultRuntime = `bdfp2-${'b'.repeat(64)}`;
+    expect(runtimeCompatibilityMetadata(config, 'ios', defaultRuntime)).toEqual({
+      compatibilitySource: 'fingerprint',
+      fingerprint: { schemeVersion: 2, hash: defaultRuntime, manualBoundary: '4.0.27' },
+    });
+    expect(runtimeCompatibilityMetadata({ ...config, fingerprint: { schemeVersion: 2 } }, 'ios', defaultRuntime)).toEqual({
+      compatibilitySource: 'fingerprint',
+      fingerprint: { schemeVersion: 2, hash: defaultRuntime, manualBoundary: '4.0.27' },
+    });
+    expect(runtimeCompatibilityMetadata(config, 'android', defaultRuntime).fingerprint?.manualBoundary).toBeNull();
+  });
+  it('rejects retired fingerprints passed as a build identity under fingerprint authority', () => {
+    expect(() => runtimeCompatibilityMetadata({ compatibilitySource: 'fingerprint' }, 'ios', runtime))
+      .toThrow(/Scheme 1 is retired.*0\.13\.1/);
   });
 });

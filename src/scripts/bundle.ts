@@ -234,7 +234,7 @@ export function runBundleScript(options: BundleScriptOptions = {}) {
   const spawnProcess = options.spawnProcess || spawnSync;
   const resolveModule = options.resolveModule || resolveModuleFrom;
   const platform = options?.platform || process.argv[2] || 'ios';
-  if (!['ios', 'android'].includes(platform)) {
+  if (platform !== 'ios' && platform !== 'android') {
     console.error('❌ Please provide platform: ios or android');
     process.exit(1);
   }
@@ -252,26 +252,26 @@ export function runBundleScript(options: BundleScriptOptions = {}) {
   const generateSourceMap = options?.sourcemap ?? process.argv.includes('--sourcemap');
   const appVersion = process.env.BUNDLE_DROP_APP_VERSION;
 
-  let runtimeVersion: string | undefined;
   const configPath = path.resolve(projectRoot, 'bundle.drop.config.js');
   if (!fs.existsSync(configPath)) {
     console.error('❌ bundle.drop.config.js not found in project root');
     process.exit(1);
   }
 
-  //eslint-disable-next-line
-  const cfg = require(configPath) as Record<string, unknown>;
-  runtimeVersion = (cfg?.runtimeVersion as Record<string, string> | undefined)?.[platform];
-  if ((cfg?.runtimeVersion as Record<string, unknown> | undefined)?.compatibilitySource === 'fingerprint') {
-    const authority = resolveBundleDropRuntimeVersionAuthority(projectRoot, platform as 'ios' | 'android');
-    if (authority.source === 'bundle-drop') runtimeVersion = authority.runtimeVersion;
-  }
-  if (!runtimeVersion) {
-    console.error(
-      `❌ Missing runtimeVersion.${platform} in bundle.drop.config.js. Example: runtimeVersion: { ios: "1.0.0", android: "1.0.0" }`,
-    );
+  let runtimeAuthority;
+  try {
+    runtimeAuthority = resolveBundleDropRuntimeVersionAuthority(projectRoot, platform);
+  } catch (error) {
+    console.error(`❌ ${(error as Error).message}`);
     process.exit(1);
   }
+  if (runtimeAuthority.source === 'expo') {
+    console.error('❌ runtimeVersion.source: expo is only supported for Expo projects.');
+    process.exit(1);
+  }
+  const { runtimeVersion } = runtimeAuthority;
+  //eslint-disable-next-line
+  const cfg = require(configPath) as Record<string, unknown>;
 
   if (!appVersion) {
     console.error('❌ BUNDLE_DROP_APP_VERSION is required so bundle-manifest.json can include the app version');
@@ -403,11 +403,11 @@ export function runBundleScript(options: BundleScriptOptions = {}) {
   }
 
   const artifact = buildCanonicalArtifact({
-    platform: platform as 'ios' | 'android',
+    platform,
     appVersion,
     runtimeVersion,
-    runtimeCompatibility: runtimeCompatibilityMetadata(cfg.runtimeVersion, platform as 'ios' | 'android', runtimeVersion),
-    buildNumber: normalizeBuildNumber(process.env.BUNDLE_DROP_BUILD_NUMBER, platform as 'ios' | 'android'),
+    runtimeCompatibility: runtimeCompatibilityMetadata(cfg.runtimeVersion, platform, runtimeVersion),
+    buildNumber: normalizeBuildNumber(process.env.BUNDLE_DROP_BUILD_NUMBER, platform),
     bundlePath,
     assetsDir,
     outputDir,

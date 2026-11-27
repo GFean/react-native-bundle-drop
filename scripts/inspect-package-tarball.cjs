@@ -101,19 +101,11 @@ try {
   fail(`package/package.json is invalid: ${error.message}`);
 }
 
-const { checkPackagedFingerprintContract } = require('./check-fingerprint-contract.cjs');
+const { checkFingerprintPackageFiles } = require('./check-fingerprint-package-files.cjs');
 try {
-  const readPackedFile = file => runTar(['-xOzf', artifactPath, `package/${file}`], null);
-  const contract = JSON.parse(readPackedFile('third_party/expo-fingerprint/scheme-1-contract.json'));
-  checkPackagedFingerprintContract(packageJson, contract, readPackedFile);
-  for (const directory of ['lib/fingerprint', 'third_party/expo-fingerprint/build']) {
-    const actual = entries.filter(entry => entry.startsWith(`package/${directory}/`) && !entry.endsWith('/'))
-      .map(entry => entry.slice('package/'.length)).sort();
-    const expected = Object.keys(contract.packagedFiles).filter(file => file.startsWith(`${directory}/`)).sort();
-    if (JSON.stringify(actual) !== JSON.stringify(expected)) throw new Error(`Unexpected scheme-1 helper inventory: ${directory}`);
-  }
+  checkFingerprintPackageFiles(entries.map(entry => entry.slice('package/'.length)));
 } catch (error) {
-  fail(`scheme-1 contract: ${error.message}`);
+  fail(error.message);
 }
 
 const stableVersionPattern = /^\d+\.\d+\.\d+$/;

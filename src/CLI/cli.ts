@@ -223,8 +223,8 @@ ${chalk.bold('Examples:')}
     .option('--output <path>', 'Write the source digest report')
     .option('--compare <path>', 'Compare sources with a previous report')
     .option('--json', 'Print the report as JSON')
-    .description('Inspect scheme-1 native runtime fingerprint inputs')
-    .action(options => require('./scripts/fingerprint-cli').runFingerprintCli(options));
+    .description('Inspect native runtime fingerprint inputs')
+    .action(options => require('./scripts/fingerprint-command').runFingerprintCommand(options));
 
   program
     .command('upload <platform>')

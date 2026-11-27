@@ -14,7 +14,7 @@ const mockRunDoctor = jest.fn();
 const mockWriteEasBuildReceipt = jest.fn();
 const mockRunSightCommand = jest.fn();
 const mockRunFingerprintCli = jest.fn();
-jest.mock('../../CLI/scripts/fingerprint-cli', () => ({ runFingerprintCli: (...args: unknown[]) => mockRunFingerprintCli(...args) }));
+jest.mock('../../CLI/scripts/fingerprint-command', () => ({ runFingerprintCommand: (...args: unknown[]) => mockRunFingerprintCli(...args) }));
 const mockDetectProjectType = jest.fn(
   (_options?: { explicitType?: 'expo' | 'bare' }): 'expo' | 'bare' => 'bare',
 );

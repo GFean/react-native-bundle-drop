@@ -16,6 +16,8 @@ const formInstances: MockFormDataInstance[] = [];
 const mockExecSync = jest.fn();
 const spawnCalls: Array<{ executable: string; args: string[]; options: unknown }> = [];
 const mockResolveExpoUploadIdentity = jest.fn();
+const mockResolveExpoBuildIdentity = jest.fn();
+const mockCalculateRuntimeFingerprint = jest.fn();
 const mockExportProjectArtifact = jest.fn();
 const mockDetectProjectType = jest.fn();
 const mockEvaluateExpoConfig = jest.fn();
@@ -70,12 +72,16 @@ jest.mock('../../../CLI/scripts/expo/build-receipt', () => ({
 jest.mock('../../../scripts/exportProject', () => ({
   exportProjectArtifact: (...args: unknown[]) => mockExportProjectArtifact(...args),
 }));
+jest.mock('../../../runtime-fingerprint/calculate', () => ({
+  calculateRuntimeFingerprint: (...args: unknown[]) => mockCalculateRuntimeFingerprint(...args),
+}));
 jest.mock('../../../expo', () => ({
   detectProjectType: (...args: unknown[]) => mockDetectProjectType(...args),
   evaluateExpoConfig: (...args: unknown[]) => mockEvaluateExpoConfig(...args),
   resolveBundleDropRuntimeVersionAuthority: (...args: unknown[]) =>
     jest.requireActual('../../../expo/runtimeVersion')
       .resolveBundleDropRuntimeVersionAuthority(...args),
+  resolveExpoBuildIdentity: (...args: unknown[]) => mockResolveExpoBuildIdentity(...args),
   assertExpoUpdatesDoesNotOwnStartup: (...args: unknown[]) =>
     jest.requireActual('../../../expo/expoUpdatesOwnership').assertExpoUpdatesDoesNotOwnStartup(...args),
 }));
@@ -229,6 +235,8 @@ describe('CLI/scripts/upload-cli', () => {
     mockExecSync.mockReset();
     spawnCalls.length = 0;
     mockResolveExpoUploadIdentity.mockReset();
+    mockResolveExpoBuildIdentity.mockReset();
+    mockCalculateRuntimeFingerprint.mockReset();
     mockExportProjectArtifact.mockReset().mockResolvedValue(undefined);
     mockDetectProjectType.mockReset().mockImplementation(() => {
       const configPath = path.join(tempProjectDir, 'bundle.drop.config.js');
@@ -2131,6 +2139,67 @@ describe('CLI/scripts/upload-cli', () => {
     } finally {
       exitSpy.mockRestore();
     }
+  });
+
+  describe.each(['ios', 'android'] as const)('Expo %s upload fingerprint inputs', platform => {
+    const otherPlatform = platform === 'ios' ? 'android' : 'ios';
+    const runtimeVersion = `bdfp2-${'a'.repeat(64)}`;
+
+    beforeEach(() => {
+      mockDetectProjectType.mockReturnValue('expo');
+      writeConfig(`module.exports = {
+        serverUrl: 'https://api.example.com',
+        org: { slug: 'alpha-org' },
+        project: { slug: 'demo-app' },
+        runtimeVersion: {
+          compatibilitySource: 'fingerprint',
+          ios: 'ios-release',
+          android: 'android-release',
+          fingerprint: { extraSources: [
+            { id: 'ios-native', type: 'file', value: 'ios-native.json', platforms: ['ios'] },
+            { id: 'android-native', type: 'file', value: 'android-native.json', platforms: ['android'] },
+          ] },
+        },
+      };`);
+      mockResolveExpoUploadIdentity.mockImplementation(
+        jest.requireActual('../../../CLI/scripts/expo/build-receipt').resolveExpoUploadIdentity,
+      );
+      mockCalculateRuntimeFingerprint.mockImplementation((projectRoot: string, requestedPlatform: string) => {
+        if (!fs.existsSync(path.join(projectRoot, `${requestedPlatform}-native.json`))) {
+          throw new Error(`Required fingerprint extra source is missing: ${requestedPlatform}-native`);
+        }
+        return { runtimeVersion };
+      });
+      mockResolveExpoBuildIdentity.mockResolvedValue({
+        platform, appVersion: '1.0.0', nativeVersion: '1.0.0(1)', runtimeVersion,
+      });
+    });
+
+    it('uploads with only the requested platform input present', async () => {
+      fs.writeFileSync(path.join(tempProjectDir, `${platform}-native.json`), '{}');
+      mockExportProjectArtifact.mockResolvedValue(prepareExpoDist(platform, runtimeVersion));
+      mockAxiosNodePost.mockResolvedValue({ data: {} });
+
+      await upload(platform, { channel: 'General', token: 'override-token' });
+
+      expect(mockCalculateRuntimeFingerprint.mock.calls.map(([, requestedPlatform]) => requestedPlatform)).toEqual([platform]);
+      expect(mockExportProjectArtifact).toHaveBeenCalledWith(expect.objectContaining({ platform }));
+      expect(mockAxiosNodePost).toHaveBeenCalledTimes(1);
+    });
+
+    it('stops before export or upload when the requested platform input is missing', async () => {
+      fs.writeFileSync(path.join(tempProjectDir, `${otherPlatform}-native.json`), '{}');
+      const exitSpy = mockProcessExit();
+      try {
+        await expect(upload(platform, { channel: 'General', token: 'override-token' })).rejects.toMatchObject({ code: 1 });
+        expect(mockLog.error).toHaveBeenCalledWith(expect.stringContaining(`Required fingerprint extra source is missing: ${platform}-native`));
+        expect(mockCalculateRuntimeFingerprint.mock.calls.map(([, requestedPlatform]) => requestedPlatform)).toEqual([platform]);
+        expect(mockExportProjectArtifact).not.toHaveBeenCalled();
+        expect(mockAxiosNodePost).not.toHaveBeenCalled();
+      } finally {
+        exitSpy.mockRestore();
+      }
+    });
   });
 
   it('blocks active Expo Updates before resolving upload identity or exporting', async () => {

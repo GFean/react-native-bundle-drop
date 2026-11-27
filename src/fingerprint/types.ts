@@ -7,8 +7,8 @@ export type FingerprintExtraSource = {
 };
 
 export type FingerprintOptions = {
-  /** Frozen scheme 1. Calculation changes require a new scheme version. */
-  schemeVersion?: 1;
+  /** Defaults to Scheme 2 when fingerprinting is enabled. */
+  schemeVersion?: 2;
   nativeProjectMode?: Partial<Record<'ios' | 'android', 'native' | 'cng'>>;
   extraSources?: FingerprintExtraSource[];
 };
@@ -23,7 +23,7 @@ export type FingerprintSourceSummary = {
 
 export type NativeFingerprint = {
   status: 'stable';
-  schemeVersion: 1;
+  schemeVersion: 2;
   platform: 'ios' | 'android';
   runtimeVersion: string;
   nativeHash: string;
